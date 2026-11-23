@@ -1,0 +1,16 @@
+# Embedded Python runtime & large release installers (uploaded via GitHub Releases)
+python_env/
+release/
+
+# Node modules
+web_studio/node_modules/
+
+# Python cache & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.log
