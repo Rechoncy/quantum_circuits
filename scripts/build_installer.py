@@ -66,6 +66,53 @@ def build_installer() -> None:
         "python_env",
     ]
 
+    # Exclude unused heavy DLLs/packages from the Setup installer payload to keep download fast (~125 MB)
+    skip_installer_files = {
+        "mkl_avx2.2.dll",
+        "mkl_sequential.2.dll",
+        "svml_dispmd.dll",
+        "mkl_vml_avx2.2.dll",
+        "mkl_vml_cmpt.2.dll",
+        "icudt73.dll",
+        "icuin73.dll",
+        "icuuc73.dll",
+        "Qt6Core.dll",
+        "Qt6Gui.dll",
+        "Qt6Widgets.dll",
+        "Qt6Svg.dll",
+        "Qt6DBus.dll",
+        "mfc140u.dll",
+        "mfc140.dll",
+        "mfc140chs.dll",
+        "mfc140cht.dll",
+        "mfc140deu.dll",
+        "mfc140enu.dll",
+        "mfc140esn.dll",
+        "mfc140fra.dll",
+        "mfc140ita.dll",
+        "mfc140jpn.dll",
+        "mfc140kor.dll",
+        "mfc140rus.dll",
+    }
+    skip_installer_dirs = {
+        "__pycache__",
+        "PyQt6",
+        "PyQt6_sip",
+        "sipbuild",
+        "pythonwin",
+        "win32",
+        "win32com",
+        "win32comext",
+        "pywin32_system32",
+        "matplotlib",
+        "mpl_toolkits",
+        "fontTools",
+        "pytest",
+        "_pytest",
+        "pygments",
+        "plugins",
+    }
+
     file_count = 0
     with zipfile.ZipFile(PAYLOAD_ZIP, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for fname in include_files:
@@ -79,10 +126,9 @@ def build_installer() -> None:
             if not dpath.is_dir():
                 continue
             for dp, dirnames, filenames in os.walk(dpath):
-                # Skip __pycache__
-                dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+                dirnames[:] = [d for d in dirnames if d not in skip_installer_dirs and not d.endswith(".dist-info")]
                 for fn in filenames:
-                    if fn.endswith((".pyc", ".pdb")):
+                    if fn.endswith((".pyc", ".pdb", ".a", ".lib")) or fn in skip_installer_files:
                         continue
                     full_p = Path(dp) / fn
                     rel_p = full_p.relative_to(ROOT).as_posix()
