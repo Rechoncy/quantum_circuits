@@ -75,11 +75,15 @@ class HardwareModel:
                     index=q,
                     freq_ghz=5.0 + 0.12 * q,
                 )
-        # Default to all-to-all or linear chain if no couplers specified
+        # Default to all-to-all for <= 32 qubits, or nearest-neighbor linear chain for large arrays
         if not self.coupler_params and self.num_qubits > 1:
-            for i in range(self.num_qubits):
-                for j in range(i + 1, self.num_qubits):
-                    self.coupler_params[(i, j)] = CouplerPhysicalParams(qubits=(i, j))
+            if self.num_qubits <= 32:
+                for i in range(self.num_qubits):
+                    for j in range(i + 1, self.num_qubits):
+                        self.coupler_params[(i, j)] = CouplerPhysicalParams(qubits=(i, j))
+            else:
+                for i in range(self.num_qubits - 1):
+                    self.coupler_params[(i, i + 1)] = CouplerPhysicalParams(qubits=(i, i + 1))
 
     # ---- Preset Experimental Platforms ----
 
@@ -120,7 +124,11 @@ class HardwareModel:
         edges = (
             list(topology)
             if topology is not None
-            else [(i, j) for i in range(num_qubits) for j in range(i + 1, num_qubits)]
+            else (
+                [(i, j) for i in range(num_qubits) for j in range(i + 1, num_qubits)]
+                if num_qubits <= 32
+                else [(i, i + 1) for i in range(num_qubits - 1)]
+            )
         )
         c_params = {}
         for u, v in edges:
@@ -175,7 +183,11 @@ class HardwareModel:
         edges = (
             list(topology)
             if topology is not None
-            else [(i, j) for i in range(num_qubits) for j in range(i + 1, num_qubits)]
+            else (
+                [(i, j) for i in range(num_qubits) for j in range(i + 1, num_qubits)]
+                if num_qubits <= 32
+                else [(i, i + 1) for i in range(num_qubits - 1)]
+            )
         )
         c_params = {}
         for u, v in edges:

@@ -73,6 +73,14 @@ function shortGateToken(raw: string): string {
   return token.length > 7 ? token.slice(0, 6) : token;
 }
 
+function formatBasisKet(bstr: string): string {
+  if (!bstr) return '|—⟩';
+  if (bstr.length <= 10) return `|${bstr}⟩`;
+  if (/^0+$/.test(bstr)) return `|0⟩⊗${bstr.length}`;
+  if (/^1+$/.test(bstr)) return `|1⟩⊗${bstr.length}`;
+  return `|${bstr.slice(0, 4)}…${bstr.slice(-4)}⟩`;
+}
+
 export const SimulateResults: React.FC<SimulateResultsProps> = ({
   project,
   simResponse,
@@ -697,8 +705,11 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                   <div className="text-[10px] font-medium text-[var(--text-secondary)] uppercase tracking-wider">
                     主导基态
                   </div>
-                  <div className="text-[15px] font-semibold font-mono-num text-[var(--text-primary)] leading-tight mt-0.5 truncate">
-                    {curDom ? `|${curDom[0]}⟩` : '—'}
+                  <div
+                    className="text-[15px] font-semibold font-mono-num text-[var(--text-primary)] leading-tight mt-0.5 truncate"
+                    title={curDom ? `|${curDom[0]}⟩` : undefined}
+                  >
+                    {curDom ? formatBasisKet(curDom[0]) : '—'}
                   </div>
                 </div>
                 {curDom && (
@@ -734,24 +745,40 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                         Bloch 分量演化
                       </span>
                       {onObservedQubitChange && project.qubits.length > 1 && (
-                        <div className="flex items-center gap-0.5 bg-black/[0.045] dark:bg-white/[0.07] p-0.5 rounded-lg shrink-0 overflow-x-auto">
-                          {project.qubits.slice(0, 5).map((q) => (
-                            <button
-                              key={q.id}
-                              onClick={() => onObservedQubitChange(q.id)}
-                              className={`px-1.5 py-0.5 rounded-md text-[10.5px] font-mono-num flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
-                                observedQubit === q.id
-                                  ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
-                                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                              }`}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <div className="flex items-center gap-0.5 bg-black/[0.045] dark:bg-white/[0.07] p-0.5 rounded-lg shrink-0 overflow-x-auto">
+                            {project.qubits.slice(0, 5).map((q) => (
+                              <button
+                                key={q.id}
+                                onClick={() => onObservedQubitChange(q.id)}
+                                className={`px-1.5 py-0.5 rounded-md text-[10.5px] font-mono-num flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
+                                  observedQubit === q.id
+                                    ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
+                                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                                }`}
+                              >
+                                <span
+                                  className="w-1.5 h-1.5 rounded-full"
+                                  style={{ backgroundColor: q.color }}
+                                />
+                                {q.name}
+                              </button>
+                            ))}
+                          </div>
+                          {project.qubits.length > 5 && (
+                            <select
+                              value={observedQubit}
+                              onChange={(e) => onObservedQubitChange(Number(e.target.value))}
+                              title="选择任意观测比特"
+                              className="h-6 px-1.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[10.5px] font-mono-num text-[var(--text-primary)] outline-none cursor-pointer"
                             >
-                              <span
-                                className="w-1.5 h-1.5 rounded-full"
-                                style={{ backgroundColor: q.color }}
-                              />
-                              {q.name}
-                            </button>
-                          ))}
+                              {project.qubits.map((q) => (
+                                <option key={q.id} value={q.id}>
+                                  {q.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </div>
                       )}
                     </div>
@@ -844,7 +871,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                         style={{ width: `${pct}%` }}
                       />
                       <span className="relative z-10 text-[11px] font-semibold text-[var(--text-primary)] whitespace-nowrap">
-                        |{bstr}⟩
+                        {formatBasisKet(bstr)}
                       </span>
                       <span className="relative z-10 text-[10.5px] font-semibold text-[#0A84FF] whitespace-nowrap shrink-0">
                         {pct.toFixed(1)}%
@@ -885,10 +912,10 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       y: primaryRes.steps.map((s) => s.populations[b] ?? 0),
                       type: 'scatter',
                       mode: 'lines+markers',
-                      name: `|${b}⟩`,
+                      name: formatBasisKet(b),
                       line: { width: 2.2, color: CHART_PALETTE[idx % CHART_PALETTE.length] },
                       marker: { size: 5 },
-                      hovertemplate: `|${b}⟩: %{y:.3f}<extra></extra>`,
+                      hovertemplate: `${formatBasisKet(b)}: %{y:.3f}<extra></extra>`,
                     }))}
                   layout={{
                     paper_bgcolor: plotBg,
@@ -935,7 +962,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     {
                       type: 'heatmap',
                       x: primaryRes.steps.map((s) => `S${s.step_index}`),
-                      y: topBasis.map((b) => `|${b}⟩`),
+                      y: topBasis.map((b) => formatBasisKet(b)),
                       z: topBasis.map((b) =>
                         primaryRes.steps.map((s) =>
                           s.step_index <= Math.ceil(clampedCursor) ? s.populations[b] ?? 0 : null
@@ -981,8 +1008,11 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     Shots: {project.sim_settings.shots.toLocaleString()}
                   </span>
                   {dominantEntry && (
-                    <span className="px-2 py-0.5 rounded-md bg-[#0A84FF]/10 text-[#0A84FF] font-semibold">
-                      主导态 |{dominantEntry[0]}⟩ ({(dominantEntry[1] * 100).toFixed(1)}%)
+                    <span
+                      className="px-2 py-0.5 rounded-md bg-[#0A84FF]/10 text-[#0A84FF] font-semibold"
+                      title={`|${dominantEntry[0]}⟩`}
+                    >
+                      主导态 {formatBasisKet(dominantEntry[0])} ({(dominantEntry[1] * 100).toFixed(1)}%)
                     </span>
                   )}
                 </div>
@@ -1038,7 +1068,9 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     return {
                       type: 'bar',
                       name: r.backend_name,
-                      x: measBasis.map((b) => `|${b}⟩`),
+                      x: measBasis.map((b) => formatBasisKet(b)),
+                      customdata: measBasis.map((b) => `|${b}⟩`),
+                      hovertemplate: '%{customdata}: %{y}<extra></extra>',
                       y: vals,
                       text:
                         measBasis.length <= 16
@@ -1074,7 +1106,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                           {
                             type: 'bar',
                             name: `基准 ${compareRun.label} (${cmpRes.backend_name})`,
-                            x: measBasis.map((b) => `|${b}⟩`),
+                            x: measBasis.map((b) => formatBasisKet(b)),
                             y: vals,
                             marker: {
                               color: '#A855F7',

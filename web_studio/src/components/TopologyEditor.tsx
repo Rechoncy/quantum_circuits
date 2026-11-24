@@ -21,34 +21,65 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
   const isRydberg = hardware.topology_mode === 'rydberg_radius';
   const rb = Math.max(0.5, hardware.blockade_radius_um);
 
-  // Compute active edges based on topology_mode
+  const n = qubits.length;
+
+  // Compute active edges based on topology_mode (using fast cell bucketing when n > 120)
   const edges: [number, number][] = [];
-  for (let i = 0; i < qubits.length; i++) {
-    for (let j = i + 1; j < qubits.length; j++) {
-      if (hardware.topology_mode === 'all') {
+  let totalEdgeCount = 0;
+  if (hardware.topology_mode === 'all') {
+    totalEdgeCount = (n * (n - 1)) / 2;
+    for (let i = 0; i < n && edges.length < 220; i++) {
+      for (let j = i + 1; j < n && edges.length < 220; j++) {
         edges.push([i, j]);
-      } else if (hardware.topology_mode === 'linear' && j === i + 1) {
-        edges.push([i, j]);
-      } else if (hardware.topology_mode === 'rydberg_radius') {
+      }
+    }
+  } else if (hardware.topology_mode === 'linear') {
+    totalEdgeCount = Math.max(0, n - 1);
+    for (let i = 0; i < n - 1 && edges.length < 220; i++) {
+      edges.push([i, i + 1]);
+    }
+  } else if (hardware.topology_mode === 'custom') {
+    for (const [u, v] of hardware.edges) {
+      if (u >= 0 && u < n && v >= 0 && v < n && u !== v) {
+        totalEdgeCount++;
+        if (edges.length < 220) edges.push([Math.min(u, v), Math.max(u, v)]);
+      }
+    }
+  } else {
+    // rydberg_radius
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
         const d = Math.hypot(qubits[i].pos_x - qubits[j].pos_x, qubits[i].pos_y - qubits[j].pos_y);
-        if (d <= rb + 1e-6) edges.push([i, j]);
-      } else if (hardware.topology_mode === 'custom') {
-        if (hardware.edges.some(([u, v]) => (u === i && v === j) || (u === j && v === i))) {
-          edges.push([i, j]);
+        if (d <= rb + 1e-6) {
+          totalEdgeCount++;
+          if (edges.length < 220) edges.push([i, j]);
         }
       }
     }
   }
 
-  // Map μm coordinates (-4..20, -10..10) into SVG viewBox (0..260, 0..170)
-  const scale = 11;
-  const ox = 36;
-  const oy = 85;
-  const toSvg = (x: number, y: number) => ({ sx: ox + x * scale, sy: oy - y * scale });
-  const fromSvg = (sx: number, sy: number) => ({
-    x: Number(((sx - ox) / scale).toFixed(1)),
-    y: Number(((oy - sy) / scale).toFixed(1)),
+  // Dynamically fit bounding box of qubit coordinates into SVG viewBox (260 x 170)
+  const xs = qubits.map((q) => q.pos_x);
+  const ys = qubits.map((q) => q.pos_y);
+  const minX = xs.length ? Math.min(...xs) : 0;
+  const maxX = xs.length ? Math.max(...xs) : 13.5;
+  const minY = ys.length ? Math.min(...ys) : 0;
+  const maxY = ys.length ? Math.max(...ys) : 0;
+  const spanX = Math.max(10, maxX - minX);
+  const spanY = Math.max(6, maxY - minY);
+  const scale = Math.min(11, 206 / spanX, 122 / spanY);
+  const cxMid = 0.5 * (minX + maxX);
+  const cyMid = 0.5 * (minY + maxY);
+  const toSvg = (x: number, y: number) => ({
+    sx: 130 + (x - cxMid) * scale,
+    sy: 85 - (y - cyMid) * scale,
   });
+  const fromSvg = (sx: number, sy: number) => ({
+    x: Number((cxMid + (sx - 130) / scale).toFixed(1)),
+    y: Number((cyMid + (85 - sy) / scale).toFixed(1)),
+  });
+  const nodeR = n <= 9 ? 10.5 : n <= 25 ? 7.2 : n <= 81 ? 4.4 : 2.8;
+  const showLabels = n <= 25;
 
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (draggingId === null || !svgRef.current) return;
@@ -80,8 +111,9 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
           </defs>
           <rect width="260" height="170" fill="url(#topoGrid)" />
 
-          {/* Rydberg blockade radius rings */}
+          {/* Rydberg blockade radius rings (rendered up to 64 atoms for visual clarity) */}
           {isRydberg &&
+            n <= 64 &&
             qubits.map((q) => {
               const { sx, sy } = toSvg(q.pos_x, q.pos_y);
               return (
@@ -110,8 +142,8 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
                 x2={p2.sx}
                 y2={p2.sy}
                 stroke="#0A84FF"
-                strokeWidth="1.8"
-                strokeOpacity="0.7"
+                strokeWidth={n > 25 ? 1.1 : 1.8}
+                strokeOpacity={n > 25 ? 0.5 : 0.7}
               />
             );
           })}
@@ -141,22 +173,25 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
                   }
                 }}
               >
+                <title>{`${q.name} (${q.pos_x} μm, ${q.pos_y} μm)`}</title>
                 <circle
-                  r={11}
-                  fill="var(--bg-panel)"
+                  r={nodeR}
+                  fill={n > 25 ? q.color : 'var(--bg-panel)'}
                   stroke={isSel ? '#0A84FF' : q.color}
-                  strokeWidth={isSel ? 2.5 : 2}
+                  strokeWidth={isSel ? 2.5 : n > 25 ? 1 : 2}
                 />
-                <text
-                  y="3.5"
-                  textAnchor="middle"
-                  fontSize="9"
-                  fontWeight="600"
-                  fill="var(--text-primary)"
-                  className="font-mono-num pointer-events-none"
-                >
-                  {q.name.slice(0, 4)}
-                </text>
+                {showLabels && (
+                  <text
+                    y={n <= 9 ? '3.5' : '2.6'}
+                    textAnchor="middle"
+                    fontSize={n <= 9 ? '9' : '7'}
+                    fontWeight="600"
+                    fill="var(--text-primary)"
+                    className="font-mono-num pointer-events-none"
+                  >
+                    {q.name.slice(0, 4)}
+                  </text>
+                )}
               </g>
             );
           })}
@@ -168,9 +203,9 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
             ? `拖动原子调整位置 · 阻塞半径 ${rb.toFixed(1)} μm`
             : hardware.topology_mode === 'custom'
             ? '依次点击两个比特以连接或断开耦合边'
-            : `当前耦合边数: ${edges.length}`}
+            : `当前耦合边数: ${totalEdgeCount}`}
         </span>
-        <span className="font-mono-num">{edges.length} 条耦合</span>
+        <span className="font-mono-num">{totalEdgeCount} 条耦合</span>
       </div>
     </div>
   );

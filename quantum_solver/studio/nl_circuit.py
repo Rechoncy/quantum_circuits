@@ -44,6 +44,8 @@ from .project_engine import (
 # ---------------------------------------------------------------------------
 
 _CN_NUM = {
+    "零": 0,
+    "〇": 0,
     "一": 1,
     "二": 2,
     "两": 2,
@@ -56,6 +58,66 @@ _CN_NUM = {
     "九": 9,
     "十": 10,
 }
+
+
+def _parse_cn_number(cn_str: str) -> Optional[int]:
+    """Parse Chinese numerals from 1 up to 999 (e.g. '十二'->12, '二十四'->24, '一百五十'->150)."""
+    s = cn_str.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if s in _CN_NUM:
+        return _CN_NUM[s]
+    total = 0
+    if "百" in s:
+        parts = s.split("百", 1)
+        h = _CN_NUM.get(parts[0], 1) if parts[0] else 1
+        total += h * 100
+        s = parts[1]
+    if "十" in s:
+        parts = s.split("十", 1)
+        t = _CN_NUM.get(parts[0], 1) if parts[0] else 1
+        total += t * 10
+        s = parts[1]
+    if s:
+        d = _CN_NUM.get(s.lstrip("零〇"))
+        if d is not None:
+            total += d
+    return total if total > 0 else None
+
+
+def _make_qubit_specs(
+    n_qubits: int,
+    init_states: Optional[Dict[int, str]] = None,
+) -> List[QubitSpec]:
+    """
+    Create N QubitSpecs with clean spatial coordinates:
+      - n <= 8: 1D chain (i * 4.5 μm, 0)
+      - n > 8: 2D boustrophedon (snake) Rydberg tweezer array so consecutive indices (q, q+1)
+        AND vertical neighbors are 4.5 μm apart (within R_b = 6.5 μm blockade radius!).
+    """
+    inits = init_states or {}
+    cols = max(1, math.ceil(math.sqrt(n_qubits)))
+    specs: List[QubitSpec] = []
+    for i in range(n_qubits):
+        if n_qubits <= 8:
+            px, py = round(i * 4.5, 1), 0.0
+        else:
+            r = i // cols
+            c = (i % cols) if (r % 2 == 0) else (cols - 1 - (i % cols))
+            px, py = round(c * 4.5, 1), round(r * 4.5, 1)
+        specs.append(
+            QubitSpec(
+                id=i,
+                name=f"q{i}",
+                color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
+                init_state=inits.get(i, "|0>"),  # type: ignore[arg-type]
+                pos_x=px,
+                pos_y=py,
+            )
+        )
+    return specs
 
 _CLAUSE_SPLIT_RE = re.compile(
     r"[，。；;\n]+|(?:\s*(?:然后|接着|随后|再|并且|之后|最后|同时|顺便|and then|then)\s*)"
@@ -95,22 +157,28 @@ _GATE_DEFAULT_PARAMS: Dict[str, List[Any]] = {
 }
 
 
-def _extract_qubit_count(text: str, default: Optional[int] = None) -> Optional[int]:
+def _extract_qubit_count(
+    text: str,
+    default: Optional[int] = None,
+    max_qubits: int = 500,
+) -> Optional[int]:
     m = re.search(
         r"(\d+)\s*(?:个)?\s*(?:量子)?(?:比特|qubit|qubits|q\b)",
         text,
         flags=re.IGNORECASE,
     )
     if m:
-        return max(1, min(12, int(m.group(1))))
+        return max(1, min(max_qubits, int(m.group(1))))
 
-    m_cn = re.search(r"([一二两三四五六七八九十])\s*(?:个)?\s*(?:量子)?比特", text)
+    m_cn = re.search(r"([零〇一二两三四五六七八九十百]+)\s*(?:个)?\s*(?:量子)?比特", text)
     if m_cn:
-        return max(1, min(12, _CN_NUM[m_cn.group(1)]))
+        val_cn = _parse_cn_number(m_cn.group(1))
+        if val_cn is not None:
+            return max(1, min(max_qubits, val_cn))
 
     q_ids = [int(x) for x in re.findall(r"\bq(\d+)\b", text, flags=re.IGNORECASE)]
     if q_ids:
-        return max(1, min(12, max(q_ids) + 1))
+        return max(1, min(max_qubits, max(q_ids) + 1))
 
     return default
 
@@ -118,21 +186,23 @@ def _extract_qubit_count(text: str, default: Optional[int] = None) -> Optional[i
 def _extract_layers(text: str, default: int = 2) -> int:
     m = re.search(r"(\d+)\s*(?:层|layers?|reps?|步重复|轮)", text, flags=re.IGNORECASE)
     if m:
-        return max(1, min(6, int(m.group(1))))
-    m_cn = re.search(r"([一二两三四五六])\s*(?:层|轮)", text)
+        return max(1, min(10, int(m.group(1))))
+    m_cn = re.search(r"([一二两三四五六七八九十]+)\s*(?:层|轮)", text)
     if m_cn:
-        return max(1, min(6, _CN_NUM[m_cn.group(1)]))
+        val_cn = _parse_cn_number(m_cn.group(1))
+        if val_cn is not None:
+            return max(1, min(10, val_cn))
     return default
 
 
 def _extract_bitstring(text: str, length: Optional[int] = None) -> Optional[str]:
-    m_ket = re.search(r"\|([01]{1,8})[>⟩]", text)
+    m_ket = re.search(r"\|([01]{1,64})[>⟩]", text)
     if m_ket:
         bs = m_ket.group(1)
         if length is None or len(bs) == length:
             return bs
     m_kw = re.search(
-        r"(?:目标态|目标|搜索|查找|隐藏串|秘密串|secret|target|marked)\D{0,8}([01]{2,8})",
+        r"(?:目标态|目标|搜索|查找|隐藏串|秘密串|secret|target|marked)\D{0,8}([01]{2,64})",
         text,
         flags=re.IGNORECASE,
     )
@@ -441,9 +511,10 @@ def _gen_bell(text: str, hw_id: Optional[str]) -> Tuple[str, str, List[str], Dic
 
 
 def _gen_ghz(text: str, hw_id: Optional[str]) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=4) or 4
-    n = max(2, min(10, n))
+    n = _extract_qubit_count(text, default=4, max_qubits=500) or 4
+    n = max(2, min(500, n))
     lines = [f"qubits {n}"]
+    ket_str = f"(|{'0'*n}⟩ + |{'1'*n}⟩)/√2" if n <= 10 else f"(|0⟩⊗{n} + |1⟩⊗{n})/√2"
     if hw_id == "hw_neutral_atom":
         lines.append("RXY(1.5708, -1.5708) 0")
         for q in range(1, n):
@@ -451,18 +522,18 @@ def _gen_ghz(text: str, hw_id: Optional[str]) -> Tuple[str, str, List[str], Dict
         for q in range(n - 1):
             lines.append(f"CZ {q} {q + 1}")
             lines.append(f"RXY(1.5708, 1.5708) {q + 1}")
-        desc = f"已生成 {n} 比特中性原子里德堡阵列 GHZ 纠缠态线路（原生拉曼 RXY + 里德堡阻塞 CZ 门），理想输出 (|{'0'*n}⟩ + |{'1'*n}⟩)/√2。"
+        desc = f"已生成 {n} 比特中性原子里德堡阵列 GHZ 纠缠态线路（原生拉曼 RXY + 里德堡阻塞 CZ 门，蛇形二维阵列排布），理想输出 {ket_str}。"
     else:
         lines.append("H 0")
         for q in range(n - 1):
             lines.append(f"CNOT {q} {q + 1}")
-        desc = f"已生成 {n} 比特 GHZ 最大纠缠态线路（H + 链式 CNOT），理想输出 (|{'0'*n}⟩ + |{'1'*n}⟩)/√2。"
+        desc = f"已生成 {n} 比特 GHZ 最大纠缠态线路（H + 链式 CNOT），理想输出 {ket_str}。"
     return f"NL_GHZ_{n}Q.qproj", desc, lines, {}, n
 
 
 def _gen_w_state(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=3) or 3
-    n = max(3, min(4, n))
+    n = _extract_qubit_count(text, default=3, max_qubits=24) or 3
+    n = max(3, min(24, n))
     lines = [f"qubits {n}"]
     if n == 3:
         theta0 = 2.0 * math.acos(1.0 / math.sqrt(3.0))
@@ -476,7 +547,7 @@ def _gen_w_state(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]
             "X 0",
         ])
         desc = "已生成 3 比特精确 W 态线路，理想输出 (|100⟩ + |010⟩ + |001⟩)/√3（单激发对称纠缠态）。"
-    else:
+    elif n == 4:
         lines.extend([
             "X 0",
             "RY(0.7854) 2",
@@ -493,37 +564,51 @@ def _gen_w_state(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]
             "CNOT 3 2",
         ])
         desc = "已生成 4 比特二叉树分解精确 W 态线路，理想输出 (|1000⟩ + |0100⟩ + |0010⟩ + |0001⟩)/2。"
+    else:
+        # Exact N-qubit excitation-sharing cascade: |10...0> -> (1/sqrt(N)) sum_{j=0}^{N-1} |0...1_j...0>
+        lines.append("X 0")
+        for k in range(n - 1):
+            m_rem = n - k
+            alpha = math.acos(1.0 / math.sqrt(float(m_rem)))
+            lines.append(f"RY({alpha:.5f}) {k + 1}")
+            lines.append(f"CNOT {k} {k + 1}")
+            lines.append(f"RY({-alpha:.5f}) {k + 1}")
+            lines.append(f"CNOT {k} {k + 1}")
+            lines.append(f"CNOT {k + 1} {k}")
+        desc = f"已生成 {n} 比特受控旋转激发均分精确 W 态线路，全部 {n} 个单激发基态等概率 1/{n} 对称叠加。"
     return f"NL_W_State_{n}Q.qproj", desc, lines, {}, n
 
 
 def _gen_qft(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=3) or 3
-    n = max(2, min(6, n))
+    n = _extract_qubit_count(text, default=3, max_qubits=20) or 3
+    n = max(2, min(20, n))
     is_inv = any(k in text.lower() for k in ("逆", "inverse", "iqft", "qft†", "qft_dag"))
     lines = [f"qubits {n}"]
+    max_band = 8 if n > 10 else n
 
     def _cphase(c: int, t: int, angle: float) -> None:
         half = angle / 2.0
-        lines.append(f"RZ({half:.4f}) {c}")
-        lines.append(f"RZ({half:.4f}) {t}")
+        lines.append(f"RZ({half:.5f}) {c}")
+        lines.append(f"RZ({half:.5f}) {t}")
         lines.append(f"CNOT {c} {t}")
-        lines.append(f"RZ({-half:.4f}) {t}")
+        lines.append(f"RZ({-half:.5f}) {t}")
         lines.append(f"CNOT {c} {t}")
 
     if not is_inv:
         for j in range(n):
             lines.append(f"H {j}")
-            for k in range(j + 1, n):
+            for k in range(j + 1, min(n, j + 1 + max_band)):
                 _cphase(k, j, math.pi / (1 << (k - j)))
         for j in range(n // 2):
             lines.append(f"SWAP {j} {n - 1 - j}")
-        desc = f"已生成 {n} 比特量子傅里叶变换（QFT）线路，包含 Hadamard、精确分解的受控旋转相位门 CPhase 及末端 SWAP。"
+        approx_note = "（已对阶差 >8 的极小相位做高保真带状截断）" if n > 10 else ""
+        desc = f"已生成 {n} 比特量子傅里叶变换（QFT）线路{approx_note}，包含 Hadamard、受控相位分解及末端 SWAP。"
         title = f"NL_QFT_{n}Q.qproj"
     else:
         for j in range(n // 2):
             lines.append(f"SWAP {j} {n - 1 - j}")
         for j in range(n - 1, -1, -1):
-            for k in range(n - 1, j, -1):
+            for k in range(min(n - 1, j + max_band), j, -1):
                 _cphase(k, j, -math.pi / (1 << (k - j)))
             lines.append(f"H {j}")
         desc = f"已生成 {n} 比特逆量子傅里叶变换（IQFT）线路。"
@@ -533,36 +618,57 @@ def _gen_qft(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
 
 def _gen_grover(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
     bs = _extract_bitstring(text)
-    n = _extract_qubit_count(text, default=len(bs) if bs else 2) or 2
-    n = max(2, min(3, n))
-    target = bs if (bs and len(bs) == n) else ("1" * n)
+    n_data = _extract_qubit_count(text, default=len(bs) if bs else 3, max_qubits=12) or 3
+    n_data = max(2, min(12, n_data))
+    target = bs if (bs and len(bs) == n_data) else ("1" * n_data)
 
-    lines = [f"qubits {n}"]
-    for q in range(n):
+    n_anc = max(0, n_data - 3)
+    total_q = n_data + n_anc
+    lines = [f"qubits {total_q}"]
+    for q in range(n_data):
         lines.append(f"H {q}")
 
-    n_iters = 1 if n == 2 else 2
-    for _ in range(n_iters):
+    def _emit_mcz() -> None:
+        if n_data == 2:
+            lines.append("CZ 0 1")
+            return
+        if n_data == 3:
+            lines.append("CCZ 0 1 2")
+            return
+        # Clean zeroed Toffoli ladder onto ancillas [n_data .. total_q-1], CCZ, and exact uncompute
+        anc0 = n_data
+        lines.append(f"CCX 0 1 {anc0}")
+        for idx in range(2, n_data - 2):
+            lines.append(f"CCX {idx} {anc0 + idx - 2} {anc0 + idx - 1}")
+        last_anc = total_q - 1
+        lines.append(f"CCZ {last_anc} {n_data - 2} {n_data - 1}")
+        for idx in range(n_data - 3, 1, -1):
+            lines.append(f"CCX {idx} {anc0 + idx - 2} {anc0 + idx - 1}")
+        lines.append(f"CCX 0 1 {anc0}")
+
+    opt_iters = max(1, min(8, int(math.floor((math.pi / 4.0) * math.sqrt(1 << n_data)))))
+    for _ in range(opt_iters):
         for q, bit in enumerate(target):
             if bit == "0":
                 lines.append(f"X {q}")
-        lines.append("CZ 0 1" if n == 2 else "CCZ 0 1 2")
+        _emit_mcz()
         for q, bit in enumerate(target):
             if bit == "0":
                 lines.append(f"X {q}")
 
-        for q in range(n):
+        for q in range(n_data):
             lines.append(f"H {q}")
-        for q in range(n):
+        for q in range(n_data):
             lines.append(f"X {q}")
-        lines.append("CZ 0 1" if n == 2 else "CCZ 0 1 2")
-        for q in range(n):
+        _emit_mcz()
+        for q in range(n_data):
             lines.append(f"X {q}")
-        for q in range(n):
+        for q in range(n_data):
             lines.append(f"H {q}")
 
-    desc = f"已生成 {n} 比特 Grover 量子搜索线路（目标标记态 |{target}⟩，执行 {n_iters} 轮 Oracle + Diffusion 振幅放大）。"
-    return f"NL_Grover_{n}Q_{target}.qproj", desc, lines, {}, n
+    anc_note = f"（含 {n_anc} 个自动退计算工作辅助比特，总计 {total_q}Q）" if n_anc > 0 else ""
+    desc = f"已生成 {n_data} 数据比特 Grover 量子搜索线路{anc_note}，目标标记态 |{target}⟩，执行 {opt_iters} 轮振幅放大。"
+    return f"NL_Grover_{n_data}Q_{target[:8]}.qproj", desc, lines, {}, total_q
 
 
 def _gen_teleportation(_text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
@@ -585,8 +691,10 @@ def _gen_teleportation(_text: str) -> Tuple[str, str, List[str], Dict[str, float
 def _gen_bv_or_dj(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
     secret = _extract_bitstring(text)
     if secret is None:
-        n_data = max(2, min(5, (_extract_qubit_count(text, default=4) or 4) - 1))
-        secret = "10110"[:n_data]
+        req_n = _extract_qubit_count(text, default=5, max_qubits=200) or 5
+        n_data = max(2, min(199, req_n - 1))
+        pattern = "1011010011"
+        secret = (pattern * ((n_data // len(pattern)) + 1))[:n_data]
     n_data = len(secret)
     n = n_data + 1
     anc = n - 1
@@ -598,36 +706,55 @@ def _gen_bv_or_dj(text: str) -> Tuple[str, str, List[str], Dict[str, float], int
             lines.append(f"CNOT {q} {anc}")
     for q in range(n_data):
         lines.append(f"H {q}")
-    desc = f"已生成 {n} 比特 Bernstein-Vazirani 隐藏比特串线路（隐藏串 s = {secret}，q{anc} 为相位反冲辅助比特）。"
-    return f"NL_BV_{secret}.qproj", desc, lines, {}, n
+    s_disp = secret if len(secret) <= 16 else f"{secret[:8]}…{secret[-4:]} ({n_data} bits)"
+    desc = f"已生成 {n} 比特 Bernstein-Vazirani 隐藏比特串线路（隐藏串 s = {s_disp}，q{anc} 为相位反冲辅助比特）。"
+    return f"NL_BV_{n}Q.qproj", desc, lines, {}, n
 
 
 def _gen_vqe_ansatz(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=4) or 4
-    n = max(2, min(8, n))
+    n = _extract_qubit_count(text, default=4, max_qubits=24) or 4
+    n = max(2, min(24, n))
     layers = _extract_layers(text, default=2)
     lines = [f"qubits {n}"]
     variables: Dict[str, float] = {}
-    p_idx = 0
-    for l in range(layers):
+    if n <= 10:
+        p_idx = 0
+        for l in range(layers):
+            for q in range(n):
+                v_y = f"theta_{p_idx}"
+                variables[v_y] = round(0.4 + 0.35 * ((l + q) % 4), 4)
+                lines.append(f"RY({v_y}) {q}")
+                p_idx += 1
+            for q in range(n - 1):
+                lines.append(f"CZ {q} {q + 1}")
         for q in range(n):
-            v_y = f"theta_{p_idx}"
-            variables[v_y] = round(0.4 + 0.35 * ((l + q) % 4), 4)
-            lines.append(f"RY({v_y}) {q}")
-            p_idx += 1
-        for q in range(n - 1):
-            lines.append(f"CZ {q} {q + 1}")
-    for q in range(n):
-        v_z = f"phi_{q}"
-        variables[v_z] = round(0.25 * (q + 1), 4)
-        lines.append(f"RZ({v_z}) {q}")
+            v_z = f"phi_{q}"
+            variables[v_z] = round(0.25 * ((q % 6) + 1), 4)
+            lines.append(f"RZ({v_z}) {q}")
+    else:
+        # Sublattice-grouped variational parameters so 12..24Q VQE keeps a crisp variable inspector
+        for l in range(layers):
+            v_even = f"theta_l{l}_a"
+            v_odd = f"theta_l{l}_b"
+            variables[v_even] = round(0.55 + 0.25 * l, 4)
+            variables[v_odd] = round(0.85 + 0.2 * l, 4)
+            for q in range(n):
+                lines.append(f"RY({v_even if q % 2 == 0 else v_odd}) {q}")
+            for q in range(0, n - 1, 2):
+                lines.append(f"CZ {q} {q + 1}")
+            for q in range(1, n - 1, 2):
+                lines.append(f"CZ {q} {q + 1}")
+        variables["phi_even"] = 0.35
+        variables["phi_odd"] = 0.70
+        for q in range(n):
+            lines.append(f"RZ({'phi_even' if q % 2 == 0 else 'phi_odd'}) {q}")
     desc = f"已生成 {n} 比特 {layers} 层硬件高效变分线路（Hardware-Efficient VQE Ansatz），包含 {len(variables)} 个可扫描符号参数。"
     return f"NL_VQE_{n}Q_L{layers}.qproj", desc, lines, variables, n
 
 
 def _gen_qaoa(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=4) or 4
-    n = max(2, min(8, n))
+    n = _extract_qubit_count(text, default=4, max_qubits=24) or 4
+    n = max(2, min(24, n))
     p_layers = _extract_layers(text, default=1)
     lines = [f"qubits {n}"]
     variables: Dict[str, float] = {}
@@ -649,27 +776,148 @@ def _gen_qaoa(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
     return f"NL_QAOA_{n}Q_p{p_layers}.qproj", desc, lines, variables, n
 
 
-def _gen_qec_3q(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    is_phase = any(k in text.lower() for k in ("相位翻转", "phase flip", "phase-flip", "z纠错"))
-    lines = ["qubits 5", "RY(theta) 0", "CNOT 0 1", "CNOT 0 2"]
-    if is_phase:
-        lines.extend(["H 0", "H 1", "H 2", "PHASE_FLIP(p_err) 1", "H 0", "H 1", "H 2"])
-        title = "NL_QEC_PhaseFlip_5Q.qproj"
-        desc = "已生成 3 比特相位翻转纠错编码 + 双校验子（q3, q4）稳定子测量线路。"
+def _gen_qec(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
+    low = text.lower()
+    # 1. Rotated Surface Code d=3 (17Q: 9 data + 8 X/Z stabilizer ancillas)
+    if any(k in low for k in ("表面码", "surface code", "surface")):
+        lines = ["qubits 17"]
+        # Data qubits 0..8 initialized in logical |+_L>, ancillas 9..16 measure X and Z plaquettes
+        for d_q in range(9):
+            lines.append(f"H {d_q}")
+        x_plaquettes = [
+            (9, [0, 1, 3, 4]),
+            (10, [4, 5, 7, 8]),
+            (11, [1, 2]),
+            (12, [6, 7]),
+        ]
+        z_plaquettes = [
+            (13, [1, 2, 4, 5]),
+            (14, [3, 4, 6, 7]),
+            (15, [0, 3]),
+            (16, [5, 8]),
+        ]
+        for anc, d_list in x_plaquettes:
+            lines.append(f"H {anc}")
+            for dq in d_list:
+                lines.append(f"CNOT {anc} {dq}")
+            lines.append(f"H {anc}")
+        for anc, d_list in z_plaquettes:
+            for dq in d_list:
+                lines.append(f"CNOT {dq} {anc}")
+        return (
+            "NL_SurfaceCode_d3_17Q.qproj",
+            "已生成 17 比特旋转表面码（Rotated Surface Code d=3：9 个数据比特 q0..q8 + 8 个 X/Z 稳定子校验辅助比特 q9..q16）。",
+            lines,
+            {},
+            17,
+        )
+
+    # 2. Steane [[7,1,3]] code
+    if "steane" in low or "斯蒂恩" in text or ("7" in text and "纠错" in text and "重复" not in text):
+        lines = [
+            "qubits 7",
+            "H 0", "H 1", "H 2",
+            "CNOT 0 3", "CNOT 0 4", "CNOT 0 5",
+            "CNOT 1 3", "CNOT 1 4", "CNOT 1 6",
+            "CNOT 2 3", "CNOT 2 5", "CNOT 2 6",
+        ]
+        return (
+            "NL_Steane_7Q_Code.qproj",
+            "已生成 7 比特 Steane [[7,1,3]] CSS 量子纠错编码线路（制备逻辑 |0_L⟩ 态）。",
+            lines,
+            {},
+            7,
+        )
+
+    # 3. Shor [[9,1,3]] code
+    if "shor" in low or "肖尔" in text or ("9" in text and "纠错" in text and "重复" not in text):
+        lines = [
+            "qubits 9",
+            "H 0",
+            "CNOT 0 3", "CNOT 0 6",
+            "H 0", "H 3", "H 6",
+            "CNOT 0 1", "CNOT 0 2",
+            "CNOT 3 4", "CNOT 3 5",
+            "CNOT 6 7", "CNOT 6 8",
+        ]
+        return (
+            "NL_Shor_9Q_Code.qproj",
+            "已生成 9 比特 Shor [[9,1,3]] 任意单比特错误纠错编码线路。",
+            lines,
+            {},
+            9,
+        )
+
+    # 4. General distance-d Repetition Code (2d - 1 qubits, up to 499Q!)
+    is_phase = any(k in low for k in ("相位翻转", "phase flip", "phase-flip", "z纠错"))
+    m_dist = re.search(r"(?:码距|距离|d\s*=)\s*(\d+)", low)
+    req_q = _extract_qubit_count(text, default=None, max_qubits=499)
+
+    if m_dist:
+        d = max(3, min(250, int(m_dist.group(1))))
+    elif req_q is not None and req_q >= 7:
+        d = max(3, (req_q + 1) // 2)
     else:
-        lines.extend(["BIT_FLIP(p_err) 1"])
-        title = "NL_QEC_BitFlip_5Q.qproj"
-        desc = "已生成 3 比特比特翻转重复码编码 + 双校验子（q3, q4）纠错线路。"
-    lines.extend(["CNOT 0 3", "CNOT 1 3", "CNOT 1 4", "CNOT 2 4"])
-    return title, desc, lines, {"theta": 1.0472, "p_err": 0.05}, 5
+        d = 3
+
+    n_total = 2 * d - 1
+    if d == 3 and req_q is None:
+        lines = ["qubits 5", "RY(theta) 0", "CNOT 0 1", "CNOT 0 2"]
+        if is_phase:
+            lines.extend(["H 0", "H 1", "H 2", "PHASE_FLIP(p_err) 1", "H 0", "H 1", "H 2"])
+            title = "NL_QEC_PhaseFlip_5Q.qproj"
+            desc = "已生成 3 数据比特相位翻转纠错编码 + 双校验子（q3, q4）稳定子测量线路。"
+        else:
+            lines.extend(["BIT_FLIP(p_err) 1"])
+            title = "NL_QEC_BitFlip_5Q.qproj"
+            desc = "已生成 3 数据比特翻转重复码编码 + 双校验子（q3, q4）纠错线路。"
+        lines.extend(["CNOT 0 3", "CNOT 1 3", "CNOT 1 4", "CNOT 2 4"])
+        return title, desc, lines, {"theta": 1.0472, "p_err": 0.05}, 5
+
+    # Scalable Clifford Repetition Code (d data qubits 0..d-1 + d-1 syndrome ancillas d..2d-2)
+    lines = [f"qubits {n_total}", "H 0"]
+    for i in range(d - 1):
+        lines.append(f"CNOT {i} {i + 1}")
+    mid_err_q = d // 2
+    if is_phase:
+        for i in range(d):
+            lines.append(f"H {i}")
+        lines.append(f"PHASE_FLIP(p_err) {mid_err_q}")
+        for i in range(d):
+            lines.append(f"H {i}")
+    else:
+        lines.append(f"BIT_FLIP(p_err) {mid_err_q}")
+    for i in range(d - 1):
+        anc = d + i
+        lines.append(f"CNOT {i} {anc}")
+        lines.append(f"CNOT {i + 1} {anc}")
+    kind_cn = "相位翻转" if is_phase else "比特翻转"
+    desc = f"已生成 {n_total} 比特可扩展{kind_cn}重复码纠错线路（码距 d={d}：{d} 个数据比特 + {d - 1} 个伴随式校验辅助比特）。"
+    return f"NL_QEC_Repetition_d{d}_{n_total}Q.qproj", desc, lines, {"p_err": 0.03}, n_total
 
 
 def _gen_cluster_state(text: str) -> Tuple[str, str, List[str], Dict[str, float], int]:
-    n = _extract_qubit_count(text, default=4) or 4
-    n = max(2, min(10, n))
+    n = _extract_qubit_count(text, default=4, max_qubits=400) or 4
+    n = max(2, min(400, n))
+    low = text.lower()
+    is_2d = any(k in low for k in ("二维", "2d", "网格", "晶格", "grid", "lattice")) and n >= 4
     lines = [f"qubits {n}"]
     for q in range(n):
         lines.append(f"H {q}")
+    if is_2d:
+        cols = max(2, int(round(math.sqrt(n))))
+        for r in range((n + cols - 1) // cols):
+            for c in range(cols):
+                idx = r * cols + c
+                if idx >= n:
+                    break
+                if c + 1 < cols and idx + 1 < n:
+                    lines.append(f"CZ {idx} {idx + 1}")
+                if idx + cols < n:
+                    lines.append(f"CZ {idx} {idx + cols}")
+        desc = f"已生成 {n} 比特二维网格 Cluster 簇态（2D 测量基量子计算资源图态）线路。"
+        return f"NL_Cluster2D_{n}Q.qproj", desc, lines, {}, n
+
     for q in range(n - 1):
         lines.append(f"CZ {q} {q + 1}")
     desc = f"已生成 {n} 比特一维线性 Cluster 簇态（图态）线路。"
@@ -732,8 +980,8 @@ def _match_canonical_algorithm(clause: str, hw_id: Optional[str]) -> Optional[Tu
         return _gen_qaoa(clause)
     if any(k in low for k in ("vqe", "变分", "ansatz", "硬件高效")):
         return _gen_vqe_ansatz(clause)
-    if any(k in low for k in ("纠错", "qec", "重复码", "校验子", "syndrome")):
-        return _gen_qec_3q(clause)
+    if any(k in low for k in ("纠错", "qec", "重复码", "校验子", "syndrome", "表面码", "surface code", "steane", "shor", "肖尔")):
+        return _gen_qec(clause)
     if any(k in low for k in ("swap test", "swap测试", "内积测试")):
         return _gen_swap_test(clause)
     if any(k in low for k in ("cluster", "簇态", "图态", "graph state")):
@@ -932,9 +1180,9 @@ def _is_refinement_intent(prompt: str, project: ProjectModel) -> bool:
     refine_keywords = (
         "改成", "改为", "换成", "替换为", "替换成", "调成", "调到", "设为", "修改",
         "删掉", "删除", "去掉", "移除", "取消", "清除", "撤销",
-        "增加一个", "增加1个", "加一个", "加1个", "加两个", "加2个", "新增比特", "添加比特", "再加", "末尾", "追加",
+        "增加", "新增比特", "添加比特", "扩容", "扩展到", "再加", "末尾", "追加",
         "切换", "改用", "翻转控制", "互换", "调大", "调小",
-        "replace", "change", "remove", "delete", "add a qubit", "append", "switch to", "set ",
+        "replace", "change", "remove", "delete", "add ", "append", "switch to", "set ", "expand",
     )
     if any(k in low for k in refine_keywords):
         return True
@@ -978,33 +1226,47 @@ def _apply_refinement_commands(
                     handled = True
 
         # ------------------------------------------------------------------
-        # 2. Add Qubit(s) (e.g. "增加 1 个比特", "添加比特 q4")
+        # 2. Add / Expand Qubit(s) (e.g. "增加 20 个比特", "扩容到 50 比特", "添加比特 q4")
         # ------------------------------------------------------------------
-        m_add_q = re.search(
-            r"(?:增加|添加|新增|加上|加|add)\s*(?:(\d+|[一二两三四])\s*个?)?\s*(?:量子)?(?:比特|qubit)",
+        m_expand_q = re.search(
+            r"(?:扩容|扩展|扩充)\s*(?:到|至|为)?\s*(\d+|[零〇一二两三四五六七八九十百]+)\s*个?\s*(?:量子)?(?:比特|qubits?|q\b)",
             clause,
             flags=re.IGNORECASE,
         )
-        if m_add_q:
-            raw_cnt = m_add_q.group(1)
-            add_cnt = int(raw_cnt) if (raw_cnt and raw_cnt.isdigit()) else _CN_NUM.get(raw_cnt or "一", 1)
-            add_cnt = max(1, min(6, add_cnt))
-            added_names: List[str] = []
-            for _ in range(add_cnt):
-                next_id = len(proj.qubits)
-                max_x = max((q.pos_x for q in proj.qubits), default=-4.5)
-                proj.qubits.append(
-                    QubitSpec(
-                        id=next_id,
-                        name=f"q{next_id}",
-                        color=QUBIT_COLORS[next_id % len(QUBIT_COLORS)],
-                        pos_x=round(max_x + 4.5, 1),
-                        pos_y=0.0,
-                    )
+        m_add_q = re.search(
+            r"(?:增加|添加|新增|加上|加|add)\s*(?:(\d+|[零〇一二两三四五六七八九十百]+)\s*个?)?\s*(?:量子)?(?:比特|qubit)",
+            clause,
+            flags=re.IGNORECASE,
+        )
+        if m_expand_q or m_add_q:
+            if m_expand_q:
+                raw_t = m_expand_q.group(1)
+                target_total = int(raw_t) if raw_t.isdigit() else (_parse_cn_number(raw_t) or len(proj.qubits))
+                target_total = max(len(proj.qubits) + 1, min(500, target_total))
+                add_cnt = target_total - len(proj.qubits)
+            else:
+                raw_cnt = m_add_q.group(1) if m_add_q else None
+                parsed_cnt = (
+                    int(raw_cnt)
+                    if (raw_cnt and raw_cnt.isdigit())
+                    else (_parse_cn_number(raw_cnt) if raw_cnt else 1)
                 )
+                add_cnt = max(1, min(500 - len(proj.qubits), parsed_cnt or 1))
+
+            old_n = len(proj.qubits)
+            new_total = old_n + add_cnt
+            grid_specs = _make_qubit_specs(new_total)
+            added_names: List[str] = []
+            for next_id in range(old_n, new_total):
+                proj.qubits.append(grid_specs[next_id])
                 added_names.append(f"q{next_id}")
+            # If register grew past 8 qubits and old qubits were on a 1D line, re-layout into clean 2D snake grid
+            if new_total > 8 and all(abs(q.pos_y) < 1e-6 for q in proj.qubits[:old_n]):
+                for idx_q, gq in enumerate(grid_specs):
+                    proj.qubits[idx_q].pos_x = gq.pos_x
+                    proj.qubits[idx_q].pos_y = gq.pos_y
+
             # Extend trailing uniform noise layer (if present on all old qubits) & trailing MEASURE
-            old_n = len(proj.qubits) - add_cnt
             last_gate_step = max((o.step for o in proj.operations if o.kind == "gate"), default=-1)
             trailing_noises = [o for o in proj.operations if o.kind == "noise" and o.step > last_gate_step]
             if trailing_noises and len({q for o in trailing_noises for q in o.qubits}) >= old_n:
@@ -1023,9 +1285,13 @@ def _apply_refinement_commands(
             for op in proj.operations:
                 if op.kind == "measure":
                     op.qubits = list(range(len(proj.qubits)))
-            changes.append(f"新增 {add_cnt} 个比特 ({', '.join(added_names)})")
+            names_str = (
+                ", ".join(added_names)
+                if len(added_names) <= 5
+                else f"{added_names[0]}..{added_names[-1]}"
+            )
+            changes.append(f"新增 {add_cnt} 个比特 ({names_str}，共 {len(proj.qubits)}Q)")
             handled = True
-            # Note: If the same clause ALSO specifies a gate on the new qubit (e.g. "增加比特并与q3做CZ纠缠"), don't skip gate parsing!
             if _match_gate_name_in_fragment(clause, proj.custom_gates) is None and "纠缠" not in clause:
                 continue
 
@@ -1413,10 +1679,28 @@ def _call_external_llm(req: NlCircuitRequest) -> Tuple[str, str, str, Dict[str, 
 # Main Public Entrypoint
 # ---------------------------------------------------------------------------
 
+def _choose_recommended_backend(proj: ProjectModel) -> str:
+    """Pick the optimal Quantum Studio solver backend based on qubit count and Cliffordness."""
+    n = len(proj.qubits)
+    if n <= 6:
+        return "qutip"
+    if n <= 10:
+        return "kraus"
+    try:
+        from .project_engine import compile_project_circuit
+
+        circ = compile_project_circuit(proj)
+        if circ.is_clifford() or n > 24:
+            return "stim"
+        return "trajectory"
+    except Exception:
+        return "stim" if n > 24 else "trajectory"
+
+
 def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
     prompt = req.prompt.strip()
     if not prompt:
-        raise ValueError("请输入自然语言描述或修改指令，例如：「生成 4 比特中性原子 GHZ 态」或「把噪声改成 3%」。")
+        raise ValueError("请输入自然语言描述或修改指令，例如：「生成 50 比特中性原子 GHZ 态」或「16 比特变分 VQE 线路」。")
 
     before_q = len(req.project.qubits)
     before_g = sum(1 for o in req.project.operations if o.kind == "gate")
@@ -1435,16 +1719,11 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
         base_proj = req.project.model_copy(deep=True)
         m_q = re.search(r"^\s*qubits\s+(\d+)", dsl, flags=re.IGNORECASE | re.MULTILINE)
         n_target = int(m_q.group(1)) if m_q else len(base_proj.qubits)
+        grid_specs = _make_qubit_specs(n_target)
         base_proj.qubits = [
             base_proj.qubits[i].model_copy(update={"id": i})
             if i < len(base_proj.qubits)
-            else QubitSpec(
-                id=i,
-                name=f"q{i}",
-                color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
-                pos_x=round(i * 4.5, 1),
-                pos_y=0.0,
-            )
+            else grid_specs[i]
             for i in range(n_target)
         ]
         new_qubits, new_ops, merged_vars = dsl_to_project_ops(dsl, base_proj)
@@ -1474,13 +1753,13 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
         recommended_hw = detected_hw
         clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(prompt) if c.strip()]
 
-        # Try matching canonical algorithm in the first clause or entire prompt
+        # Try matching canonical algorithm in the first clause or entire prompt, passing full `prompt`
+        # so parameters in follow-up clauses (e.g. "，目标态 |10110⟩" or "，3 层") are always visible!
         canonical_match = None
         matched_clause_idx = -1
         for idx, c in enumerate(clauses):
-            m_alg = _match_canonical_algorithm(c, detected_hw)
-            if m_alg is not None:
-                canonical_match = m_alg
+            if _match_canonical_algorithm(c, detected_hw) is not None:
+                canonical_match = _match_canonical_algorithm(prompt, detected_hw) or _match_canonical_algorithm(c, detected_hw)
                 matched_clause_idx = idx
                 break
         if canonical_match is None:
@@ -1489,22 +1768,14 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
 
         if canonical_match is not None:
             title, explanation, dsl_lines, extra_vars, n_alg = canonical_match
-            # Allow qubit count mentioned in prompt to expand if free-form clauses reference higher qubits
-            n_target = max(n_alg, _extract_qubit_count(prompt, default=n_alg) or n_alg)
+            # Only expand beyond n_alg if explicit higher qubit references q_k appear in extra clauses
+            explicit_q_ids = [int(x) for x in re.findall(r"\bq(\d+)\b", prompt, flags=re.IGNORECASE)]
+            n_target = max(n_alg, (max(explicit_q_ids) + 1) if explicit_q_ids else n_alg)
             if n_target != n_alg and dsl_lines and dsl_lines[0].startswith("qubits "):
                 dsl_lines[0] = f"qubits {n_target}"
 
             base_proj = req.project.model_copy(deep=True)
-            base_proj.qubits = [
-                QubitSpec(
-                    id=i,
-                    name=f"q{i}",
-                    color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
-                    pos_x=round(i * 4.5, 1),
-                    pos_y=0.0,
-                )
-                for i in range(n_target)
-            ]
+            base_proj.qubits = _make_qubit_specs(n_target)
             base_proj.variables = {}
             new_qubits, new_ops, merged_vars = dsl_to_project_ops("\n".join(dsl_lines), base_proj)
             merged_vars.update(extra_vars)
@@ -1517,7 +1788,7 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
                 if idx == matched_clause_idx:
                     # Still check if the matched clause itself requested noise (e.g. "生成 4Q GHZ 并加 1% 噪声")
                     n_info = _extract_noise_clause(c)
-                    if n_info is not None:
+                    if n_info is not None and not any(o.kind == "noise" for o in new_ops):
                         nk, np_val = n_info
                         for q in range(len(new_qubits)):
                             new_ops.append(
@@ -1599,27 +1870,17 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
                 preview_proj.active_hardware_id = recommended_hw
         else:
             # Free-form clause-by-clause circuit construction from scratch
-            n_target = _extract_qubit_count(prompt, default=2) or 2
+            n_target = _extract_qubit_count(prompt, default=2, max_qubits=500) or 2
             init_states = _extract_init_states(prompt, n_target)
             base_proj = req.project.model_copy(deep=True)
-            base_proj.qubits = [
-                QubitSpec(
-                    id=i,
-                    name=f"q{i}",
-                    color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
-                    init_state=init_states.get(i, "|0>"),  # type: ignore[arg-type]
-                    pos_x=round(i * 4.5, 1),
-                    pos_y=0.0,
-                )
-                for i in range(n_target)
-            ]
+            base_proj.qubits = _make_qubit_specs(n_target, init_states=init_states)
             base_proj.variables = {}
             new_ops_list: List[CircuitOpModel] = []
             saw_meas = False
 
             for c in clauses:
                 low_c = c.lower()
-                if re.fullmatch(r"(?:创建|新建|使用|设置|准备)?\s*(?:\d+|[一二两三四五六七八九十])\s*(?:个)?(?:量子)?(?:比特|qubits?)", low_c):
+                if re.fullmatch(r"(?:创建|新建|使用|设置|准备)?\s*(?:\d+|[零〇一二两三四五六七八九十百]+)\s*(?:个)?(?:量子)?(?:比特|qubits?)", low_c):
                     continue
                 if ("初态" in c or "初始化" in c) and _match_gate_name_in_fragment(c, base_proj.custom_gates) is None:
                     continue
@@ -1635,7 +1896,7 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
 
             if not new_ops_list:
                 raise ValueError(
-                    "未能从描述中识别出量子算法或门指令。可尝试：「生成 4 比特中性原子 GHZ 态」、「3 比特 QFT 线路」，或分步描述门操作如「对 q0 做 H，q0 和 q1 做 CNOT，最后测量」。"
+                    "未能从描述中识别出量子算法或门指令。可尝试：「生成 50 比特中性原子 GHZ 态」、「16 比特变分 VQE 线路」、「17 比特旋转表面码」，或分步描述门操作。"
                 )
 
             no_meas = any(k in prompt.lower() for k in ("不测量", "无需测量", "no measure"))
@@ -1664,7 +1925,7 @@ def generate_circuit_from_nl(req: NlCircuitRequest) -> Dict[str, Any]:
     clean_qasm = project_to_openqasm3(preview_proj)
     after_q = len(preview_proj.qubits)
     after_g = sum(1 for o in preview_proj.operations if o.kind == "gate")
-    rec_backend = "qutip" if after_q <= 5 else ("kraus" if after_q <= 8 else "stim")
+    rec_backend = _choose_recommended_backend(preview_proj)
 
     return {
         "title": preview_proj.name,

@@ -78,7 +78,7 @@ export interface HardwareProfileModel {
   pulse_shape: 'cosine' | 'gaussian' | 'rectangular';
 }
 
-export type SolverBackendType = 'qutip' | 'kraus' | 'stim' | 'stim_qutip' | 'compare';
+export type SolverBackendType = 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip' | 'compare';
 
 export interface SimulationSettingsModel {
   backend: SolverBackendType;
@@ -220,8 +220,8 @@ export interface NlCircuitDiffSummary {
   qubits_after: number;
   gates_before: number;
   gates_after: number;
-  noise_before: number;
-  noise_after: number;
+  noise_before?: number;
+  noise_after?: number;
 }
 
 export interface NlCircuitResponse {

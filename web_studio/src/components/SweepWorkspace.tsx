@@ -21,6 +21,14 @@ const SWEEP_PALETTE = [
   '#6366F1',
 ];
 
+function formatSweepKet(bstr: string): string {
+  if (!bstr) return '|—⟩';
+  if (bstr.length <= 10) return `|${bstr}⟩`;
+  if (/^0+$/.test(bstr)) return `|0⟩⊗${bstr.length}`;
+  if (/^1+$/.test(bstr)) return `|1⟩⊗${bstr.length}`;
+  return `|${bstr.slice(0, 4)}…${bstr.slice(-4)}⟩`;
+}
+
 export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
   sweepResponse,
   darkMode,
@@ -107,7 +115,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
     }[] = [
       {
         id: 'pop',
-        title: `基态布居 P(|${sweepResponse.target_bitstring}⟩)`,
+        title: `基态布居 P(${formatSweepKet(sweepResponse.target_bitstring)})`,
         z: sweepResponse.population_grid,
         colorscale: 'Viridis',
         zmin: 0,
@@ -314,10 +322,10 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
                   y: sweepResponse.populations[b],
                   type: 'scatter',
                   mode: 'lines+markers',
-                  name: `|${b}⟩`,
+                  name: formatSweepKet(b),
                   line: { width: 2.2, color: SWEEP_PALETTE[idx % SWEEP_PALETTE.length] },
                   marker: { size: 4.5 },
-                  hovertemplate: `|${b}⟩: %{y:.3f}<extra></extra>`,
+                  hovertemplate: `${formatSweepKet(b)}: %{y:.3f}<extra></extra>`,
                 }))}
                 layout={{
                   paper_bgcolor: plotBg,
@@ -523,7 +531,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
                         <td className="py-1.5 pr-1.5">{sweepResponse.bloch_q0[i][2].toFixed(2)}</td>
                         <td className="py-1.5 text-[10.5px] text-[var(--text-secondary)] whitespace-nowrap">
                           {top2
-                            .map((b) => `|${b}⟩ ${(sweepResponse.populations[b][i] * 100).toFixed(0)}%`)
+                            .map((b) => `${formatSweepKet(b)} ${(sweepResponse.populations[b][i] * 100).toFixed(0)}%`)
                             .join(' · ')}
                         </td>
                       </tr>

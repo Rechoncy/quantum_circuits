@@ -11,6 +11,7 @@ from .base import (
 from .kraus_backend import KrausBackend
 from .qutip_backend import QuTiPBackend
 from .stim_backend import StimBackend
+from .trajectory_backend import TrajectoryBackend
 from .unified_solver import QuantumSolver
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "QuTiPBackend",
     "StimBackend",
     "KrausBackend",
+    "TrajectoryBackend",
     "EvolutionResult",
     "StepSnapshot",
     "compute_bloch_vectors",

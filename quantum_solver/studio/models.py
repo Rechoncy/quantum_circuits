@@ -109,7 +109,7 @@ class HardwareProfileModel(BaseModel):
 class SimulationSettingsModel(BaseModel):
     """Simulation execution & noise toggle controls."""
 
-    backend: Literal["qutip", "kraus", "stim", "stim_qutip", "compare"] = "qutip"
+    backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip", "compare"] = "qutip"
     shots: int = 20000
     enable_t1_t2: bool = True
     enable_depol: bool = True
@@ -175,7 +175,7 @@ class SweepRequest(BaseModel):
     y_points: int = 10
     target_bitstring: Optional[str] = None
     observed_qubit: int = 0
-    backend: Literal["qutip", "kraus", "stim", "stim_qutip"] = "qutip"
+    backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "qutip"
 
 
 class NlCircuitRequest(BaseModel):

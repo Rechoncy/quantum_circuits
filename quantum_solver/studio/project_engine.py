@@ -321,6 +321,7 @@ def build_initial_statevector(qubits: Sequence[QubitSpec]) -> Optional[np.ndarra
 def compute_topology_edges(
     qubits: Sequence[QubitSpec],
     profile: HardwareProfileModel,
+    operations: Optional[Sequence[CircuitOpModel]] = None,
 ) -> List[Tuple[int, int]]:
     n = len(qubits)
     if n <= 1:
@@ -338,13 +339,47 @@ def compute_topology_edges(
     if mode == "rydberg_radius":
         rb = max(0.1, float(profile.blockade_radius_um))
         edges: List[Tuple[int, int]] = []
+        # For large arrays (> 120 qubits), bucket 2D coordinates into spatial cells of size rb for O(N) neighbor lookup
+        if n > 120:
+            grid: Dict[Tuple[int, int], List[int]] = {}
+            for idx, q in enumerate(qubits):
+                cx = int(math.floor(q.pos_x / rb))
+                cy = int(math.floor(q.pos_y / rb))
+                grid.setdefault((cx, cy), []).append(idx)
+            for (cx, cy), cell_qs in grid.items():
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nbr_qs = grid.get((cx + dx, cy + dy))
+                        if not nbr_qs:
+                            continue
+                        for i in cell_qs:
+                            for j in nbr_qs:
+                                if i < j:
+                                    dist = math.hypot(
+                                        qubits[i].pos_x - qubits[j].pos_x,
+                                        qubits[i].pos_y - qubits[j].pos_y,
+                                    )
+                                    if dist <= rb + 1e-9:
+                                        edges.append((i, j))
+            return sorted(edges)
         for i in range(n):
             for j in range(i + 1, n):
                 dist = math.hypot(qubits[i].pos_x - qubits[j].pos_x, qubits[i].pos_y - qubits[j].pos_y)
                 if dist <= rb + 1e-9:
                     edges.append((i, j))
         return edges
-    # Default: all-to-all
+    # All-to-all: for n > 32, materialize linear chain + all pairs actually used by operations to avoid O(N^2) bloat
+    if n > 32:
+        sparse_pairs = {(i, i + 1) for i in range(n - 1)}
+        if operations:
+            for op in operations:
+                if op.kind == "gate" and len(op.qubits) >= 2:
+                    for a_idx in range(len(op.qubits)):
+                        for b_idx in range(a_idx + 1, len(op.qubits)):
+                            u, v = op.qubits[a_idx], op.qubits[b_idx]
+                            if 0 <= u < n and 0 <= v < n and u != v:
+                                sparse_pairs.add((min(u, v), max(u, v)))
+        return sorted(sparse_pairs)
     return [(i, j) for i in range(n) for j in range(i + 1, n)]
 
 
@@ -364,7 +399,7 @@ def build_hardware_model(
     n = max(1, len(project.qubits))
     hp = get_active_hardware_profile(project)
     sim = project.sim_settings
-    edges = compute_topology_edges(project.qubits, hp)
+    edges = compute_topology_edges(project.qubits, hp, operations=project.operations)
 
     t1_base = hp.t1_us if sim.enable_t1_t2 else float("inf")
     t2_base = hp.t2_us if sim.enable_t1_t2 else float("inf")
@@ -651,6 +686,7 @@ def dsl_to_project_ops(
     n_qubits = max(declared_n or len(project.qubits) or 1, max_q + 1, 1)
 
     # Preserve existing qubit specs where available; append new ones if n_qubits grew
+    grid_cols = max(1, math.ceil(math.sqrt(n_qubits)))
     new_qubits: List[QubitSpec] = []
     for i in range(n_qubits):
         if i < len(project.qubits):
@@ -658,13 +694,19 @@ def dsl_to_project_ops(
             q_copy.id = i
             new_qubits.append(q_copy)
         else:
+            if n_qubits <= 8:
+                px, py = round(i * 4.5, 1), 0.0
+            else:
+                r_idx = i // grid_cols
+                c_idx = (i % grid_cols) if (r_idx % 2 == 0) else (grid_cols - 1 - (i % grid_cols))
+                px, py = round(c_idx * 4.5, 1), round(r_idx * 4.5, 1)
             new_qubits.append(
                 QubitSpec(
                     id=i,
                     name=f"q{i}",
                     color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
-                    pos_x=round(i * 4.5, 1),
-                    pos_y=0.0,
+                    pos_x=px,
+                    pos_y=py,
                 )
             )
 
@@ -893,7 +935,6 @@ def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
 def execute_project_simulation(project: ProjectModel) -> Dict[str, Any]:
     circ = compile_project_circuit(project)
     hw = build_hardware_model(project)
-    init_psi = build_initial_statevector(project.qubits)
     init_labels = [q.init_state for q in project.qubits]
     sim = project.sim_settings
 
@@ -904,11 +945,23 @@ def execute_project_simulation(project: ProjectModel) -> Dict[str, Any]:
     warnings: List[str] = []
 
     if backend == "compare":
+        init_psi = build_initial_statevector(project.qubits) if circ.num_qubits <= 22 else None
         if circ.num_qubits <= 7:
-            results_map["qutip"] = solver.solve(circ, backend="qutip", hardware=hw, shots=sim.shots, initial_state=init_psi)
-            results_map["kraus"] = solver.solve(circ, backend="kraus", hardware=hw, shots=sim.shots, initial_state=init_psi)
-        else:
-            warnings.append(f"比特数 ({circ.num_qubits}) 超过连续主方程规模上限，已自动跳过 QuTiP/Kraus 改用 Stim。")
+            results_map["qutip"] = solver.solve(
+                circ, backend="qutip", hardware=hw, shots=sim.shots, initial_state=init_psi
+            )
+        if circ.num_qubits <= 12:
+            results_map["kraus"] = solver.solve(
+                circ, backend="kraus", hardware=hw, shots=sim.shots, initial_state=init_psi
+            )
+        if circ.num_qubits <= 22:
+            results_map["trajectory"] = solver.solve(
+                circ, backend="trajectory", hardware=hw, shots=sim.shots, initial_state=init_psi
+            )
+        if circ.num_qubits > 12:
+            warnings.append(
+                f"比特数 ({circ.num_qubits}Q) 超过稠密密度矩阵规模上限，已自动对比 Trajectory 态矢量与 Stim 稳定子引擎。"
+            )
         try:
             results_map["stim"] = solver.solve(
                 circ, backend="stim", hardware=hw, shots=sim.shots, initial_state_labels=init_labels
@@ -918,27 +971,62 @@ def execute_project_simulation(project: ProjectModel) -> Dict[str, Any]:
                     circ, backend="stim_qutip", hardware=hw, shots=sim.shots, initial_state_labels=init_labels
                 )
         except Exception as exc:
-            warnings.append(f"Stim 后端不支持部分自定义非 Clifford 门（已保留 QuTiP/Kraus 精确结果）: {exc}")
-        primary_key = "qutip" if "qutip" in results_map else next(iter(results_map.keys()))
+            warnings.append(f"Stim 后端不支持部分自定义非 Clifford 门（已保留精确态演化结果）: {exc}")
+        for pref in ("qutip", "kraus", "trajectory", "stim"):
+            if pref in results_map:
+                primary_key = pref
+                break
+        else:
+            primary_key = next(iter(results_map.keys()))
     else:
-        if backend in ("qutip", "kraus") and circ.num_qubits > 9:
-            warnings.append(f"{circ.num_qubits} 比特超出密度矩阵内存上限，建议切换 Stim 后端。")
+        eff_backend = backend
+        if eff_backend == "qutip" and circ.num_qubits > 9:
+            if circ.num_qubits <= 13:
+                eff_backend = "kraus"
+            elif circ.is_clifford() or circ.num_qubits > 24:
+                eff_backend = "stim"
+            else:
+                eff_backend = "trajectory"
+            warnings.append(
+                f"{circ.num_qubits} 比特超出 QuTiP 连续脉冲主方程内存上限，已自动切换至「{eff_backend}」高性能引擎完成仿真。"
+            )
+        elif eff_backend == "kraus" and circ.num_qubits > 14:
+            eff_backend = "stim" if (circ.is_clifford() or circ.num_qubits > 24) else "trajectory"
+            warnings.append(
+                f"{circ.num_qubits} 比特超出 Kraus 稠密密度矩阵上限 (14Q)，已自动切换至「{eff_backend}」引擎完成仿真。"
+            )
+        elif eff_backend == "trajectory" and circ.num_qubits > 24:
+            eff_backend = "stim"
+            warnings.append(
+                f"{circ.num_qubits} 比特超出 Trajectory 态矢量内存上限 (24Q)，已自动切换至「stim」稳定子引擎完成仿真。"
+            )
+
+        init_psi = (
+            build_initial_statevector(project.qubits)
+            if eff_backend in ("qutip", "kraus", "trajectory") and circ.num_qubits <= 24
+            else None
+        )
         res = solver.solve(
             circ,
-            backend=backend,
+            backend=eff_backend,
             hardware=hw,
             shots=sim.shots,
-            initial_state=init_psi if backend in ("qutip", "kraus") else None,
-            initial_state_labels=init_labels if backend in ("stim", "stim_qutip") else None,
+            initial_state=init_psi,
+            initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
         )
-        results_map[backend] = res
-        primary_key = backend
+        results_map[eff_backend] = res
+        primary_key = eff_backend
 
+    all_edges = compute_topology_edges(
+        project.qubits,
+        get_active_hardware_profile(project),
+        operations=project.operations,
+    )
     return {
         "primary_backend": primary_key,
         "warnings": warnings,
         "hardware_name": hw.name,
-        "topology_edges": compute_topology_edges(project.qubits, get_active_hardware_profile(project)),
+        "topology_edges": all_edges[:300],
         "results": {k: _serialize_evolution_result(v) for k, v in results_map.items()},
     }
 
@@ -1126,12 +1214,23 @@ def execute_unitary_synthesis(req: SynthesizeUnitaryRequest) -> Dict[str, Any]:
 def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
     project = req.project
     base_hw = build_hardware_model(project)
-    init_psi = build_initial_statevector(project.qubits)
     init_labels = [q.init_state for q in project.qubits]
     n_q = max(1, len(project.qubits))
+    eff_backend = req.backend
+    if eff_backend == "qutip" and n_q > 9:
+        eff_backend = "kraus" if n_q <= 13 else ("trajectory" if n_q <= 24 else "stim")
+    elif eff_backend == "kraus" and n_q > 14:
+        eff_backend = "trajectory" if n_q <= 24 else "stim"
+    elif eff_backend == "trajectory" and n_q > 24:
+        eff_backend = "stim"
+
+    init_psi = (
+        build_initial_statevector(project.qubits)
+        if eff_backend in ("qutip", "kraus", "trajectory") and n_q <= 24
+        else None
+    )
     obs_q = max(0, min(n_q - 1, int(req.observed_qubit)))
     obs_q_name = project.qubits[obs_q].name if obs_q < len(project.qubits) else f"q{obs_q}"
-    all_bstrs = [format(i, f"0{n_q}b") for i in range(1 << min(n_q, 6))]
     shots = project.sim_settings.shots
     max_workers = max(1, min(6, (os.cpu_count() or 4)))
 
@@ -1151,33 +1250,43 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             local_solver = QuantumSolver(hardware=curr_hw, intra_gate_steps=8)
             res = local_solver.solve(
                 circ,
-                backend=req.backend,
+                backend=eff_backend,
                 hardware=curr_hw,
                 shots=shots,
                 seed=42 + idx,
-                initial_state=init_psi if req.backend in ("qutip", "kraus") else None,
-                initial_state_labels=init_labels if req.backend in ("stim", "stim_qutip") else None,
+                initial_state=init_psi,
+                initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
             )
-            p_map = {b: round(float(res.final_probabilities.get(b, 0.0)), 6) for b in all_bstrs}
             fid = round(float(res.final_fidelity if res.final_fidelity is not None else 1.0), 6)
             pur = round(float(res.final_purity if res.final_purity is not None else 1.0), 6)
             bv = res.steps[-1].bloch_vectors.get(obs_q, (0.0, 0.0, 0.0))
-            return p_map, fid, pur, [round(float(bv[0]), 5), round(float(bv[1]), 5), round(float(bv[2]), 5)]
+            return res.final_probabilities, fid, pur, [round(float(bv[0]), 5), round(float(bv[1]), 5), round(float(bv[2]), 5)]
 
         tasks_1d = [(idx, float(xv)) for idx, xv in enumerate(x_vals)]
-        if max_workers > 1 and n_pts >= 6:
+        if max_workers > 1 and n_pts >= 6 and n_q <= 16:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 rows_1d = list(pool.map(_eval_1d_point, tasks_1d))
         else:
             rows_1d = [_eval_1d_point(t) for t in tasks_1d]
 
-        pops: Dict[str, List[float]] = {b: [] for b in all_bstrs}
+        if n_q <= 4:
+            tracked_bstrs = [format(i, f"0{n_q}b") for i in range(1 << n_q)]
+        else:
+            max_by_bstr: Dict[str, float] = {"0" * n_q: 0.0, "1" * n_q: 0.0}
+            for raw_pmap, _, _, _ in rows_1d:
+                for k, v in raw_pmap.items():
+                    if v > max_by_bstr.get(k, 0.0):
+                        max_by_bstr[k] = float(v)
+            ranked = sorted(max_by_bstr.keys(), key=lambda k: max_by_bstr[k], reverse=True)
+            tracked_bstrs = ranked[:16]
+
+        pops: Dict[str, List[float]] = {b: [] for b in tracked_bstrs}
         fids: List[float] = []
         purs: List[float] = []
         bloch_obs: List[List[float]] = []
-        for p_map, fid, pur, bv_list in rows_1d:
-            for b in all_bstrs:
-                pops[b].append(p_map[b])
+        for raw_pmap, fid, pur, bv_list in rows_1d:
+            for b in tracked_bstrs:
+                pops[b].append(round(float(raw_pmap.get(b, 0.0)), 6))
             fids.append(fid)
             purs.append(pur)
             bloch_obs.append(bv_list)
@@ -1186,7 +1295,7 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             "mode": "1d",
             "param_x": req.param_x,
             "param_x_label": HARDWARE_SWEEP_PARAMS.get(req.param_x, req.param_x),
-            "backend": req.backend,
+            "backend": eff_backend,
             "observed_qubit": obs_q,
             "observed_qubit_name": obs_q_name,
             "x_values": np.round(x_vals, 5).tolist(),
@@ -1221,12 +1330,12 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         local_solver = QuantumSolver(hardware=curr_hw, intra_gate_steps=8)
         res = local_solver.solve(
             circ,
-            backend=req.backend,
+            backend=eff_backend,
             hardware=curr_hw,
             shots=max(1024, shots // 4),
             seed=100 + iy * nx + ix,
-            initial_state=init_psi if req.backend in ("qutip", "kraus") else None,
-            initial_state_labels=init_labels if req.backend in ("stim", "stim_qutip") else None,
+            initial_state=init_psi,
+            initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
         )
         p_val = float(res.final_probabilities.get(target_bstr, 0.0))
         f_val = float(res.final_fidelity if res.final_fidelity is not None else 1.0)
@@ -1238,7 +1347,7 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         for iy, yv in enumerate(y_vals)
         for ix, xv in enumerate(x_vals)
     ]
-    if max_workers > 1 and len(tasks_2d) >= 8:
+    if max_workers > 1 and len(tasks_2d) >= 8 and n_q <= 16:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             rows_2d = list(pool.map(_eval_2d_point, tasks_2d))
     else:
@@ -1258,7 +1367,7 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         "param_x_label": HARDWARE_SWEEP_PARAMS.get(req.param_x, req.param_x),
         "param_y": param_y,
         "param_y_label": HARDWARE_SWEEP_PARAMS.get(param_y, param_y),
-        "backend": req.backend,
+        "backend": eff_backend,
         "observed_qubit": obs_q,
         "observed_qubit_name": obs_q_name,
         "target_bitstring": target_bstr,

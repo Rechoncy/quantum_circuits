@@ -113,7 +113,7 @@ export async function runSweep(
     y_points?: number;
     target_bitstring?: string;
     observed_qubit?: number;
-    backend: 'qutip' | 'kraus' | 'stim' | 'stim_qutip';
+    backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
   },
   signal?: AbortSignal
 ): Promise<SweepResponse> {

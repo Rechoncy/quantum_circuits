@@ -20,6 +20,7 @@ from .base import EvolutionResult
 from .kraus_backend import KrausBackend
 from .qutip_backend import QuTiPBackend
 from .stim_backend import StimBackend
+from .trajectory_backend import TrajectoryBackend
 
 
 class QuantumSolver:
@@ -35,6 +36,7 @@ class QuantumSolver:
         self.hardware = hardware
         self.qutip_backend = QuTiPBackend(intra_gate_steps=intra_gate_steps)
         self.kraus_backend = KrausBackend()
+        self.trajectory_backend = TrajectoryBackend()
         self.stim_backend = StimBackend(non_clifford_policy="twirl", use_qutip_calibration=False)
         self.stim_qutip_backend = StimBackend(non_clifford_policy="twirl", use_qutip_calibration=True)
 
@@ -74,8 +76,10 @@ class QuantumSolver:
         b = backend.lower().strip()
 
         if b == "auto":
-            if circuit.num_qubits > 10 and circuit.is_clifford():
+            if circuit.num_qubits > 11 and circuit.is_clifford():
                 b = "stim"
+            elif circuit.num_qubits > 12:
+                b = "trajectory"
             elif hw is not None and circuit.num_qubits <= 6:
                 b = "qutip"
             else:
@@ -87,6 +91,10 @@ class QuantumSolver:
             )
         if b == "kraus":
             return self.kraus_backend.run(
+                circuit, hardware=hw, shots=shots, seed=seed, initial_state=initial_state
+            )
+        if b in ("trajectory", "statevector"):
+            return self.trajectory_backend.run(
                 circuit, hardware=hw, shots=shots, seed=seed, initial_state=initial_state
             )
         if b == "stim":
@@ -107,7 +115,7 @@ class QuantumSolver:
             )
 
         raise ValueError(
-            f"Unknown backend '{backend}'. Choose from 'qutip', 'stim', 'stim_qutip', 'kraus', or 'auto'."
+            f"Unknown backend '{backend}'. Choose from 'qutip', 'kraus', 'trajectory', 'stim', 'stim_qutip', or 'auto'."
         )
 
     def compare_backends(
@@ -118,13 +126,20 @@ class QuantumSolver:
         seed: int = 42,
     ) -> Dict[str, EvolutionResult]:
         """
-        Run the same circuit across QuTiP, Kraus, and Stim backends for direct cross-validation.
+        Run the same circuit across QuTiP, Kraus, Trajectory, and Stim backends for direct cross-validation.
         """
         hw = hardware if hardware is not None else self.hardware
         results: Dict[str, EvolutionResult] = {}
         if circuit.num_qubits <= 8:
             results["qutip"] = self.solve(circuit, backend="qutip", hardware=hw, shots=shots, seed=seed)
             results["kraus"] = self.solve(circuit, backend="kraus", hardware=hw, shots=shots, seed=seed)
+        else:
+            if circuit.num_qubits <= 12:
+                results["kraus"] = self.solve(circuit, backend="kraus", hardware=hw, shots=shots, seed=seed)
+            if circuit.num_qubits <= 22:
+                results["trajectory"] = self.solve(
+                    circuit, backend="trajectory", hardware=hw, shots=shots, seed=seed
+                )
         results["stim"] = self.solve(circuit, backend="stim", hardware=hw, shots=shots, seed=seed)
         if hw is not None and circuit.num_qubits <= 8:
             results["stim_qutip"] = self.solve(

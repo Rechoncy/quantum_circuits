@@ -48,9 +48,10 @@ export const QUBIT_DOT_PALETTE = [
 ];
 
 export const BACKEND_LABELS: Record<string, string> = {
-  qutip: 'QuTiP · 主方程',
-  kraus: 'Kraus · 密度矩阵',
-  stim: 'Stim · 稳定子',
+  qutip: 'QuTiP · 主方程 (≤9Q)',
+  kraus: 'Kraus · 密度矩阵 (≤14Q)',
+  trajectory: 'Trajectory · 态矢量轨迹 (≤24Q)',
+  stim: 'Stim · 稳定子 (500+Q)',
   stim_qutip: 'Stim + QuTiP 标定',
   compare: '多后端对比',
 };

@@ -1,12 +1,16 @@
 """
-Gate-level Density Matrix & Kraus Channel Solver Backend.
+Tensor-Contracted Density Matrix & Kraus Channel Solver Backend.
 Supports arbitrary (Clifford and non-Clifford) quantum gates, inline Kraus noise channels,
 and automatic HardwareModel thermal relaxation / depolarizing / readout noise.
+
+Uses O(2^k * 4^N) tensor-axis contraction (`apply_operator_to_density_matrix`) instead of
+O(8^N) dense 2^N x 2^N matrix multiplication, accelerating 10-14 qubit noisy simulations
+by orders of magnitude.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -15,16 +19,18 @@ from ..core.circuit import (
     MeasureInstruction,
     NoiseInstruction,
     QuantumCircuit,
-    embed_gate_unitary,
 )
 from ..core.hardware import HardwareModel
 from ..core.noise import NoiseChannel, ReadoutError
 from .base import (
     EvolutionResult,
     StepSnapshot,
-    apply_readout_confusion,
+    apply_operator_to_density_matrix,
+    apply_operator_to_statevector,
+    apply_readout_confusion_array,
     compute_bloch_vectors,
     compute_populations,
+    probabilities_array_to_dict,
     sample_from_probabilities,
     state_fidelity_with_pure,
 )
@@ -35,12 +41,11 @@ def apply_kraus_channel(
     channel: NoiseChannel,
     num_qubits: int,
 ) -> np.ndarray:
-    """Apply a 1-qubit or 2-qubit Kraus channel to an N-qubit density matrix rho."""
+    """Apply a 1-qubit or 2-qubit Kraus channel to an N-qubit density matrix rho via tensor contraction."""
     kraus_ops = channel.kraus_operators()
     new_rho = np.zeros_like(rho)
     for K in kraus_ops:
-        K_full = embed_gate_unitary(K, channel.qubits, num_qubits)
-        new_rho += K_full @ rho @ K_full.conj().T
+        new_rho += apply_operator_to_density_matrix(rho, K, channel.qubits, num_qubits)
     # Symmetrize and normalize trace to prevent numerical drift
     new_rho = 0.5 * (new_rho + new_rho.conj().T)
     tr = float(np.real(np.trace(new_rho)))
@@ -49,12 +54,20 @@ def apply_kraus_channel(
     return new_rho
 
 
+def _fast_purity(rho: np.ndarray) -> float:
+    """Compute Tr(rho^2) = sum_{i,j} |rho_{i,j}|^2 for Hermitian rho in O(4^N) instead of O(8^N) matmul!"""
+    # Since rho is Hermitian, Tr(rho @ rho) = Tr(rho @ rho^dagger) = ||rho||_F^2 !
+    flat = rho.ravel()
+    return float(np.real(np.vdot(flat, flat)))
+
+
 class KrausBackend:
     """
-    Exact gate-level density matrix and Kraus operator evolution engine.
-    Bridges the gap when circuits contain non-Clifford gates (which Stim cannot run natively)
-    while offering faster step-by-step gate evolution than continuous-time ODE integration.
+    Exact gate-level density matrix and Kraus operator evolution engine (tensor-contracted).
+    Scales cleanly up to ~13-14 qubits for exact mixed-state density matrix simulation.
     """
+
+    MAX_DENSITY_MATRIX_QUBITS = 14
 
     def run(
         self,
@@ -65,6 +78,11 @@ class KrausBackend:
         initial_state: Optional[np.ndarray] = None,
     ) -> EvolutionResult:
         n = circuit.num_qubits
+        if n > self.MAX_DENSITY_MATRIX_QUBITS:
+            raise ValueError(
+                f"Kraus 稠密密度矩阵后端最高支持 {self.MAX_DENSITY_MATRIX_QUBITS} 比特（2^{n}×2^{n} 矩阵需要 "
+                f"{(16 * (1 << (2 * n))) / (1024**3):.1f} GB 内存）。请切换至「Trajectory · 态矢量轨迹 (≤24Q)」或「Stim · 稳定子 (500+Q)」后端。"
+            )
         dim = 1 << n
 
         if initial_state is None:
@@ -82,20 +100,22 @@ class KrausBackend:
                 eigvals, eigvecs = np.linalg.eigh(rho)
                 psi_ideal = eigvecs[:, int(np.argmax(eigvals))]
 
+        # Keep step-by-step full rho copies only when n <= 8 to save gigabytes of RAM at n=11..14
+        store_step_rho = n <= 8
+
         steps: List[StepSnapshot] = []
         elapsed_ns = 0.0
         step_idx = 0
 
-        # Record Step 0: Initial state
         steps.append(
             StepSnapshot(
                 step_index=0,
                 operation_label="INIT |0...0>",
                 elapsed_time_ns=0.0,
-                density_matrix=rho.copy(),
-                ideal_statevector=psi_ideal.copy(),
+                density_matrix=rho.copy() if store_step_rho else None,
+                ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                 state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                purity=float(np.real(np.trace(rho @ rho))),
+                purity=_fast_purity(rho),
                 bloch_vectors=compute_bloch_vectors(rho, n),
                 populations=compute_populations(rho, n),
             )
@@ -133,9 +153,9 @@ class KrausBackend:
                 step_idx += 1
                 gate_dts: List[float] = []
                 for g in layer_gates:
-                    U_gate = embed_gate_unitary(g.unitary(), g.qubits, n)
-                    psi_ideal = U_gate @ psi_ideal
-                    rho = U_gate @ rho @ U_gate.conj().T
+                    u_small = g.unitary()
+                    psi_ideal = apply_operator_to_statevector(psi_ideal, u_small, g.qubits, n)
+                    rho = apply_operator_to_density_matrix(rho, u_small, g.qubits, n)
                     dt_g = g.duration_ns
                     if dt_g is None:
                         dt_g = hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0
@@ -144,50 +164,50 @@ class KrausBackend:
                 dt_layer = max(gate_dts) if gate_dts else 0.0
                 elapsed_ns += dt_layer
 
-                # Apply inline gate noise & per-gate hardware control noise
                 all_ideal_layer = all(g.skip_hw_noise for g in layer_gates)
                 for g, dt_g in zip(layer_gates, gate_dts):
                     for ch in g.noise_after:
                         rho = apply_kraus_channel(rho, ch, n)
                     if hardware is not None and dt_g > 0 and not g.skip_hw_noise:
                         if len(g.qubits) == 1:
-                            p_dep = hardware.qubit_params[g.qubits[0]].depol_1q
+                            q0 = g.qubits[0]
+                            p_dep = hardware.qubit_params[q0].depol_1q
                             if p_dep > 0:
-                                rho = apply_kraus_channel(rho, NoiseChannel.depolarizing_1q(g.qubits[0], p_dep), n)
+                                rho = apply_kraus_channel(rho, NoiseChannel.depolarizing_1q(q0, p_dep), n)
                         elif len(g.qubits) == 2:
                             pair = (min(g.qubits[0], g.qubits[1]), max(g.qubits[0], g.qubits[1]))
-                            if pair in hardware.coupler_params and hardware.coupler_params[pair].depol_2q > 0:
-                                rho = apply_kraus_channel(
-                                    rho,
-                                    NoiseChannel.depolarizing_2q(
-                                        g.qubits[0], g.qubits[1], hardware.coupler_params[pair].depol_2q
-                                    ),
-                                    n,
-                                )
+                            if pair in hardware.coupler_params:
+                                p_dep2 = hardware.coupler_params[pair].depol_2q
+                                if p_dep2 > 0:
+                                    rho = apply_kraus_channel(
+                                        rho, NoiseChannel.depolarizing_2q(g.qubits[0], g.qubits[1], p_dep2), n
+                                    )
+                        for q_act in g.qubits:
+                            qp = hardware.qubit_params[q_act]
+                            ch_th = NoiseChannel.thermal_relaxation(q_act, qp.t1_ns, qp.t2_ns, dt_layer)
+                            rho = apply_kraus_channel(rho, ch_th, n)
 
-                # Apply layer-wide thermal relaxation (T1/T2) once for dt_layer across all qubits
-                if hardware is not None and dt_layer > 0 and not all_ideal_layer:
-                    for q in range(n):
-                        if q in used_qubits or hardware.include_idle_noise:
-                            qp = hardware.qubit_params[q]
-                            ch_tr = NoiseChannel.thermal_relaxation(q, qp.t1_ns, qp.t2_ns, dt_layer)
-                            rho = apply_kraus_channel(rho, ch_tr, n)
+                if hardware is not None and dt_layer > 0 and not all_ideal_layer and hardware.include_idle_noise:
+                    for q_idle in range(n):
+                        if q_idle not in used_qubits:
+                            qp = hardware.qubit_params[q_idle]
+                            ch_idle = NoiseChannel.thermal_relaxation(q_idle, qp.t1_ns, qp.t2_ns, dt_layer)
+                            rho = apply_kraus_channel(rho, ch_idle, n)
 
                 layer_label = (
                     f"{layer_gates[0].format_label()} @{layer_gates[0].qubits}"
                     if len(layer_gates) == 1
                     else " ∥ ".join(f"{g.format_label()} @{g.qubits}" for g in layer_gates)
                 )
-
                 steps.append(
                     StepSnapshot(
                         step_index=step_idx,
                         operation_label=layer_label,
                         elapsed_time_ns=elapsed_ns,
-                        density_matrix=rho.copy(),
-                        ideal_statevector=psi_ideal.copy(),
+                        density_matrix=rho.copy() if store_step_rho else None,
+                        ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                         state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                        purity=float(np.real(np.trace(rho @ rho))),
+                        purity=_fast_purity(rho),
                         bloch_vectors=compute_bloch_vectors(rho, n),
                         populations=compute_populations(rho, n),
                     )
@@ -202,10 +222,10 @@ class KrausBackend:
                         step_index=step_idx,
                         operation_label=f"NOISE[{op.channel.kind}] @{op.channel.qubits}",
                         elapsed_time_ns=elapsed_ns,
-                        density_matrix=rho.copy(),
-                        ideal_statevector=psi_ideal.copy(),
+                        density_matrix=rho.copy() if store_step_rho else None,
+                        ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                         state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                        purity=float(np.real(np.trace(rho @ rho))),
+                        purity=_fast_purity(rho),
                         bloch_vectors=compute_bloch_vectors(rho, n),
                         populations=compute_populations(rho, n),
                     )
@@ -219,8 +239,9 @@ class KrausBackend:
             else:
                 op_idx += 1
 
-        raw_probs = compute_populations(rho, n)
-        final_probs = apply_readout_confusion(raw_probs, n, readout_errors)
+        raw_diag = np.clip(np.real(np.diag(rho)), 0.0, 1.0)
+        noisy_diag = apply_readout_confusion_array(raw_diag, n, readout_errors)
+        final_probs = probabilities_array_to_dict(noisy_diag, n)
         counts = sample_from_probabilities(final_probs, shots=shots, seed=seed)
 
         return EvolutionResult(

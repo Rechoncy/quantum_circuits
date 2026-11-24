@@ -38,7 +38,7 @@ export interface SweepConfigState {
   y_points: number;
   target_bitstring: string;
   observed_qubit: number;
-  backend: 'qutip' | 'kraus' | 'stim' | 'stim_qutip';
+  backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
 }
 
 function defaultSweepRange(paramKey: string): [number, number] {
@@ -157,18 +157,27 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         {/* Solver Segmented Control */}
         <div>
           <SectionTitle>求解器</SectionTitle>
-          <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg grid grid-cols-3 gap-0.5">
-            {(['qutip', 'kraus', 'stim'] as SolverBackendType[]).map((b) => (
+          <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg grid grid-cols-4 gap-0.5">
+            {(['qutip', 'kraus', 'trajectory', 'stim'] as SolverBackendType[]).map((b) => (
               <button
                 key={b}
                 onClick={() => onUpdateSimSettings({ backend: b })}
-                className={`py-1.5 rounded-[7px] text-[12px] font-medium transition-all cursor-pointer ${
+                title={
+                  b === 'qutip'
+                    ? 'QuTiP 连续脉冲主方程 (≤9Q)'
+                    : b === 'kraus'
+                    ? 'Kraus 张量密度矩阵 (≤14Q)'
+                    : b === 'trajectory'
+                    ? 'Trajectory 纯态矢量蒙特卡洛轨迹 (≤24Q)'
+                    : 'Stim 稳定子与泡利帧采样 (500+Q)'
+                }
+                className={`py-1.5 rounded-[7px] text-[11.5px] font-medium transition-all cursor-pointer ${
                   sim.backend === b
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
               >
-                {b === 'qutip' ? 'QuTiP' : b === 'kraus' ? 'Kraus' : 'Stim'}
+                {b === 'qutip' ? 'QuTiP' : b === 'kraus' ? 'Kraus' : b === 'trajectory' ? 'Traj' : 'Stim'}
               </button>
             ))}
           </div>
@@ -417,9 +426,10 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               }
               className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] outline-none"
             >
-              <option value="qutip">QuTiP · 物理主方程</option>
-              <option value="kraus">Kraus · 快速密度矩阵</option>
-              <option value="stim">Stim · 稳定子高速采样</option>
+              <option value="qutip">QuTiP · 物理主方程 (≤9Q)</option>
+              <option value="kraus">Kraus · 张量密度矩阵 (≤14Q)</option>
+              <option value="trajectory">Trajectory · 态矢量轨迹 (≤24Q)</option>
+              <option value="stim">Stim · 稳定子高速采样 (500+Q)</option>
               <option value="stim_qutip">Stim + QuTiP 标定</option>
             </select>
           </div>

@@ -44,38 +44,39 @@ const STARTER_PROMPTS: { label: string; prompt: string }[] = [
     prompt: '用中性原子里德堡阵列生成 4 比特 GHZ 态并加入 1% 退极化噪声后测量',
   },
   {
-    label: '3 比特 QFT',
-    prompt: '生成 3 比特量子傅里叶变换 QFT 线路并测量所有比特',
+    label: '50Q 里德堡 GHZ (百比特级)',
+    prompt: '用中性原子里德堡阵列生成 50 比特 GHZ 纠缠态线路并测量',
   },
   {
-    label: 'Grover 搜索 |11⟩',
-    prompt: '生成 2 比特 Grover 量子搜索线路，目标态 |11⟩',
+    label: '16Q 变分 VQE (态矢量)',
+    prompt: '创建 16 比特 2 层硬件高效 VQE 变分线路，方便扫描参数',
   },
   {
-    label: '3 比特 W 态',
-    prompt: '制备 3 比特 W 态（单激发对称纠缠态）并测量',
+    label: '17Q 旋转表面码 QEC',
+    prompt: '生成 17 比特旋转表面码稳定子纠错线路并测量',
   },
   {
-    label: '量子隐形传态',
-    prompt: '构建 3 比特量子隐形传态线路，将 q0 的含参态传给 q2',
+    label: '8 比特 W 态',
+    prompt: '制备 8 比特精确 W 态（单激发对称纠缠态）并测量',
   },
   {
-    label: '4Q 硬件高效 VQE',
-    prompt: '创建 4 比特 2 层硬件高效 VQE 变分线路，方便扫描参数',
+    label: '6 比特 QFT',
+    prompt: '生成 6 比特量子傅里叶变换 QFT 线路并测量所有比特',
   },
   {
-    label: 'QAOA MaxCut',
-    prompt: '生成 4 比特 1 层环形图 QAOA MaxCut 线路',
+    label: '5Q Grover 搜索 |10110⟩',
+    prompt: '生成 5 比特 Grover 量子搜索线路，目标态 |10110⟩',
   },
   {
-    label: '复合微调示例',
-    prompt: '生成 3 比特 GHZ 态并在末尾对 q0 加 RZ(phi) 门和 2% 退极化噪声',
+    label: '25Q 二维网格簇态',
+    prompt: '生成 25 比特二维网格 Cluster 簇态线路',
   },
 ];
 
 const FOLLOWUP_CHIPS: { label: string; prompt: string }[] = [
   { label: '噪声改 3%', prompt: '把退极化噪声改成 3%' },
   { label: '+1 比特做 CZ', prompt: '再增加 1 个比特并和上一个比特做 CZ 纠缠' },
+  { label: '扩容到 20Q', prompt: '扩容到 20 个比特' },
   { label: 'CZ → iSWAP', prompt: '把所有 CZ 换成 iSWAP' },
   { label: '删掉噪声', prompt: '删掉所有噪声' },
   { label: '切超导 CZ', prompt: '切换到超导 CZ 硬件' },
@@ -528,9 +529,9 @@ export const NlCircuitModal: React.FC<NlCircuitModalProps> = ({
                               <span>
                                 Gates:{diff.gates_before}→{diff.gates_after}
                               </span>
-                              {(diff.noise_before > 0 || diff.noise_after > 0) && (
+                              {((diff.noise_before ?? 0) > 0 || (diff.noise_after ?? 0) > 0) && (
                                 <span>
-                                  Noise:{diff.noise_before}→{diff.noise_after}
+                                  Noise:{diff.noise_before ?? 0}→{diff.noise_after ?? 0}
                                 </span>
                               )}
                             </>
@@ -680,6 +681,11 @@ export const NlCircuitModal: React.FC<NlCircuitModalProps> = ({
                   <Cpu className="w-3 h-3" />
                   {recHwName}
                 </span>
+                {activeResult?.recommended_backend && (
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 font-semibold">
+                    推荐引擎: {activeResult.recommended_backend.toUpperCase()}
+                  </span>
+                )}
                 {varKeys.length > 0 && (
                   <span className="px-2 py-0.5 rounded-md bg-purple-500/12 text-purple-700 dark:text-purple-300">
                     {varKeys.join(', ')}

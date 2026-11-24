@@ -40,6 +40,8 @@ class GateInstruction:
             return True
         if uname in ("RX", "RY", "RZ", "P", "PHASE", "RXX", "RYY", "RZZ") and len(self.params) == 1:
             return is_clifford_angle(self.params[0])
+        if uname == "RXY" and len(self.params) >= 2:
+            return is_clifford_angle(self.params[0]) and is_clifford_angle(self.params[1])
         if uname == "MS":
             angle = self.params[0] if len(self.params) > 0 else math.pi / 2.0
             return is_clifford_angle(angle)

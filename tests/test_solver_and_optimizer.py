@@ -576,6 +576,157 @@ def test_natural_language_to_circuit_compiler() -> None:
     assert not any(op["kind"] == "noise" for op in res_t3["operations"])
 
 
+def test_high_qubit_scaling_kraus_trajectory_stim_and_nl() -> None:
+    """
+    Verify large-qubit scaling across all solvers and expanded AI Assistant:
+      1. 10Q tensor-contracted KrausBackend noisy simulation (< 1s)
+      2. 16Q TrajectoryBackend non-Clifford VQE statevector & noisy trajectories + 8Q exact W-state
+      3. 100-qubit StimBackend noisy GHZ simulation (n = 100 > 64, zero int64 overflow!)
+      4. Expanded AI Assistant: 50Q Neutral Atom GHZ (2D grid + stim), 16Q VQE (trajectory),
+         17Q Rotated Surface Code, 5Q Grover |10110>, and multi-turn '扩容到 30 个比特'
+      5. Automatic project_engine fallback when user leaves backend='qutip' on a 15Q circuit
+    """
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        NlCircuitRequest,
+        QubitSpec,
+        build_preset_projects,
+        execute_project_simulation,
+        generate_circuit_from_nl,
+    )
+
+    solver = QuantumSolver()
+
+    # 1. 10-qubit tensor-contracted KrausBackend noisy GHZ
+    hw_10 = HardwareModel.superconducting_processor(
+        num_qubits=10, depol_1q=0.001, depol_2q=0.003, readout_err=0.002
+    )
+    c10 = QuantumCircuit(10, name="GHZ_10Q")
+    c10.h(0)
+    for i in range(9):
+        c10.cnot(i, i + 1)
+    c10.measure_all()
+    res_k10 = solver.solve(c10, backend="kraus", hardware=hw_10, shots=4096, seed=11)
+    assert res_k10.num_qubits == 10
+    assert res_k10.final_probabilities.get("0" * 10, 0.0) > 0.42
+    assert res_k10.final_probabilities.get("1" * 10, 0.0) > 0.42
+    assert 0.80 < (res_k10.final_fidelity or 0.0) < 1.0
+
+    # 2. 16-qubit TrajectoryBackend on non-Clifford hardware-efficient VQE (exact + noisy MC)
+    c16 = QuantumCircuit(16, name="VQE_16Q")
+    for q in range(16):
+        c16.ry(q, 0.37 + 0.05 * q)
+    for q in range(15):
+        c16.cz(q, q + 1)
+    for q in range(16):
+        c16.rz(q, 0.21 * (q + 1))
+    c16.measure_all()
+    res_traj_exact = solver.solve(c16, backend="trajectory", hardware=None, shots=2048, seed=7)
+    assert res_traj_exact.final_fidelity == 1.0
+    assert sum(res_traj_exact.measurement_counts.values()) == 2048
+
+    hw_16 = HardwareModel.neutral_atom_processor(
+        num_qubits=16, depol_1q=0.001, depol_2q=0.004, readout_err=0.005
+    )
+    res_traj_noisy = solver.trajectory_backend.run(
+        c16, hardware=hw_16, shots=2048, seed=7, num_trajectories=4
+    )
+    assert 0.70 < (res_traj_noisy.final_fidelity or 0.0) <= 1.0
+    assert 0.50 < (res_traj_noisy.final_purity or 0.0) <= 1.0
+
+    # 3. 100-qubit StimBackend noisy GHZ (verifies np.packbits counting beyond 64-bit int limit!)
+    hw_100 = HardwareModel.neutral_atom_processor(
+        num_qubits=100, t1_us=10000.0, t2_us=8000.0, depol_1q=0.0001, depol_2q=0.0003, readout_err=0.0003
+    )
+    c100 = QuantumCircuit(100, name="GHZ_100Q")
+    c100.h(0)
+    for q in range(99):
+        c100.cnot(q, q + 1)
+    c100.measure_all()
+    res_stim_100 = solver.solve(c100, backend="stim", hardware=hw_100, shots=4000, seed=99)
+    assert res_stim_100.num_qubits == 100
+    assert sum(res_stim_100.measurement_counts.values()) == 4000
+    assert len(next(iter(res_stim_100.measurement_counts.keys()))) == 100
+    assert res_stim_100.final_probabilities.get("0" * 100, 0.0) > 0.35
+    assert res_stim_100.final_probabilities.get("1" * 100, 0.0) > 0.35
+
+    # 4. Expanded AI Assistant: 50Q Neutral Atom GHZ, 8Q W-state, 5Q Grover, 17Q Surface Code, 16Q VQE
+    base = build_preset_projects()[0]
+
+    nl_50 = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="用中性原子里德堡阵列生成 50 比特 GHZ 态并测量", project=base)
+    )
+    assert len(nl_50["qubits"]) == 50
+    assert nl_50["recommended_backend"] == "stim"
+    # Verify 2D snake grid coordinates (not all y == 0!)
+    assert any(q["pos_y"] > 0 for q in nl_50["qubits"])
+
+    nl_vqe16 = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="创建 16 比特 2 层硬件高效 VQE 变分线路", project=base)
+    )
+    assert len(nl_vqe16["qubits"]) == 16
+    assert nl_vqe16["recommended_backend"] == "trajectory"
+
+    nl_surf = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="生成 17 比特旋转表面码纠错线路", project=base)
+    )
+    assert len(nl_surf["qubits"]) == 17
+    assert nl_surf["recommended_backend"] == "stim"
+
+    # Verify exact 8-qubit W-state uniform 1/8 = 0.125 single-excitation probabilities
+    nl_w8 = generate_circuit_from_nl(NlCircuitRequest(prompt="制备 8 比特精确 W 态", project=base))
+    assert len(nl_w8["qubits"]) == 8
+    p_w8 = base.model_copy(deep=True)
+    p_w8.qubits = [QubitSpec(**q) for q in nl_w8["qubits"]]
+    p_w8.operations = [CircuitOpModel(**o) for o in nl_w8["operations"]]
+    p_w8.variables = nl_w8["variables"]
+    p_w8.sim_settings.backend = "trajectory"
+    p_w8.sim_settings.enable_t1_t2 = False
+    p_w8.sim_settings.enable_depol = False
+    p_w8.sim_settings.enable_zz = False
+    p_w8.sim_settings.enable_readout = False
+    sim_w8 = execute_project_simulation(p_w8)["results"]["trajectory"]
+    for pos in range(8):
+        bstr = "".join("1" if idx == pos else "0" for idx in range(8))
+        assert 0.122 < sim_w8["final_probabilities"].get(bstr, 0.0) < 0.128
+
+    # Verify 5-qubit Grover search for |10110> (5 data + 2 ancillas = 7Q total -> |1011000> dominant!)
+    nl_g5 = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="生成 5 比特 Grover 量子搜索线路，目标态 |10110⟩", project=base)
+    )
+    p_g5 = base.model_copy(deep=True)
+    p_g5.qubits = [QubitSpec(**q) for q in nl_g5["qubits"]]
+    p_g5.operations = [CircuitOpModel(**o) for o in nl_g5["operations"]]
+    p_g5.sim_settings.backend = "trajectory"
+    p_g5.sim_settings.enable_t1_t2 = False
+    p_g5.sim_settings.enable_depol = False
+    p_g5.sim_settings.enable_zz = False
+    p_g5.sim_settings.enable_readout = False
+    sim_g5 = execute_project_simulation(p_g5)["results"]["trajectory"]
+    assert sim_g5["final_probabilities"].get("1011000", 0.0) > 0.95
+
+    # Multi-turn refinement: expand 8Q W-state circuit to 30 qubits
+    nl_exp30 = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="扩容到 30 个比特", project=p_w8, mode="auto")
+    )
+    assert nl_exp30["action_mode"] == "refine"
+    assert len(nl_exp30["qubits"]) == 30
+
+    # 5. Automatic OOM guard when sim_settings.backend == 'qutip' on 16Q VQE
+    p_guard = base.model_copy(deep=True)
+    p_guard.qubits = [QubitSpec(**q) for q in nl_vqe16["qubits"]]
+    p_guard.operations = [CircuitOpModel(**o) for o in nl_vqe16["operations"]]
+    p_guard.variables = nl_vqe16["variables"]
+    p_guard.sim_settings.backend = "qutip"  # intentionally too small for 16Q!
+    p_guard.sim_settings.enable_t1_t2 = False
+    p_guard.sim_settings.enable_depol = False
+    p_guard.sim_settings.enable_zz = False
+    out_guard = execute_project_simulation(p_guard)
+    assert out_guard["primary_backend"] == "trajectory"
+    assert len(out_guard["warnings"]) >= 1
+
+
+
 
 
 

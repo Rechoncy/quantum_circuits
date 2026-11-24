@@ -241,8 +241,8 @@ CLIFFORD_GATE_NAMES = {
 }
 
 
-def is_clifford_angle(theta: float, tol: float = 1e-7) -> bool:
-    """Check if rotation angle theta is an integer multiple of pi/2."""
+def is_clifford_angle(theta: float, tol: float = 1e-4) -> bool:
+    """Check if rotation angle theta is an integer multiple of pi/2 (with 4-decimal rounding tolerance)."""
     k = round(theta / (math.pi / 2.0))
     return abs(theta - k * (math.pi / 2.0)) < tol
 

@@ -819,6 +819,15 @@ export default function App() {
 
   const handleApplyNlResult = (res: NlCircuitResponse, runImmediately: boolean) => {
     if (!project) return;
+    const nQ = res.qubits.length;
+    const curB = project.sim_settings.backend;
+    const shouldSwitchBackend =
+      (nQ > 6 && curB === 'qutip') ||
+      (nQ > 12 && curB === 'kraus') ||
+      (nQ > 24 && curB === 'trajectory') ||
+      (nQ <= 6 && (curB === 'stim' || curB === 'trajectory'));
+    const chosenBackend = shouldSwitchBackend ? res.recommended_backend : curB;
+
     const nextProj: ProjectModel = {
       ...project,
       name: res.title || project.name,
@@ -828,10 +837,7 @@ export default function App() {
       active_hardware_id: res.recommended_hardware_id || project.active_hardware_id,
       sim_settings: {
         ...project.sim_settings,
-        backend:
-          res.qubits.length > 6 && project.sim_settings.backend === 'qutip'
-            ? res.recommended_backend
-            : project.sim_settings.backend,
+        backend: chosenBackend,
       },
     };
     setPast((p) => [...p.slice(-30), project]);
@@ -847,6 +853,14 @@ export default function App() {
       param_x: firstVar,
       target_bitstring: '0'.repeat(Math.max(1, nextProj.qubits.length)),
       observed_qubit: Math.min(prev.observed_qubit, Math.max(0, nextProj.qubits.length - 1)),
+      backend:
+        chosenBackend === 'compare'
+          ? nQ > 24
+            ? 'stim'
+            : nQ > 12
+            ? 'trajectory'
+            : 'kraus'
+          : chosenBackend,
     }));
     setStatusMsg(`AI 已生成线路: ${res.title} (${res.qubits.length}Q · ${res.operations.filter((o) => o.kind === 'gate').length} Gates)`);
     addLog(`自然语言生成线路: ${res.explanation}`, 'info');
