@@ -14,6 +14,7 @@ import type {
   SweepResponse,
   VariationalOptimizeResponse,
   WorkMode,
+  ZneResponse,
 } from './types';
 import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from './constants';
 import {
@@ -24,6 +25,7 @@ import {
   runSweep,
   runUnitarySynthesis,
   runVariationalOptimization,
+  runZneMitigation,
   syncDslToProject,
   syncProjectToDsl,
   syncQasmToProject,
@@ -74,6 +76,7 @@ export default function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('正在初始化 Quantum Studio...');
   const [simResponse, setSimResponse] = useState<SimulationResponse | null>(null);
+  const [zneResponse, setZneResponse] = useState<ZneResponse | null>(null);
   const [simDirty, setSimDirty] = useState(false);
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -340,6 +343,47 @@ export default function App() {
       }
     },
     [project, addLog]
+  );
+
+  // Run Zero-Noise Extrapolation (ZNE) quantum error mitigation
+  const handleRunZne = useCallback(
+    async (projOverride?: ProjectModel) => {
+      const target = projOverride || project;
+      if (!target) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
+      setIsBusy(true);
+      setStatusMsg('正在执行 ZNE 零噪声外推量子误差缓解 (λ = 1, 2, 3 → 0)...');
+      try {
+        const res = await runZneMitigation(
+          {
+            project: target,
+            scale_factors: [1.0, 2.0, 3.0],
+            observed_qubit: Math.min(observedQubit, Math.max(0, target.qubits.length - 1)),
+            hamiltonian_str: sweepConfig.hamiltonian_str.trim() || undefined,
+          },
+          controller.signal
+        );
+        setZneResponse(res);
+        setMode('simulate');
+        const msg = `ZNE 零噪声外推完成 · 原始 ⟨Z⟩=${res.z_unmitigated.toFixed(4)} → Richardson ⟨Z⟩=${res.z_zne_richardson.toFixed(4)}`;
+        setStatusMsg(msg);
+        addLog(msg, 'info');
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+        const errTxt = err instanceof Error ? err.message : String(err);
+        setStatusMsg(`ZNE 外推失败: ${errTxt}`);
+        addLog(`ZNE 外推失败: ${errTxt}`, 'error');
+      } finally {
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
+      }
+    },
+    [project, observedQubit, sweepConfig.hamiltonian_str, addLog]
   );
 
   // Run Parameter Sweep OR Closed-Loop VQE Optimization (with AbortController cancelation support)
@@ -1149,6 +1193,7 @@ export default function App() {
           setBenchResponse(null);
           setSweepResponse(null);
           setVqeResponse(null);
+          setZneResponse(null);
           setSelection({ type: 'none' });
           setQasmError(null);
           addLog(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q)`, 'info');
@@ -1215,6 +1260,7 @@ export default function App() {
           setBenchResponse(null);
           setSweepResponse(null);
           setVqeResponse(null);
+          setZneResponse(null);
           const varKeys = Object.keys(clone.variables);
           const firstVar = varKeys[0] || 'hw:depol_2q';
           const secondVar = varKeys[1] || 'hw:depol_2q';
@@ -1453,6 +1499,9 @@ export default function App() {
               <SimulateResults
                 project={project}
                 simResponse={simResponse}
+                zneResponse={zneResponse}
+                onRunZne={() => handleRunZne()}
+                isBusy={isBusy}
                 timeCursorStep={timeCursorStep}
                 maxCursorStep={maxCursorStep}
                 onTimeCursorChange={handleDirectTimeCursorChange}
@@ -1666,6 +1715,7 @@ export default function App() {
             }
             hardwareSweepParams={hardwareSweepParams}
             onRunSweep={() => handleRunSweep()}
+            onRunZne={() => handleRunZne()}
             onCancelSweep={handleCancelSweep}
             isBusy={isBusy}
           />

@@ -99,18 +99,37 @@ export function buildCircuitSvg(
       continue;
     }
 
-    if (validQ.length >= 2 && (uname === 'CZ' || uname === 'CNOT' || uname === 'CX' || uname === 'CCZ')) {
+    if (
+      validQ.length >= 2 &&
+      (uname === 'CZ' ||
+        uname === 'CNOT' ||
+        uname === 'CX' ||
+        uname === 'CCZ' ||
+        uname === 'CCX' ||
+        uname === 'TOFFOLI' ||
+        uname === 'SWAP')
+    ) {
       const minQ = Math.min(...validQ);
       const maxQ = Math.max(...validQ);
       const yTop = topPad + minQ * rowH + rowH / 2;
       const yBot = topPad + maxQ * rowH + rowH / 2;
       parts.push(`<line x1="${cx}" y1="${yTop}" x2="${cx}" y2="${yBot}" stroke="#1E3A8A" stroke-width="2"/>`);
+      if (uname === 'SWAP') {
+        for (const sq of validQ.slice(0, 2)) {
+          const sy = topPad + sq * rowH + rowH / 2;
+          parts.push(
+            `<line x1="${cx - 6}" y1="${sy - 6}" x2="${cx + 6}" y2="${sy + 6}" stroke="#1E3A8A" stroke-width="2.2" stroke-linecap="round"/>`,
+            `<line x1="${cx - 6}" y1="${sy + 6}" x2="${cx + 6}" y2="${sy - 6}" stroke="#1E3A8A" stroke-width="2.2" stroke-linecap="round"/>`
+          );
+        }
+        continue;
+      }
       const controls = uname === 'CZ' || uname === 'CCZ' ? validQ : validQ.slice(0, -1);
       for (const cq of controls) {
         const cy = topPad + cq * rowH + rowH / 2;
         parts.push(`<circle cx="${cx}" cy="${cy}" r="5.5" fill="#1E3A8A"/>`);
       }
-      if (uname === 'CNOT' || uname === 'CX') {
+      if (uname === 'CNOT' || uname === 'CX' || uname === 'CCX' || uname === 'TOFFOLI') {
         const ty = topPad + validQ[validQ.length - 1] * rowH + rowH / 2;
         parts.push(
           `<circle cx="${cx}" cy="${ty}" r="12" fill="#FFFFFF" stroke="#1E3A8A" stroke-width="2"/>`,
@@ -184,6 +203,147 @@ export function buildCircuitSvg(
 
   parts.push('</svg>');
   return parts.join('\n');
+}
+
+function formatLatexParam(p: number | string): string {
+  if (typeof p === 'string') {
+    const greek: Record<string, string> = {
+      theta: '\\theta',
+      phi: '\\phi',
+      gamma: '\\gamma',
+      beta: '\\beta',
+      alpha: '\\alpha',
+      lambda: '\\lambda',
+    };
+    return greek[p.trim()] || p.replace(/_/g, '\\_');
+  }
+  const r = p / Math.PI;
+  if (Math.abs(r - 1) < 1e-3) return '\\pi';
+  if (Math.abs(r + 1) < 1e-3) return '-\\pi';
+  if (Math.abs(r - 0.5) < 1e-3) return '\\pi/2';
+  if (Math.abs(r + 0.5) < 1e-3) return '-\\pi/2';
+  if (Math.abs(r - 0.25) < 1e-3) return '\\pi/4';
+  if (Math.abs(r + 0.25) < 1e-3) return '-\\pi/4';
+  return Number(p).toFixed(2);
+}
+
+/**
+ * Generate publication-ready LaTeX `quantikz` source code for Overleaf / PRL / PRX Quantum papers.
+ */
+export function buildQuantikzLatex(project: ProjectModel): string {
+  const nQ = Math.max(1, project.qubits.length);
+  if (nQ > 40) {
+    return `% 当前寄存器共 ${nQ} 个量子比特，超出单页论文排版上限 (≤40Q)，建议导出 OpenQASM 3.0 或使用子线路截图。\n`;
+  }
+  const ordered = [...project.operations].sort((a, b) => a.step - b.step);
+  const maxStep = ordered.reduce((m, o) => Math.max(m, o.step), -1);
+  const numCols = Math.max(1, maxStep + 1);
+
+  const grid: string[][] = Array.from({ length: nQ }, () =>
+    Array.from({ length: numCols }, () => '\\qw')
+  );
+
+  const texGateMap: Record<string, string> = {
+    H: 'H',
+    X: 'X',
+    Y: 'Y',
+    Z: 'Z',
+    S: 'S',
+    SDG: 'S^\\dagger',
+    T: 'T',
+    TDG: 'T^\\dagger',
+    SX: '\\sqrt{X}',
+    SXDG: '\\sqrt{X}^\\dagger',
+    RX: 'R_x',
+    RY: 'R_y',
+    RZ: 'R_z',
+    RXY: 'R_{xy}',
+    RXX: 'R_{xx}',
+    RYY: 'R_{yy}',
+    RZZ: 'R_{zz}',
+    MS: '\\text{MS}',
+    ISWAP: '\\text{iSWAP}',
+    SQISWAP: '\\sqrt{\\text{iSWAP}}',
+    U3: 'U_3',
+  };
+
+  for (const op of ordered) {
+    const validQ = op.qubits.filter((q) => q >= 0 && q < nQ);
+    if (validQ.length === 0) continue;
+    const s = Math.max(0, Math.min(numCols - 1, op.step));
+    const u = op.name.toUpperCase();
+
+    if (op.kind === 'measure') {
+      for (const q of validQ) grid[q][s] = '\\meter{}';
+      continue;
+    }
+
+    if ((u === 'CNOT' || u === 'CX') && validQ.length === 2) {
+      const [ctrl, tgt] = validQ;
+      grid[ctrl][s] = `\\ctrl{${tgt - ctrl}}`;
+      grid[tgt][s] = '\\targ{}';
+      continue;
+    }
+    if (u === 'CZ' && validQ.length === 2) {
+      const [c, t] = validQ;
+      grid[c][s] = `\\ctrl{${t - c}}`;
+      grid[t][s] = '\\control{}';
+      continue;
+    }
+    if (u === 'SWAP' && validQ.length === 2) {
+      const [a, b] = validQ;
+      grid[a][s] = `\\swap{${b - a}}`;
+      grid[b][s] = '\\targX{}';
+      continue;
+    }
+    if ((u === 'CCX' || u === 'TOFFOLI') && validQ.length === 3) {
+      const [c0, c1, tgt] = validQ;
+      grid[c0][s] = `\\ctrl{${tgt - c0}}`;
+      grid[c1][s] = `\\ctrl{${tgt - c1}}`;
+      grid[tgt][s] = '\\targ{}';
+      continue;
+    }
+    if (u === 'CCZ' && validQ.length === 3) {
+      const sorted = [...validQ].sort((a, b) => a - b);
+      grid[sorted[0]][s] = `\\ctrl{${sorted[1] - sorted[0]}}`;
+      grid[sorted[1]][s] = `\\ctrl{${sorted[2] - sorted[1]}}`;
+      grid[sorted[2]][s] = '\\control{}';
+      continue;
+    }
+
+    const baseTex = texGateMap[u] || `\\text{${op.name.replace(/_/g, '\\_')}}`;
+    const pStr =
+      op.params && op.params.length > 0
+        ? `(${op.params.map(formatLatexParam).join(', ')})`
+        : '';
+    const fullLbl = `${baseTex}${pStr}`;
+
+    if (validQ.length === 1) {
+      grid[validQ[0]][s] = `\\gate{${fullLbl}}`;
+    } else {
+      const minQ = Math.min(...validQ);
+      const maxQ = Math.max(...validQ);
+      const span = maxQ - minQ + 1;
+      grid[minQ][s] = `\\gate[wires=${span}]{${fullLbl}}`;
+      for (let r = minQ + 1; r <= maxQ; r++) {
+        grid[r][s] = '';
+      }
+    }
+  }
+
+  const lines: string[] = [
+    '% LaTeX preamble: \\usepackage{tikz} \\usetikzlibrary{quantikz2}',
+    '\\begin{quantikz}[row sep=0.35cm, column sep=0.45cm]',
+  ];
+  for (let q = 0; q < nQ; q++) {
+    const qSpec = project.qubits[q];
+    const ketRaw = (qSpec?.init_state || '|0>').replace(/^\|/, '').replace(/>$/, '');
+    const qLabel = (qSpec?.name || `q_${q}`).replace(/_/g, '\\_');
+    const rowStr = [`  \\lstick{$\\text{${qLabel}}\\ket{${ketRaw}}$}`, ...grid[q], '\\qw'].join(' & ');
+    lines.push(q < nQ - 1 ? `${rowStr} \\\\` : rowStr);
+  }
+  lines.push('\\end{quantikz}');
+  return lines.join('\n');
 }
 
 export function downloadTextFile(filename: string, content: string, mime = 'image/svg+xml;charset=utf-8'): void {

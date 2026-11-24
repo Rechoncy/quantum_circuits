@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   AlertTriangle,
   ChevronDown,
@@ -11,11 +11,12 @@ import {
   Play,
   Pause,
   RefreshCw,
+  ShieldCheck,
   SkipBack,
   SkipForward,
   X,
 } from 'lucide-react';
-import type { ProjectModel, RunHistoryItem, SimulationResponse } from '../types';
+import type { ProjectModel, RunHistoryItem, SimulationResponse, ZneResponse } from '../types';
 import { PlotlyChart } from './PlotlyChart';
 import { BlochSphere3D } from './BlochSphere3D';
 import { downloadTextFile } from '../utils/exportCircuitSvg';
@@ -23,6 +24,9 @@ import { downloadTextFile } from '../utils/exportCircuitSvg';
 interface SimulateResultsProps {
   project: ProjectModel;
   simResponse: SimulationResponse | null;
+  zneResponse?: ZneResponse | null;
+  onRunZne?: () => void;
+  isBusy?: boolean;
   timeCursorStep: number;
   maxCursorStep: number;
   onTimeCursorChange?: (step: number) => void;
@@ -92,6 +96,9 @@ function formatBasisKet(bstr: string): string {
 export const SimulateResults: React.FC<SimulateResultsProps> = ({
   project,
   simResponse,
+  zneResponse = null,
+  onRunZne,
+  isBusy = false,
   timeCursorStep,
   maxCursorStep,
   onTimeCursorChange,
@@ -110,7 +117,15 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   isStale = false,
   onRefreshSim,
 }) => {
-  const [tab, setTab] = useState<'evolution' | 'populations' | 'measurement' | 'density' | 'steps'>('evolution');
+  const [tab, setTab] = useState<'evolution' | 'populations' | 'measurement' | 'density' | 'steps' | 'zne'>('evolution');
+  const [zneMetric, setZneMetric] = useState<'z' | 'energy'>('z');
+
+  useEffect(() => {
+    if (zneResponse) {
+      setTab('zne');
+      setZneMetric(zneResponse.energy_by_scale ? 'energy' : 'z');
+    }
+  }, [zneResponse]);
   const [rhoPart, setRhoPart] = useState<'abs' | 'real' | 'imag'>('abs');
   const [tomoLeftMode, setTomoLeftMode] = useState<'auto' | 'rho' | 'mi' | 'local'>('auto');
   const [measUnit, setMeasUnit] = useState<'prob' | 'counts'>('prob');
@@ -470,6 +485,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                 label: rhoMatrix ? '密度矩阵 & 互信息' : '纠缠互信息 & 激发',
               },
               { id: 'steps', label: '指标 & 明细' },
+              { id: 'zne', label: zneResponse ? '误差缓解 ZNE ✓' : '误差缓解 ZNE' },
             ] as const
           ).map((t) => (
             <button
@@ -1779,6 +1795,295 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {/* =============================================================== */}
+        {/* TAB 6: ZERO-NOISE EXTRAPOLATION (ZNE) ERROR MITIGATION          */}
+        {/* =============================================================== */}
+        {tab === 'zne' && (
+          <div className="h-full flex flex-col gap-3 min-h-[320px]">
+            {!zneResponse ? (
+              <div className="flex-1 studio-card flex flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="w-10 h-10 rounded-full bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                  零噪声外推量子误差缓解（Zero-Noise Extrapolation, ZNE）
+                </div>
+                <p className="max-w-[520px] text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                  按存活率精确缩放通道噪声倍数 λ ∈ &#123;1.0, 2.0, 3.0&#125;（退极化/弛豫率同步折叠），通过线性拟合与
+                  Lagrange-Richardson 多项式外推至零噪声极限 λ → 0，在不增加物理量子比特的前提下抑制退相干偏差。
+                </p>
+                {onRunZne && (
+                  <button
+                    onClick={onRunZne}
+                    disabled={isBusy}
+                    className="mt-1 h-8 px-4 rounded-lg bg-[#0A84FF] hover:bg-[#0070E0] disabled:opacity-50 text-white text-[12px] font-semibold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    执行 ZNE 零噪声外推缓解 (λ=1, 2, 3)
+                  </button>
+                )}
+              </div>
+            ) : (
+              <>
+                {/* Top Summary KPI Strip */}
+                {(() => {
+                  const hasEnergy = Boolean(
+                    zneResponse.energy_by_scale &&
+                      zneResponse.energy_zne_linear != null &&
+                      zneResponse.energy_zne_richardson != null
+                  );
+                  const useEnergy = zneMetric === 'energy' && hasEnergy;
+                  const yMeas = useEnergy ? zneResponse.energy_by_scale! : zneResponse.z_by_scale;
+                  const yLin = useEnergy ? zneResponse.energy_zne_linear! : zneResponse.z_zne_linear;
+                  const yRich = useEnergy ? zneResponse.energy_zne_richardson! : zneResponse.z_zne_richardson;
+                  const yIdeal = (useEnergy ? zneResponse.energy_ideal : zneResponse.z_ideal) ?? null;
+                  const yLinCurve = useEnergy
+                    ? zneResponse.energy_linear_curve || []
+                    : zneResponse.z_linear_curve;
+                  const yRichCurve = useEnergy
+                    ? zneResponse.energy_richardson_curve || []
+                    : zneResponse.z_richardson_curve;
+                  const metricTitle = useEnergy
+                    ? `哈密顿量能量 ⟨H⟩`
+                    : `${zneResponse.observed_qubit_name || `q${zneResponse.observed_qubit}`} 期望值 ⟨Z⟩`;
+                  const rawErr = yIdeal !== null ? Math.abs(yMeas[0] - yIdeal) : null;
+                  const zneErr = yIdeal !== null ? Math.abs(yRich - yIdeal) : null;
+
+                  return (
+                    <>
+                      <div className="shrink-0 studio-card px-3.5 py-2 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono-num">
+                          <span className="px-2 py-0.5 rounded bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-semibold">
+                            后端: {zneResponse.backend.toUpperCase()}
+                          </span>
+                          <span className="text-[var(--text-secondary)]">
+                            原始含噪(λ=1):{' '}
+                            <strong className="text-[var(--text-primary)]">{yMeas[0]?.toFixed(5)}</strong>
+                          </span>
+                          <span className="text-[var(--text-secondary)]">
+                            线性外推(λ→0):{' '}
+                            <strong className="text-[#0A84FF]">{yLin.toFixed(5)}</strong>
+                          </span>
+                          <span className="text-[var(--text-secondary)]">
+                            Richardson 外推(λ→0):{' '}
+                            <strong className="text-emerald-600 dark:text-emerald-400">
+                              {yRich.toFixed(5)}
+                            </strong>
+                          </span>
+                          {yIdeal !== null && (
+                            <span className="text-[var(--text-secondary)]">
+                              理想真值:{' '}
+                              <strong className="text-[var(--text-primary)]">{yIdeal.toFixed(5)}</strong>
+                              {rawErr !== null && zneErr !== null && rawErr > 1e-6 && (
+                                <span className="ml-1.5 text-emerald-600 dark:text-emerald-400">
+                                  (误差 {rawErr.toFixed(4)} → {zneErr.toFixed(4)})
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {hasEnergy && (
+                            <div className="p-0.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] flex text-[11px]">
+                              <button
+                                onClick={() => setZneMetric('z')}
+                                className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                                  zneMetric === 'z'
+                                    ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
+                                    : 'text-[var(--text-secondary)]'
+                                }`}
+                              >
+                                ⟨Z⟩ 期望
+                              </button>
+                              <button
+                                onClick={() => setZneMetric('energy')}
+                                className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                                  zneMetric === 'energy'
+                                    ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
+                                    : 'text-[var(--text-secondary)]'
+                                }`}
+                              >
+                                ⟨H⟩ 能量
+                              </button>
+                            </div>
+                          )}
+                          {onRunZne && (
+                            <button
+                              onClick={onRunZne}
+                              disabled={isBusy}
+                              className="h-7 px-2.5 rounded-md bg-[var(--bg-subtle)] hover:bg-[#0A84FF]/10 border border-[var(--border-hairline)] text-[11px] font-medium text-[#0A84FF] flex items-center gap-1 cursor-pointer"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isBusy ? 'animate-spin' : ''}`} />
+                              重新外推
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-3">
+                        {/* Left 7 Cols: Extrapolation Fit Plot */}
+                        <div className="lg:col-span-7 studio-card flex flex-col overflow-hidden min-h-[220px]">
+                          <div className="h-8 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                            <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                              ZNE 零噪声极限外推曲线 — {metricTitle}
+                            </span>
+                            <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                              λ ∈ [{zneResponse.scale_factors.join(', ')}] → 0
+                            </span>
+                          </div>
+                          <div className="flex-1 min-h-0 px-1.5 pb-1">
+                            <PlotlyChart
+                              data={[
+                                ...(yIdeal !== null
+                                  ? [
+                                      {
+                                        x: [0, Math.max(...zneResponse.scale_factors) * 1.05],
+                                        y: [yIdeal, yIdeal],
+                                        type: 'scatter',
+                                        mode: 'lines',
+                                        name: '理想无噪真值 (λ=0)',
+                                        line: { color: '#94A3B8', width: 1.8, dash: 'dot' },
+                                      },
+                                    ]
+                                  : []),
+                                {
+                                  x: zneResponse.fit_x,
+                                  y: yLinCurve,
+                                  type: 'scatter',
+                                  mode: 'lines',
+                                  name: '线性外推拟合',
+                                  line: { color: '#0A84FF', width: 2, dash: 'dash' },
+                                },
+                                {
+                                  x: zneResponse.fit_x,
+                                  y: yRichCurve,
+                                  type: 'scatter',
+                                  mode: 'lines',
+                                  name: 'Richardson 多项式外推',
+                                  line: { color: '#10B981', width: 2.5 },
+                                },
+                                {
+                                  x: zneResponse.scale_factors,
+                                  y: yMeas,
+                                  type: 'scatter',
+                                  mode: 'markers',
+                                  name: '含噪采样观测值',
+                                  marker: { color: '#EF4444', size: 9, symbol: 'circle' },
+                                },
+                                {
+                                  x: [0],
+                                  y: [yLin],
+                                  type: 'scatter',
+                                  mode: 'markers',
+                                  name: '线性 ZNE 解',
+                                  marker: { color: '#0A84FF', size: 10, symbol: 'diamond' },
+                                },
+                                {
+                                  x: [0],
+                                  y: [yRich],
+                                  type: 'scatter',
+                                  mode: 'markers',
+                                  name: 'Richardson ZNE 解',
+                                  marker: { color: '#10B981', size: 12, symbol: 'star' },
+                                },
+                              ]}
+                              layout={{
+                                paper_bgcolor: plotBg,
+                                plot_bgcolor: plotBg,
+                                hovermode: 'closest',
+                                margin: { l: 52, r: 18, t: 12, b: 36 },
+                                xaxis: {
+                                  title: {
+                                    text: '噪声放大倍率 λ (λ → 0 为零噪声外推点)',
+                                    font: { size: 11, color: mutedColor },
+                                  },
+                                  range: [-0.15, Math.max(...zneResponse.scale_factors) * 1.08],
+                                  gridcolor: gridColor,
+                                  zerolinecolor: darkMode
+                                    ? 'rgba(16,185,129,0.35)'
+                                    : 'rgba(16,185,129,0.4)',
+                                  zerolinewidth: 1.5,
+                                  tickfont: { color: mutedColor, size: 10.5 },
+                                },
+                                yaxis: {
+                                  title: {
+                                    text: metricTitle,
+                                    font: { size: 11, color: mutedColor },
+                                  },
+                                  gridcolor: gridColor,
+                                  tickfont: { color: mutedColor, size: 10.5 },
+                                },
+                                legend: {
+                                  orientation: 'h',
+                                  y: 1.15,
+                                  font: { size: 10, color: textColor },
+                                },
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Right 5 Cols: Per-Qubit ZNE Mitigation Table */}
+                        <div className="lg:col-span-5 studio-card flex flex-col overflow-hidden min-h-[220px]">
+                          <div className="h-8 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                            <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                              全寄存器单比特 ⟨Z_q⟩ 误差缓解对比
+                            </span>
+                            <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                              {zneResponse.per_qubit_z.length} Qubits
+                            </span>
+                          </div>
+                          <div className="flex-1 overflow-auto">
+                            <table className="w-full text-[11.5px] font-mono-num border-collapse">
+                              <thead className="sticky top-0 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] text-[10.5px] text-[var(--text-secondary)] text-left z-10">
+                                <tr>
+                                  <th className="py-1.5 px-2.5">比特</th>
+                                  <th className="py-1.5 px-2.5">含噪(λ=1)</th>
+                                  <th className="py-1.5 px-2.5">线性ZNE</th>
+                                  <th className="py-1.5 px-2.5">Rich.ZNE</th>
+                                  <th className="py-1.5 px-2.5">理想值</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[var(--border-hairline)]">
+                                {zneResponse.per_qubit_z.map((row) => {
+                                  const qLabel = project.qubits[row.qubit]?.name || `q${row.qubit}`;
+                                  const isObs = row.qubit === zneResponse.observed_qubit;
+                                  return (
+                                    <tr
+                                      key={row.qubit}
+                                      onClick={() => onObservedQubitChange?.(row.qubit)}
+                                      className={`cursor-pointer transition-colors ${
+                                        isObs
+                                          ? 'bg-[#0A84FF]/10 font-semibold'
+                                          : 'hover:bg-black/[0.025] dark:hover:bg-white/[0.04]'
+                                      }`}
+                                    >
+                                      <td className="py-1.5 px-2.5 text-[#0A84FF]">{qLabel}</td>
+                                      <td className="py-1.5 px-2.5">{row.noisy.toFixed(4)}</td>
+                                      <td className="py-1.5 px-2.5">{row.zne_linear.toFixed(4)}</td>
+                                      <td className="py-1.5 px-2.5 text-emerald-600 dark:text-emerald-400">
+                                        {row.zne_richardson.toFixed(4)}
+                                      </td>
+                                      <td className="py-1.5 px-2.5 text-[var(--text-secondary)]">
+                                        {row.ideal !== null ? row.ideal.toFixed(4) : '—'}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
+            )}
           </div>
         )}
       </div>

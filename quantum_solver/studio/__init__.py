@@ -14,6 +14,7 @@ from .models import (
     SweepRequest,
     SynthesizeUnitaryRequest,
     VariationalOptimizeRequest,
+    ZneRequest,
 )
 from .nl_circuit import generate_circuit_from_nl
 from .project_engine import (
@@ -26,6 +27,7 @@ from .project_engine import (
     execute_project_sweep,
     execute_unitary_synthesis,
     execute_variational_optimization,
+    execute_zne_mitigation,
     openqasm_to_project_ops,
     parse_sparse_pauli_terms,
     project_to_dsl,
@@ -46,6 +48,7 @@ __all__ = [
     "SynthesizeUnitaryRequest",
     "SweepRequest",
     "VariationalOptimizeRequest",
+    "ZneRequest",
     "NlCircuitRequest",
     "generate_circuit_from_nl",
     "build_preset_projects",
@@ -61,6 +64,7 @@ __all__ = [
     "execute_unitary_synthesis",
     "execute_project_sweep",
     "execute_variational_optimization",
+    "execute_zne_mitigation",
     "create_app",
     "app",
 ]

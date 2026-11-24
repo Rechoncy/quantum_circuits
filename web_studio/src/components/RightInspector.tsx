@@ -39,7 +39,7 @@ export interface SweepConfigState {
   target_bitstring: string;
   observed_qubit: number;
   hamiltonian_str: string;
-  vqe_method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+  vqe_method: 'Parameter-Shift' | 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
   vqe_max_iter: number;
   backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
 }
@@ -129,6 +129,7 @@ interface RightInspectorProps {
   hardwareSweepParams: Record<string, string>;
   onRunSweep: () => void;
   onCancelSweep?: () => void;
+  onRunZne?: () => void;
   isBusy: boolean;
 }
 
@@ -187,6 +188,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   hardwareSweepParams,
   onRunSweep,
   onCancelSweep,
+  onRunZne,
   isBusy,
 }) => {
   const activeHw =
@@ -343,6 +345,23 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </span>
             </div>
           </div>
+
+          {onRunZne && (
+            <div className="pt-2 space-y-1.5">
+              <button
+                type="button"
+                onClick={onRunZne}
+                disabled={isBusy}
+                className="w-full py-1.5 px-3 rounded-lg border border-[#0A84FF]/35 bg-[#0A84FF]/10 hover:bg-[#0A84FF]/18 text-[#0A84FF] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 transition-colors"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                执行 ZNE 零噪声外推缓解 (λ=1,2,3)
+              </button>
+              <p className="text-[10.5px] text-[var(--text-secondary)] leading-snug">
+                放大硬件弛豫/退极化噪声并用 Richardson 多项式外推至 λ→0 无噪极限。
+              </p>
+            </div>
+          )}
         </div>
       </aside>
     );
@@ -538,6 +557,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   }
                   className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
                 >
+                  <option value="Parameter-Shift">Parameter-Shift (解析梯度)</option>
                   <option value="COBYLA">COBYLA (信赖域)</option>
                   <option value="Powell">Powell (方向搜索)</option>
                   <option value="Nelder-Mead">Nelder-Mead</option>

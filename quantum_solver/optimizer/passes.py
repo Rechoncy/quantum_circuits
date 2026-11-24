@@ -59,20 +59,26 @@ def expand_multi_qubit_gates(circuit: QuantumCircuit) -> QuantumCircuit:
     return out
 
 
-def _shortest_coupling_path(
-    q_start: int,
-    q_end: int,
-    edges: Set[Tuple[int, int]],
-    num_qubits: int,
-) -> List[int]:
-    """Find shortest path between q_start and q_end on hardware coupling graph via BFS."""
-    if q_start == q_end:
-        return [q_start]
+def _build_adj_map(edges: Set[Tuple[int, int]], num_qubits: int) -> Dict[int, List[int]]:
     adj: Dict[int, List[int]] = {i: [] for i in range(num_qubits)}
     for u, v in edges:
         if u < num_qubits and v < num_qubits:
             adj[u].append(v)
             adj[v].append(u)
+    return adj
+
+
+def _shortest_coupling_path(
+    q_start: int,
+    q_end: int,
+    edges: Set[Tuple[int, int]],
+    num_qubits: int,
+    adj: Optional[Dict[int, List[int]]] = None,
+) -> List[int]:
+    """Find shortest path between q_start and q_end on hardware coupling graph via BFS."""
+    if q_start == q_end:
+        return [q_start]
+    adj_map = adj if adj is not None else _build_adj_map(edges, num_qubits)
 
     queue: deque[List[int]] = deque([[q_start]])
     visited = {q_start}
@@ -81,28 +87,28 @@ def _shortest_coupling_path(
         curr = path[-1]
         if curr == q_end:
             return path
-        for nxt in adj[curr]:
+        for nxt in adj_map[curr]:
             if nxt not in visited:
                 visited.add(nxt)
                 queue.append(path + [nxt])
     raise ValueError(f"Hardware topology is disconnected between qubit {q_start} and {q_end}.")
 
 
-def _all_pairs_distances(edges: Set[Tuple[int, int]], num_qubits: int) -> List[List[int]]:
+def _all_pairs_distances(
+    edges: Set[Tuple[int, int]],
+    num_qubits: int,
+    adj: Optional[Dict[int, List[int]]] = None,
+) -> List[List[int]]:
     """Compute all-pairs shortest path distances on the hardware coupling graph."""
     inf = 10**6
     dist = [[inf] * num_qubits for _ in range(num_qubits)]
-    adj: Dict[int, List[int]] = {i: [] for i in range(num_qubits)}
-    for u, v in edges:
-        if u < num_qubits and v < num_qubits:
-            adj[u].append(v)
-            adj[v].append(u)
+    adj_map = adj if adj is not None else _build_adj_map(edges, num_qubits)
     for src in range(num_qubits):
         dist[src][src] = 0
         q: deque[int] = deque([src])
         while q:
             cur = q.popleft()
-            for nxt in adj[cur]:
+            for nxt in adj_map[cur]:
                 if dist[src][nxt] > dist[src][cur] + 1:
                     dist[src][nxt] = dist[src][cur] + 1
                     q.append(nxt)
@@ -134,7 +140,8 @@ def route_for_topology(
     ):
         return circuit.copy()
 
-    dist_mat = _all_pairs_distances(edges, n)
+    adj = _build_adj_map(edges, n)
+    dist_mat = _all_pairs_distances(edges, n, adj=adj)
     l2p = list(range(n))  # logical qubit -> physical qubit
     p2l = list(range(n))  # physical qubit -> logical qubit
 
@@ -165,7 +172,7 @@ def route_for_topology(
             lq0, lq1 = op.qubits
             pq0, pq1 = l2p[lq0], l2p[lq1]
             if not hardware.is_connected(pq0, pq1):
-                path = _shortest_coupling_path(pq0, pq1, edges, n)
+                path = _shortest_coupling_path(pq0, pq1, edges, n, adj=adj)
                 # Compare moving pq0 toward pq1 vs moving pq1 toward pq0 via lookahead cost
                 cand_a = list(l2p)
                 cand_p2l_a = list(p2l)
@@ -230,7 +237,7 @@ def route_for_topology(
         for target_q in range(n):
             curr_phys = l2p[target_q]
             if curr_phys != target_q:
-                path = _shortest_coupling_path(curr_phys, target_q, edges, n)
+                path = _shortest_coupling_path(curr_phys, target_q, edges, n, adj=adj)
                 for k in range(len(path) - 1):
                     _apply_phys_swap(path[k], path[k + 1])
 
@@ -273,53 +280,79 @@ def consolidate_2q_blocks(
         out.measured_qubits = list(circuit.measured_qubits)
         return out
 
-    # General N-qubit circuit block consolidation:
+    # General N-qubit DAG-aware 2Q block consolidation (commuting past disjoint qubits!):
     out = QuantumCircuit(circuit.num_qubits, name=circuit.name)
     out.measured_qubits = list(circuit.measured_qubits)
 
-    i = 0
     ops = circuit.operations
     n_ops = len(ops)
+    consumed = [False] * n_ops
 
-    while i < n_ops:
+    for i in range(n_ops):
+        if consumed[i]:
+            continue
         op = ops[i]
         if not isinstance(op, GateInstruction) or len(op.noise_after) > 0:
             out.operations.append(op)
-            i += 1
+            consumed[i] = True
             continue
 
         if len(op.qubits) == 1:
-            # Look ahead to see if this 1Q gate can be absorbed into an upcoming 2Q block on its qubit
             out.operations.append(op)
-            i += 1
+            consumed[i] = True
             continue
 
         if len(op.qubits) == 2:
             pair = (min(op.qubits[0], op.qubits[1]), max(op.qubits[0], op.qubits[1]))
-            block_gates: List[GateInstruction] = []
+            pair_set = set(pair)
 
-            # Also pull back any immediately preceding 1Q gates in `out.operations` that act on `pair`
+            # 1. Pull back preceding noiseless gates in `out.operations` on `pair` across disjoint wires
             pulled_back: List[GateInstruction] = []
-            while out.operations and isinstance(out.operations[-1], GateInstruction):
-                prev_g = out.operations[-1]
-                if len(prev_g.noise_after) == 0 and set(prev_g.qubits).issubset(pair):
-                    pulled_back.append(out.operations.pop())  # type: ignore[arg-type]
+            pinned_back: Set[int] = set()
+            scan_idx = len(out.operations) - 1
+            while scan_idx >= 0 and pinned_back != pair_set:
+                prev_op = out.operations[scan_idx]
+                if isinstance(prev_op, GateInstruction) and len(prev_op.noise_after) == 0:
+                    qs = set(prev_op.qubits)
+                    if qs.issubset(pair_set) and qs.isdisjoint(pinned_back):
+                        pulled_back.append(out.operations.pop(scan_idx))  # type: ignore[arg-type]
+                    elif qs & pair_set:
+                        pinned_back |= (qs & pair_set)
                 else:
-                    break
-            block_gates.extend(reversed(pulled_back))
+                    qs = (
+                        set(prev_op.channel.qubits)
+                        if isinstance(prev_op, NoiseInstruction)
+                        else set(prev_op.qubits)
+                    )
+                    pinned_back |= (qs & pair_set)
+                scan_idx -= 1
 
-            # Greedily collect subsequent 1Q and 2Q gates acting exclusively on `pair`
-            while i < n_ops:
-                curr = ops[i]
-                if (
-                    isinstance(curr, GateInstruction)
-                    and len(curr.noise_after) == 0
-                    and set(curr.qubits).issubset(pair)
-                ):
-                    block_gates.append(curr)
-                    i += 1
+            block_gates: List[GateInstruction] = list(reversed(pulled_back))
+
+            # 2. Look ahead across `ops[i:]`, absorbing gates on `pair` across disjoint wires
+            blocked_fwd: Set[int] = set()
+            for j in range(i, n_ops):
+                if consumed[j]:
+                    continue
+                curr = ops[j]
+                if isinstance(curr, GateInstruction) and len(curr.noise_after) == 0:
+                    qs = set(curr.qubits)
+                    if qs.issubset(pair_set) and qs.isdisjoint(blocked_fwd):
+                        block_gates.append(curr)
+                        consumed[j] = True
+                    elif qs & pair_set:
+                        blocked_fwd |= (qs & pair_set)
+                        if blocked_fwd == pair_set:
+                            break
                 else:
-                    break
+                    qs = (
+                        set(curr.channel.qubits)
+                        if isinstance(curr, NoiseInstruction)
+                        else set(curr.qubits)
+                    )
+                    blocked_fwd |= (qs & pair_set)
+                    if blocked_fwd == pair_set:
+                        break
 
             # Compute the 4x4 unitary of `block_gates` on `pair = (qa, qb)`
             qa, qb = pair
@@ -333,7 +366,7 @@ def consolidate_2q_blocks(
             out.operations.extend(synthesized)
         else:
             out.operations.append(op)
-            i += 1
+            consumed[i] = True
 
     return out
 
@@ -344,8 +377,11 @@ def commute_rz_through_cz(
 ) -> QuantumCircuit:
     """
     Commute single-qubit Z-rotations (RZ, Z, S, SDG, T, TDG) rightward across
-    diagonal 2-qubit gates (CZ, RZZ) so they merge with downstream 1-qubit gates.
+    diagonal 2-qubit gates (CZ, RZZ) and CNOT controls, and X-rotations (RX, X, SX, SXDG)
+    rightward across CNOT targets, jumping across disjoint wires so downstream 1Q fusion cancels them.
     """
+    z_diag_1q = {"RZ", "Z", "S", "SDG", "T", "TDG", "P"}
+    x_rot_1q = {"RX", "X", "SX", "SXDG"}
     out = circuit.copy()
     ops = out.operations
     max_iters = min(max(8, len(ops)), 64)
@@ -356,10 +392,22 @@ def commute_rz_through_cz(
             op_b = ops[idx + 1]
             if not (isinstance(op_a, GateInstruction) and isinstance(op_b, GateInstruction)):
                 continue
-            if op_a.noise_after or op_b.noise_after:
+            if op_a.noise_after or op_b.noise_after or len(op_a.qubits) != 1:
                 continue
-            if op_a.name == "RZ" and op_b.name in ("CZ", "RZZ") and op_a.qubits[0] in op_b.qubits:
-                # Swap order: [RZ(q), CZ(q0, q1)] -> [CZ(q0, q1), RZ(q)]
+            qa = op_a.qubits[0]
+            ua = op_a.name.upper()
+            ub = op_b.name.upper()
+            if ua in z_diag_1q and ub in ("CZ", "RZZ") and qa in op_b.qubits:
+                ops[idx], ops[idx + 1] = op_b, op_a
+                changed = True
+            elif ua in z_diag_1q and ub in ("CNOT", "CX") and len(op_b.qubits) == 2 and qa == op_b.qubits[0]:
+                ops[idx], ops[idx + 1] = op_b, op_a
+                changed = True
+            elif ua in x_rot_1q and ub in ("CNOT", "CX") and len(op_b.qubits) == 2 and qa == op_b.qubits[1]:
+                ops[idx], ops[idx + 1] = op_b, op_a
+                changed = True
+            elif ua in (z_diag_1q | x_rot_1q) and qa not in op_b.qubits and len(op_b.qubits) >= 2:
+                # Canonicalize 1Q commutators past disjoint 2Q gates so they meet same-wire partners
                 ops[idx], ops[idx + 1] = op_b, op_a
                 changed = True
         if not changed:

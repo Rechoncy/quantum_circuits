@@ -1,10 +1,10 @@
-# Quantum Studio v2.2 — 全尺度量子演化求解、闭环 VQE 寻优、多体纠缠诊断与跨硬件综合工作台
+# Quantum Studio v2.3 — 全尺度量子演化求解、ZNE 零噪声外推、参数移位 VQE 与跨硬件综合工作台
 
 <p align="center">
   <img src="assets/quantum_studio.png" width="96" alt="Quantum Studio Icon" />
 </p>
 
-一套集成了 **QuTiP（稀疏林德布拉德主方程，≤9Q）**、**Kraus（张量收缩密度矩阵，≤14Q）**、**Trajectory（多线程态矢量与蒙特卡洛量子轨迹，≤24Q）**、**Stim（伴随反演稳定子态保真度与高速采样，500+Q）**、**硬件感知量子线路综合优化器（100+Q）**、**OpenQASM 2.0/3.0 双向编译**、**VQE/QAOA 变分能量景观扫描** 以及 **多轮对话式 AI 量子线路助手** 的桌面与 Web 一体化工作台。
+一套集成了 **QuTiP（稀疏林德布拉德主方程，≤9Q）**、**Kraus（张量收缩密度矩阵，≤14Q）**、**Trajectory（多线程态矢量与蒙特卡洛量子轨迹，≤24Q）**、**Stim（伴随反演稳定子态保真度与高速采样，500+Q）**、**DAG 硬件感知量子线路综合优化器（100+Q）**、**零噪声外推（ZNE）量子误差缓解**、**参数移位法则（Parameter-Shift）解析梯度 VQE**、**OpenQASM 2.0/3.0 与 LaTeX Quantikz 导出** 以及 **多轮对话式 AI 量子线路助手** 的桌面与 Web 一体化工作台。
 
 ---
 
@@ -33,8 +33,8 @@
 ## 安装与快速启动
 
 ### 方式一：使用免配置 `.exe` 安装包（推荐）
-直接从 [GitHub Releases](../../releases) 下载 **`QuantumStudio_v2.2.0_Setup.exe`**（已完整内嵌 Python 3.13、QuTiP、SciPy、Stim 及前端构建产物，无需本机安装 Python 或 Node.js）：
-- 双击 `QuantumStudio_v2.2.0_Setup.exe`，选择安装目录即可自动释放并创建桌面/开始菜单快捷方式及标准 `Uninstall.exe` 卸载程序（支持 Windows「设置 → 已安装的应用」一键卸载）。
+直接从 [GitHub Releases](../../releases) 下载 **`QuantumStudio_v2.3.0_Setup.exe`**（已完整内嵌 Python 3.13、QuTiP、SciPy、Stim 及前端构建产物，无需本机安装 Python 或 Node.js）：
+- 双击 `QuantumStudio_v2.3.0_Setup.exe`，选择安装目录即可自动释放并创建桌面/开始菜单快捷方式及标准 `Uninstall.exe` 卸载程序（支持 Windows「设置 → 已安装的应用」一键卸载）。
 
 ### 方式二：项目目录直接运行（已内嵌 `python_env/`）
 ```powershell

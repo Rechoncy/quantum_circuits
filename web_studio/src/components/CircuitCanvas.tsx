@@ -94,7 +94,9 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   const [extraCols, setExtraCols] = useState(2);
   const [dragHoverCell, setDragHoverCell] = useState<{ q: number; c: number } | null>(null);
   const [hoverCell, setHoverCell] = useState<{ q: number; c: number } | null>(null);
+  const [vpScroll, setVpScroll] = useState({ top: 0, left: 0, height: 720, width: 1280 });
   const gridRef = useRef<HTMLDivElement>(null);
+  const scrollWrapRef = useRef<HTMLDivElement>(null);
 
   const customGateMap = useMemo(() => {
     const m = new Map<string, CustomGateDef>();
@@ -601,8 +603,27 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         </div>
       )}
 
-      {/* Scrollable Circuit Grid Area */}
-      <div className={`flex-1 overflow-auto px-4 ${compact ? 'py-1.5' : 'py-2'}`}>
+      {/* Scrollable Circuit Grid Area (with 2D Viewport Windowing for 50Q~500Q!) */}
+      <div
+        ref={scrollWrapRef}
+        onScroll={(e) => {
+          if (project.qubits.length <= 48 && numCols <= 40) return;
+          const el = e.currentTarget;
+          if (
+            Math.abs(el.scrollTop - vpScroll.top) > rowH * 2 ||
+            Math.abs(el.scrollLeft - vpScroll.left) > COL_W * 2 ||
+            Math.abs(el.clientHeight - vpScroll.height) > 40
+          ) {
+            setVpScroll({
+              top: el.scrollTop,
+              left: el.scrollLeft,
+              height: el.clientHeight || 720,
+              width: el.clientWidth || 1280,
+            });
+          }
+        }}
+        className={`flex-1 overflow-auto px-4 ${compact ? 'py-1.5' : 'py-2'}`}
+      >
         <div className="relative mx-auto" style={{ width: canvasW, minHeight: canvasH }}>
           {/* Step Ruler Header */}
           {!compact && (
@@ -731,310 +752,375 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                 />
               ))}
 
-            {project.qubits.map((q) => {
-              const isQSelected = selection.type === 'qubit' && selection.qubitId === q.id;
+            {(() => {
+              const nQ = project.qubits.length;
+              const useVirtual = nQ > 48 || numCols > 40;
+              const visRowStart = useVirtual ? Math.max(0, Math.floor(vpScroll.top / rowH) - 8) : 0;
+              const visRowEnd = useVirtual
+                ? Math.min(nQ, Math.ceil((vpScroll.top + vpScroll.height) / rowH) + 8)
+                : nQ;
+              const visColStart = useVirtual
+                ? Math.max(0, Math.floor(Math.max(0, vpScroll.left - LEFT_PAD) / COL_W) - 6)
+                : 0;
+              const visColEnd = useVirtual
+                ? Math.min(numCols, Math.ceil((Math.max(0, vpScroll.left - LEFT_PAD) + vpScroll.width) / COL_W) + 6)
+                : numCols;
+              const visibleQubits = project.qubits.slice(visRowStart, visRowEnd);
+              const visibleOps = useVirtual
+                ? ops.filter((op) => {
+                    if (op.step < visColStart || op.step > visColEnd) return false;
+                    const vq = op.qubits.filter((q) => q >= 0 && q < nQ);
+                    if (vq.length === 0) return false;
+                    return Math.max(...vq) >= visRowStart && Math.min(...vq) <= visRowEnd;
+                  })
+                : ops;
+
               return (
-                <div key={q.id} className="relative flex items-center" style={{ height: rowH }}>
-                  {/* Sticky Qubit Label (Opaque Mask so scrolled gates slide cleanly underneath) */}
-                  <button
-                    onClick={(e) => {
+                <>
+                  {visRowStart > 0 && <div style={{ height: visRowStart * rowH }} />}
+                  {visibleQubits.map((q) => {
+                    const isQSelected = selection.type === 'qubit' && selection.qubitId === q.id;
+                    return (
+                      <div key={q.id} className="relative flex items-center" style={{ height: rowH }}>
+                        {/* Sticky Qubit Label (Opaque Mask so scrolled gates slide cleanly underneath) */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!readOnly) onSelect({ type: 'qubit', qubitId: q.id });
+                          }}
+                          style={{ width: LEFT_PAD, height: rowH }}
+                          className={`sticky left-0 z-30 pr-3 text-right flex items-center justify-end gap-1.5 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]/60 transition-colors cursor-pointer shrink-0 ${
+                            isQSelected
+                              ? 'text-[#0A84FF] font-semibold'
+                              : 'text-[var(--text-primary)] hover:text-[#0A84FF]'
+                          }`}
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ backgroundColor: q.color }}
+                          />
+                          <span className="text-[12.5px] font-mono-num font-semibold truncate">
+                            {q.name}
+                          </span>
+                          <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                            {q.init_state.replace('>', '⟩')}
+                          </span>
+                        </button>
+
+                        {/* Continuous Horizontal Wire */}
+                        <div
+                          className="absolute h-[1.5px] bg-[#8E8E93]/45 pointer-events-none"
+                          style={{
+                            left: LEFT_PAD,
+                            width: numCols * COL_W,
+                            top: rowH / 2,
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+
+                  {/* Rendered Operations Overlay (Draggable to reposition in Design Mode!) */}
+                  {visibleOps.map((op) => {
+                    const validQ = op.qubits.filter((q) => q >= 0 && q < nQ);
+                    if (validQ.length === 0) return null;
+                    const isSelected =
+                      (selection.type === 'op' && selection.opId === op.id) ||
+                      multiSelectedIds.includes(op.id);
+                    const isExecActive = readOnly && activeExecCol !== null && op.step === activeExecCol;
+                    const isFutureStep =
+                      readOnly &&
+                      timeCursorStep !== undefined &&
+                      (activeExecCol === null || op.step > activeExecCol);
+                    const simStateCls = isExecActive
+                      ? 'studio-gate-active'
+                      : isFutureStep
+                      ? 'opacity-60'
+                      : '';
+                    const style = getGateStyle(op);
+                    const xCenter = LEFT_PAD + op.step * COL_W + COL_W / 2;
+                    const uname = op.name.toUpperCase();
+                    const paramTxt = formatOpParams(op);
+
+                    const handleOpClick = (e: React.MouseEvent) => {
                       e.stopPropagation();
-                      if (!readOnly) onSelect({ type: 'qubit', qubitId: q.id });
-                    }}
-                    style={{ width: LEFT_PAD, height: rowH }}
-                    className={`sticky left-0 z-30 pr-3 text-right flex items-center justify-end gap-1.5 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]/60 transition-colors cursor-pointer shrink-0 ${
-                      isQSelected
-                        ? 'text-[#0A84FF] font-semibold'
-                        : 'text-[var(--text-primary)] hover:text-[#0A84FF]'
-                    }`}
-                  >
-                    <span
-                      className="w-2 h-2 rounded-full shrink-0"
-                      style={{ backgroundColor: q.color }}
-                    />
-                    <span className="text-[12.5px] font-mono-num font-semibold truncate">
-                      {q.name}
-                    </span>
-                    <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
-                      {q.init_state.replace('>', '⟩')}
-                    </span>
-                  </button>
+                      if (readOnly) return;
+                      if (e.shiftKey) {
+                        setMultiSelectedIds((prev) =>
+                          prev.includes(op.id) ? prev.filter((id) => id !== op.id) : [...prev, op.id]
+                        );
+                      } else {
+                        setMultiSelectedIds([]);
+                        onSelect({ type: 'op', opId: op.id });
+                      }
+                    };
 
-                  {/* Continuous Horizontal Wire */}
-                  <div
-                    className="absolute h-[1.5px] bg-[#8E8E93]/45 pointer-events-none"
-                    style={{
-                      left: LEFT_PAD,
-                      width: numCols * COL_W,
-                      top: rowH / 2,
-                    }}
-                  />
-                </div>
-              );
-            })}
+                    const dragHandlers = readOnly
+                      ? {}
+                      : {
+                          draggable: true,
+                          onDragStart: (e: React.DragEvent) => {
+                            e.stopPropagation();
+                            e.dataTransfer.setData('application/quantum-move-op', op.id);
+                          },
+                        };
 
-            {/* Rendered Operations Overlay (Draggable to reposition in Design Mode!) */}
-            {ops.map((op) => {
-              const validQ = op.qubits.filter((q) => q >= 0 && q < project.qubits.length);
-              if (validQ.length === 0) return null;
-              const isSelected =
-                (selection.type === 'op' && selection.opId === op.id) ||
-                multiSelectedIds.includes(op.id);
-              const isExecActive = readOnly && activeExecCol !== null && op.step === activeExecCol;
-              const isFutureStep =
-                readOnly &&
-                timeCursorStep !== undefined &&
-                (activeExecCol === null || op.step > activeExecCol);
-              const simStateCls = isExecActive
-                ? 'studio-gate-active'
-                : isFutureStep
-                ? 'opacity-60'
-                : '';
-              const style = getGateStyle(op);
-              const xCenter = LEFT_PAD + op.step * COL_W + COL_W / 2;
-              const uname = op.name.toUpperCase();
-              const paramTxt = formatOpParams(op);
+                    // Measurement across multiple qubits
+                    if (op.kind === 'measure') {
+                      const mH = compact ? 26 : 34;
+                      const mW = compact ? 32 : 38;
+                      return (
+                        <React.Fragment key={op.id}>
+                          {validQ.map((qIdx) => (
+                            <div
+                              key={`${op.id}_m_${qIdx}`}
+                              {...dragHandlers}
+                              onClick={handleOpClick}
+                              style={{
+                                left: xCenter - mW / 2,
+                                top: qIdx * rowH + rowH / 2 - mH / 2,
+                                width: mW,
+                                height: mH,
+                              }}
+                              className={`studio-gate-node absolute rounded-lg border flex items-center justify-center cursor-pointer z-10 ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
+                                isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/60'
+                              }`}
+                              title="测量 Measurement（可拖拽移动时间列）"
+                            >
+                              <Gauge className={compact ? 'w-3.5 h-3.5 stroke-[1.7]' : 'w-4 h-4 stroke-[1.7]'} />
+                            </div>
+                          ))}
+                        </React.Fragment>
+                      );
+                    }
 
-              const handleOpClick = (e: React.MouseEvent) => {
-                e.stopPropagation();
-                if (readOnly) return;
-                if (e.shiftKey) {
-                  setMultiSelectedIds((prev) =>
-                    prev.includes(op.id) ? prev.filter((id) => id !== op.id) : [...prev, op.id]
-                  );
-                } else {
-                  setMultiSelectedIds([]);
-                  onSelect({ type: 'op', opId: op.id });
-                }
-              };
+                    // Standard SWAP / CZ / CNOT / CX / CCZ / CCX / TOFFOLI vertical connector rendering
+                    if (
+                      validQ.length >= 2 &&
+                      (uname === 'SWAP' ||
+                        uname === 'CZ' ||
+                        uname === 'CNOT' ||
+                        uname === 'CX' ||
+                        uname === 'CCZ' ||
+                        uname === 'CCX' ||
+                        uname === 'TOFFOLI')
+                    ) {
+                      const minQ = Math.min(...validQ);
+                      const maxQ = Math.max(...validQ);
+                      const topY = minQ * rowH + rowH / 2;
+                      const botY = maxQ * rowH + rowH / 2;
+                      const isTargetXor =
+                        uname === 'CNOT' || uname === 'CX' || uname === 'CCX' || uname === 'TOFFOLI';
+                      const targetQ = validQ[validQ.length - 1];
+                      const controls =
+                        uname === 'SWAP'
+                          ? []
+                          : uname === 'CZ' || uname === 'CCZ'
+                          ? validQ
+                          : validQ.slice(0, -1);
+                      const topoWarn = isPairTopologyViolated(validQ);
 
-              const dragHandlers = readOnly
-                ? {}
-                : {
-                    draggable: true,
-                    onDragStart: (e: React.DragEvent) => {
-                      e.stopPropagation();
-                      e.dataTransfer.setData('application/quantum-move-op', op.id);
-                    },
-                  };
+                      return (
+                        <div
+                          key={op.id}
+                          {...dragHandlers}
+                          onClick={handleOpClick}
+                          style={{
+                            left: xCenter - 18,
+                            top: topY - 14,
+                            width: 36,
+                            height: botY - topY + 28,
+                          }}
+                          className={`studio-gate-node group absolute cursor-grab active:cursor-grabbing z-10 rounded-lg ${simStateCls} ${
+                            isSelected
+                              ? 'bg-[#0A84FF]/10 ring-2 ring-[#0A84FF]'
+                              : topoWarn
+                              ? 'bg-amber-500/12 ring-1 ring-amber-500/80 ring-dashed'
+                              : 'hover:bg-indigo-500/8'
+                          }`}
+                          title={
+                            topoWarn
+                              ? `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动插入 SWAP 路由`
+                              : `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
+                          }
+                        >
+                          <div
+                            className={`absolute w-[2px] ${
+                              topoWarn ? 'bg-amber-500' : 'bg-[#1E3A8A] dark:bg-indigo-400'
+                            }`}
+                            style={{ left: 17, top: 14, height: botY - topY }}
+                          />
+                          {uname === 'SWAP' &&
+                            validQ.map((sq) => (
+                              <svg
+                                key={sq}
+                                width="16"
+                                height="16"
+                                viewBox="0 0 16 16"
+                                className={`absolute ${
+                                  topoWarn ? 'text-amber-500' : 'text-[#1E3A8A] dark:text-indigo-400'
+                                }`}
+                                style={{ left: 10, top: (sq - minQ) * rowH + 6 }}
+                              >
+                                <path
+                                  d="M3 3L13 13M13 3L3 13"
+                                  stroke="currentColor"
+                                  strokeWidth="2.2"
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                            ))}
+                          {controls.map((cq) => (
+                            <div
+                              key={cq}
+                              className={`absolute w-3 h-3 rounded-full ${
+                                topoWarn ? 'bg-amber-500' : 'bg-[#1E3A8A] dark:bg-indigo-400'
+                              }`}
+                              style={{ left: 12, top: (cq - minQ) * rowH + 8 }}
+                            />
+                          ))}
+                          {isTargetXor && (
+                            <div
+                              className={`absolute w-7 h-7 rounded-full border-2 bg-[var(--bg-panel)] flex items-center justify-center font-bold text-sm leading-none ${
+                                topoWarn
+                                  ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                                  : 'border-[#1E3A8A] dark:border-indigo-400 text-[#1E3A8A] dark:text-indigo-300'
+                              }`}
+                              style={{ left: 4, top: (targetQ - minQ) * rowH }}
+                            >
+                              +
+                            </div>
+                          )}
+                          {(uname === 'CZ' || uname === 'CCZ') && (
+                            <span
+                              className={`absolute left-6 text-[9.5px] font-mono-num font-bold border px-1 rounded ${
+                                topoWarn
+                                  ? 'text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/90 border-amber-400'
+                                  : 'text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/80 border-indigo-200 dark:border-indigo-700'
+                              }`}
+                              style={{ top: (botY - topY) / 2 + 5 }}
+                            >
+                              {uname}
+                            </span>
+                          )}
+                          {topoWarn && !compact && (
+                            <span
+                              className="absolute -top-2.5 -right-2 w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center shadow-xs"
+                              title="超出当前硬件拓扑/里德堡阻塞半径，需路由"
+                            >
+                              <AlertTriangle className="w-2.5 h-2.5" />
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
 
-              // Measurement across multiple qubits
-              if (op.kind === 'measure') {
-                const mH = compact ? 26 : 34;
-                const mW = compact ? 32 : 38;
-                return (
-                  <React.Fragment key={op.id}>
-                    {validQ.map((qIdx) => (
+                    // Multi-qubit custom or entangling gate box
+                    if (validQ.length >= 2) {
+                      const minQ = Math.min(...validQ);
+                      const maxQ = Math.max(...validQ);
+                      const padHalf = compact ? 14 : 20;
+                      const boxTop = minQ * rowH + rowH / 2 - padHalf;
+                      const boxH = (maxQ - minQ) * rowH + padHalf * 2;
+                      const topoWarn = isPairTopologyViolated(validQ);
+                      return (
+                        <div
+                          key={op.id}
+                          {...dragHandlers}
+                          onClick={handleOpClick}
+                          style={{
+                            left: xCenter - (compact ? 30 : 33),
+                            top: boxTop,
+                            width: compact ? 60 : 66,
+                            height: boxH,
+                          }}
+                          className={`studio-gate-node absolute rounded-xl border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${
+                            topoWarn ? 'border-amber-500 border-dashed' : style.border
+                          } ${style.text} ${simStateCls} ${
+                            isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
+                          }`}
+                          title={
+                            topoWarn
+                              ? `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动路由`
+                              : `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
+                          }
+                        >
+                          {topoWarn && !compact && (
+                            <span className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center shadow-xs">
+                              <AlertTriangle className="w-2.5 h-2.5" />
+                            </span>
+                          )}
+                          {/* Active qubit side port dots so skipped wires are clearly distinguishable */}
+                          {validQ.map((aq) => (
+                            <span
+                              key={aq}
+                              className="absolute -left-[4px] w-2 h-2 rounded-full bg-purple-500 border border-white"
+                              style={{ top: (aq - minQ) * rowH + padHalf - 4 }}
+                            />
+                          ))}
+                          <span className={`${compact ? 'text-[11px]' : 'text-[12px]'} font-bold font-mono-num leading-tight text-center`}>
+                            {style.label}
+                          </span>
+                          {paramTxt && !compact && (
+                            <span className="text-[9.5px] font-mono-num opacity-80 truncate max-w-full mt-0.5">
+                              {paramTxt}
+                            </span>
+                          )}
+                          {style.isCustom && !compact && (
+                            <span className="mt-1 px-1.5 py-0 rounded bg-white/80 dark:bg-black/25 text-[9px] font-medium">
+                              自定义
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    // Single-qubit gate or noise box
+                    const qIdx = validQ[0];
+                    const boxW = paramTxt && !compact ? Math.min(78, Math.max(46, Math.round(paramTxt.length * 6.4 + 14))) : compact ? 42 : 44;
+                    const boxH = compact ? 26 : 38;
+                    return (
                       <div
-                        key={`${op.id}_m_${qIdx}`}
+                        key={op.id}
                         {...dragHandlers}
                         onClick={handleOpClick}
                         style={{
-                          left: xCenter - mW / 2,
-                          top: qIdx * rowH + rowH / 2 - mH / 2,
-                          width: mW,
-                          height: mH,
+                          left: xCenter - boxW / 2,
+                          top: qIdx * rowH + rowH / 2 - boxH / 2,
+                          width: boxW,
+                          height: boxH,
                         }}
-                        className={`studio-gate-node absolute rounded-lg border flex items-center justify-center cursor-pointer z-10 ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
-                          isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/60'
+                        className={`studio-gate-node group absolute rounded-lg border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
+                          isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
                         }`}
-                        title="测量 Measurement（可拖拽移动时间列）"
+                        title={`${op.name}${paramTxt ? `(${paramTxt})` : ''} @ ${project.qubits[qIdx]?.name} · 可拖拽移动`}
                       >
-                        <Gauge className={compact ? 'w-3.5 h-3.5 stroke-[1.7]' : 'w-4 h-4 stroke-[1.7]'} />
+                        <span className="text-[12px] font-bold font-mono-num leading-none">
+                          {style.label}
+                        </span>
+                        {paramTxt && !compact && (
+                          <span className="text-[9.5px] font-mono-num opacity-85 leading-none mt-1 truncate max-w-full">
+                            {paramTxt}
+                          </span>
+                        )}
+                        {!readOnly && isSelected && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteOp(op.id);
+                            }}
+                            title="删除此门"
+                            className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center shadow-xs hover:bg-red-600 cursor-pointer"
+                          >
+                            <Trash2 className="w-2.5 h-2.5" />
+                          </button>
+                        )}
                       </div>
-                    ))}
-                  </React.Fragment>
-                );
-              }
-
-              // Standard CZ / CNOT / CCZ vertical connector rendering
-              if (validQ.length >= 2 && (uname === 'CZ' || uname === 'CNOT' || uname === 'CX' || uname === 'CCZ')) {
-                const minQ = Math.min(...validQ);
-                const maxQ = Math.max(...validQ);
-                const topY = minQ * rowH + rowH / 2;
-                const botY = maxQ * rowH + rowH / 2;
-                const targetQ = validQ[validQ.length - 1];
-                const controls = uname === 'CZ' || uname === 'CCZ' ? validQ : validQ.slice(0, -1);
-                const topoWarn = isPairTopologyViolated(validQ);
-
-                return (
-                  <div
-                    key={op.id}
-                    {...dragHandlers}
-                    onClick={handleOpClick}
-                    style={{
-                      left: xCenter - 18,
-                      top: topY - 14,
-                      width: 36,
-                      height: botY - topY + 28,
-                    }}
-                    className={`studio-gate-node group absolute cursor-grab active:cursor-grabbing z-10 rounded-lg ${simStateCls} ${
-                      isSelected
-                        ? 'bg-[#0A84FF]/10 ring-2 ring-[#0A84FF]'
-                        : topoWarn
-                        ? 'bg-amber-500/12 ring-1 ring-amber-500/80 ring-dashed'
-                        : 'hover:bg-indigo-500/8'
-                    }`}
-                    title={
-                      topoWarn
-                        ? `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动插入 SWAP 路由`
-                        : `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
-                    }
-                  >
-                    <div
-                      className={`absolute w-[2px] ${
-                        topoWarn ? 'bg-amber-500' : 'bg-[#1E3A8A] dark:bg-indigo-400'
-                      }`}
-                      style={{ left: 17, top: 14, height: botY - topY }}
-                    />
-                    {controls.map((cq) => (
-                      <div
-                        key={cq}
-                        className={`absolute w-3 h-3 rounded-full ${
-                          topoWarn ? 'bg-amber-500' : 'bg-[#1E3A8A] dark:bg-indigo-400'
-                        }`}
-                        style={{ left: 12, top: (cq - minQ) * rowH + 8 }}
-                      />
-                    ))}
-                    {(uname === 'CNOT' || uname === 'CX') && (
-                      <div
-                        className={`absolute w-7 h-7 rounded-full border-2 bg-[var(--bg-panel)] flex items-center justify-center font-bold text-sm leading-none ${
-                          topoWarn
-                            ? 'border-amber-500 text-amber-600 dark:text-amber-400'
-                            : 'border-[#1E3A8A] dark:border-indigo-400 text-[#1E3A8A] dark:text-indigo-300'
-                        }`}
-                        style={{ left: 4, top: (targetQ - minQ) * rowH }}
-                      >
-                        +
-                      </div>
-                    )}
-                    {(uname === 'CZ' || uname === 'CCZ') && (
-                      <span
-                        className={`absolute left-6 text-[9.5px] font-mono-num font-bold border px-1 rounded ${
-                          topoWarn
-                            ? 'text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/90 border-amber-400'
-                            : 'text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/80 border-indigo-200 dark:border-indigo-700'
-                        }`}
-                        style={{ top: (botY - topY) / 2 + 5 }}
-                      >
-                        {uname}
-                      </span>
-                    )}
-                    {topoWarn && !compact && (
-                      <span
-                        className="absolute -top-2.5 -right-2 w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center shadow-xs"
-                        title="超出当前硬件拓扑/里德堡阻塞半径，需路由"
-                      >
-                        <AlertTriangle className="w-2.5 h-2.5" />
-                      </span>
-                    )}
-                  </div>
-                );
-              }
-
-              // Multi-qubit custom or entangling gate box
-              if (validQ.length >= 2) {
-                const minQ = Math.min(...validQ);
-                const maxQ = Math.max(...validQ);
-                const padHalf = compact ? 14 : 20;
-                const boxTop = minQ * rowH + rowH / 2 - padHalf;
-                const boxH = (maxQ - minQ) * rowH + padHalf * 2;
-                const topoWarn = isPairTopologyViolated(validQ);
-                return (
-                  <div
-                    key={op.id}
-                    {...dragHandlers}
-                    onClick={handleOpClick}
-                    style={{
-                      left: xCenter - (compact ? 30 : 33),
-                      top: boxTop,
-                      width: compact ? 60 : 66,
-                      height: boxH,
-                    }}
-                    className={`studio-gate-node absolute rounded-xl border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${
-                      topoWarn ? 'border-amber-500 border-dashed' : style.border
-                    } ${style.text} ${simStateCls} ${
-                      isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
-                    }`}
-                    title={
-                      topoWarn
-                        ? `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动路由`
-                        : `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
-                    }
-                  >
-                    {topoWarn && !compact && (
-                      <span className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center shadow-xs">
-                        <AlertTriangle className="w-2.5 h-2.5" />
-                      </span>
-                    )}
-                    {/* Active qubit side port dots so skipped wires are clearly distinguishable */}
-                    {validQ.map((aq) => (
-                      <span
-                        key={aq}
-                        className="absolute -left-[4px] w-2 h-2 rounded-full bg-purple-500 border border-white"
-                        style={{ top: (aq - minQ) * rowH + padHalf - 4 }}
-                      />
-                    ))}
-                    <span className={`${compact ? 'text-[11px]' : 'text-[12px]'} font-bold font-mono-num leading-tight text-center`}>
-                      {style.label}
-                    </span>
-                    {paramTxt && !compact && (
-                      <span className="text-[9.5px] font-mono-num opacity-80 truncate max-w-full mt-0.5">
-                        {paramTxt}
-                      </span>
-                    )}
-                    {style.isCustom && !compact && (
-                      <span className="mt-1 px-1.5 py-0 rounded bg-white/80 dark:bg-black/25 text-[9px] font-medium">
-                        自定义
-                      </span>
-                    )}
-                  </div>
-                );
-              }
-
-              // Single-qubit gate or noise box
-              const qIdx = validQ[0];
-              const boxW = paramTxt && !compact ? Math.min(78, Math.max(46, Math.round(paramTxt.length * 6.4 + 14))) : compact ? 42 : 44;
-              const boxH = compact ? 26 : 38;
-              return (
-                <div
-                  key={op.id}
-                  {...dragHandlers}
-                  onClick={handleOpClick}
-                  style={{
-                    left: xCenter - boxW / 2,
-                    top: qIdx * rowH + rowH / 2 - boxH / 2,
-                    width: boxW,
-                    height: boxH,
-                  }}
-                  className={`studio-gate-node group absolute rounded-lg border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
-                    isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
-                  }`}
-                  title={`${op.name}${paramTxt ? `(${paramTxt})` : ''} @ ${project.qubits[qIdx]?.name} · 可拖拽移动`}
-                >
-                  <span className="text-[12px] font-bold font-mono-num leading-none">
-                    {style.label}
-                  </span>
-                  {paramTxt && !compact && (
-                    <span className="text-[9.5px] font-mono-num opacity-85 leading-none mt-1 truncate max-w-full">
-                      {paramTxt}
-                    </span>
-                  )}
-                  {!readOnly && isSelected && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteOp(op.id);
-                      }}
-                      title="删除此门"
-                      className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center shadow-xs hover:bg-red-600 cursor-pointer"
-                    >
-                      <Trash2 className="w-2.5 h-2.5" />
-                    </button>
-                  )}
-                </div>
+                    );
+                  })}
+                </>
               );
-            })}
+            })()}
           </div>
 
           {/* Dashed "+ 添加比特" Row Directly Below Last Wire (Design Mode) */}

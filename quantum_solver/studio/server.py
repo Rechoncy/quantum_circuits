@@ -33,6 +33,7 @@ from .models import (
     SynthesizeUnitaryRequest,
     ValidateCustomGateRequest,
     VariationalOptimizeRequest,
+    ZneRequest,
 )
 from .nl_circuit import generate_circuit_from_nl
 from .project_engine import (
@@ -44,6 +45,7 @@ from .project_engine import (
     execute_project_sweep,
     execute_unitary_synthesis,
     execute_variational_optimization,
+    execute_zne_mitigation,
     openqasm_to_project_ops,
     project_to_dsl,
     project_to_openqasm3,
@@ -54,7 +56,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.2.0")
+    app = FastAPI(title="Quantum Studio API", version="2.3.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -66,7 +68,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.2.0"}
+        return {"status": "ok", "version": "2.3.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:
@@ -171,6 +173,13 @@ def create_app() -> FastAPI:
     def api_vqe_optimize(req: VariationalOptimizeRequest) -> Dict[str, Any]:
         try:
             return execute_variational_optimization(req)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/zne")
+    def api_zne_mitigation(req: ZneRequest) -> Dict[str, Any]:
+        try:
+            return execute_zne_mitigation(req)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

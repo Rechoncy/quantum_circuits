@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ChevronUp,
   ChevronDown,
@@ -9,7 +9,7 @@ import {
   Download,
 } from 'lucide-react';
 import type { ProjectModel } from '../types';
-import { downloadTextFile } from '../utils/exportCircuitSvg';
+import { buildQuantikzLatex, downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface BottomDockProps {
   project: ProjectModel;
@@ -38,7 +38,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
 }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [dockHeight, setDockHeight] = useState(210);
-  const [tab, setTab] = useState<'code' | 'params' | 'qasm' | 'logs'>('code');
+  const [tab, setTab] = useState<'code' | 'params' | 'qasm' | 'latex' | 'logs'>('code');
   const [draft, setDraft] = useState(dslText);
   const [dirty, setDirty] = useState(false);
   const [qasmDraft, setQasmDraft] = useState(qasmText);
@@ -48,6 +48,11 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   const [newVarVal, setNewVarVal] = useState('1.5708');
   const gutterRef = useRef<HTMLDivElement>(null);
   const qasmGutterRef = useRef<HTMLDivElement>(null);
+
+  const latexText = useMemo(
+    () => (tab === 'latex' ? buildQuantikzLatex(project) : ''),
+    [tab, project]
+  );
 
   useEffect(() => {
     setDraft(dslText);
@@ -72,6 +77,11 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   const handleDownloadQasm = () => {
     const base = (project.name || 'circuit').replace(/\.[^.]+$/, '');
     downloadTextFile(`${base}.qasm`, qasmDraft || qasmText || 'OPENQASM 3.0;', 'text/plain;charset=utf-8');
+  };
+
+  const handleDownloadTex = () => {
+    const base = (project.name || 'circuit').replace(/\.[^.]+$/, '');
+    downloadTextFile(`${base}_quantikz.tex`, buildQuantikzLatex(project), 'text/plain;charset=utf-8');
   };
 
   const handleStartResize = (e: React.MouseEvent) => {
@@ -110,6 +120,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             { id: 'code', label: '代码' },
             { id: 'params', label: `参数 (${varEntries.length})` },
             { id: 'qasm', label: 'OpenQASM 3' },
+            { id: 'latex', label: 'LaTeX (论文)' },
             { id: 'logs', label: `日志 (${logs.length})` },
           ].map((t) => {
             const active = tab === t.id;
@@ -167,9 +178,23 @@ export const BottomDock: React.FC<BottomDockProps> = ({
               <span>.qasm</span>
             </button>
           )}
-          {(tab === 'code' || tab === 'qasm') && !collapsed && (
+          {tab === 'latex' && !collapsed && (
             <button
-              onClick={() => handleCopy(tab === 'code' ? draft : qasmDraft)}
+              onClick={handleDownloadTex}
+              className="px-2 py-0.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[11px] text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
+              title="下载 LaTeX Quantikz (.tex) 宏包代码"
+            >
+              <Download className="w-3 h-3" />
+              <span>.tex</span>
+            </button>
+          )}
+          {(tab === 'code' || tab === 'qasm' || tab === 'latex') && !collapsed && (
+            <button
+              onClick={() =>
+                handleCopy(
+                  tab === 'code' ? draft : tab === 'qasm' ? qasmDraft : latexText
+                )
+              }
               className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-[var(--text-secondary)]"
               title="复制代码"
             >
@@ -351,6 +376,12 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                 />
               </div>
             </div>
+          )}
+
+          {tab === 'latex' && (
+            <pre className="p-3.5 text-[12px] leading-[1.55] font-mono-num text-[var(--text-primary)] whitespace-pre-wrap select-text">
+              {latexText}
+            </pre>
           )}
 
           {tab === 'logs' && (

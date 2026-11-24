@@ -1102,6 +1102,111 @@ def test_vqe_optimizer_mutual_info_and_cross_hardware_benchmark() -> None:
     assert opt_16["noisy_fidelity_optimized"] is not None
 
 
+def test_dag_consolidation_zne_mitigation_and_parameter_shift_vqe() -> None:
+    """
+    Verify v2.3.0 upgrades:
+      1. DAG-aware 2Q block consolidation across disjoint qubits ([CNOT(0,1), H(2), CNOT(0,1)] -> 0 2Q gates)
+         + non-commuting barrier safety ([CNOT(0,1), CNOT(1,2), CNOT(0,1)] preserves exact unitary)
+         + CNOT commutation cancellation ([CNOT(0,1), RZ(pi/3, 0), CNOT(0,1)] -> 0 2Q gates);
+      2. Zero-Noise Extrapolation (ZNE) quantum error mitigation reducing noisy <Z> & <H> bias;
+      3. Analytical Parameter-Shift + Adam VQE (including shared multi-gate chain-rule parameters).
+    """
+    import math
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        VariationalOptimizeRequest,
+        ZneRequest,
+        build_preset_projects,
+        execute_variational_optimization,
+        execute_zne_mitigation,
+    )
+
+    hw_sc = HardwareModel.superconducting_processor(num_qubits=3)
+    opt_sc = QuantumCircuitOptimizer(hardware=hw_sc)
+
+    # 1a. Disjoint-wire interleaved 2Q cancellation: [CNOT(0,1), H(2), CNOT(0,1)] -> 0 2Q gates
+    c_disjoint = QuantumCircuit(3)
+    c_disjoint.cnot(0, 1).h(2).cnot(0, 1)
+    r_disjoint = opt_sc.optimize_circuit(c_disjoint, evaluate_noisy_fidelity=False)
+    assert r_disjoint.optimized_metrics.num_2q_gates == 0
+    assert r_disjoint.unitary_fidelity > 0.999999
+
+    # 1b. Overlapping 2Q barrier safety: [CNOT(0,1), CNOT(1,2), CNOT(0,1)] must preserve exact unitary
+    c_barrier = QuantumCircuit(3)
+    c_barrier.cnot(0, 1).cnot(1, 2).cnot(0, 1)
+    r_barrier = opt_sc.optimize_circuit(c_barrier, evaluate_noisy_fidelity=False)
+    assert r_barrier.unitary_fidelity > 0.999999
+
+    # 1c. CNOT control-Z commutation + KAK cancellation: [CNOT(0,1), RZ(0.7, 0), CNOT(0,1)] -> 0 2Q gates
+    hw_cnot = HardwareModel.superconducting_processor(num_qubits=2, primary_2q_gate="CNOT")
+    opt_cnot = QuantumCircuitOptimizer(hardware=hw_cnot)
+    c_comm = QuantumCircuit(2)
+    c_comm.cnot(0, 1).rz(0, 0.7).cnot(0, 1)
+    r_comm = opt_cnot.optimize_circuit(c_comm, evaluate_noisy_fidelity=False)
+    assert r_comm.optimized_metrics.num_2q_gates == 0
+    assert r_comm.unitary_fidelity > 0.999999
+
+    # 2. Zero-Noise Extrapolation (ZNE) reduces expectation error on a noisy circuit
+    presets = build_preset_projects()
+    p_zne = presets[2].model_copy(deep=True)  # 2Q noisy Bell/entangling template
+    p_zne.sim_settings.enable_depol = True
+    p_zne.sim_settings.enable_t1_t2 = True
+    p_zne.operations = [
+        CircuitOpModel(id="z_x0", step=0, kind="gate", name="X", qubits=[0], params=[]),
+        CircuitOpModel(id="z_cx1", step=1, kind="gate", name="CNOT", qubits=[0, 1], params=[]),
+        CircuitOpModel(id="z_cx2", step=2, kind="gate", name="CNOT", qubits=[0, 1], params=[]),
+        CircuitOpModel(id="z_cx3", step=3, kind="gate", name="CNOT", qubits=[0, 1], params=[]),
+        CircuitOpModel(id="z_m", step=4, kind="measure", name="MEASURE", qubits=[0, 1], params=[]),
+    ]
+    zne_res = execute_zne_mitigation(
+        ZneRequest(
+            project=p_zne,
+            scale_factors=[1.0, 2.0, 3.0],
+            observed_qubit=1,
+            hamiltonian_str="Z0*Z1",
+            backend="kraus",
+        )
+    )
+    # Ideal state is |11>, so <Z_1>_ideal = -1.0 and <Z0 Z1>_ideal = +1.0
+    assert abs(zne_res["z_ideal"] - (-1.0)) < 1e-4
+    err_raw_z = abs(zne_res["z_unmitigated"] - zne_res["z_ideal"])
+    err_rich_z = abs(zne_res["z_zne_richardson"] - zne_res["z_ideal"])
+    assert err_rich_z < err_raw_z * 0.5, f"ZNE should cut <Z> bias by >50%: raw={err_raw_z}, zne={err_rich_z}"
+
+    assert zne_res["energy_ideal"] is not None
+    err_raw_e = abs(zne_res["energy_unmitigated"] - zne_res["energy_ideal"])
+    err_rich_e = abs(zne_res["energy_zne_richardson"] - zne_res["energy_ideal"])
+    assert err_rich_e < err_raw_e * 0.5
+
+    # 3. Exact Parameter-Shift + Adam VQE on 2Q TFIM (with shared parameter 'beta' across 2 RX gates!)
+    p_ps = presets[2].model_copy(deep=True)
+    p_ps.sim_settings.enable_t1_t2 = False
+    p_ps.sim_settings.enable_depol = False
+    p_ps.sim_settings.enable_zz = False
+    p_ps.sim_settings.enable_readout = False
+    p_ps.variables = {"gamma": 0.25, "beta": 0.25}
+    p_ps.operations = [
+        CircuitOpModel(id="ps_h0", step=0, kind="gate", name="H", qubits=[0], params=[]),
+        CircuitOpModel(id="ps_h1", step=0, kind="gate", name="H", qubits=[1], params=[]),
+        CircuitOpModel(id="ps_zz", step=1, kind="gate", name="RZZ", qubits=[0, 1], params=["gamma"]),
+        CircuitOpModel(id="ps_x0", step=2, kind="gate", name="RX", qubits=[0], params=["beta"]),
+        CircuitOpModel(id="ps_x1", step=2, kind="gate", name="RX", qubits=[1], params=["beta"]),
+        CircuitOpModel(id="ps_m", step=3, kind="measure", name="MEASURE", qubits=[0, 1], params=[]),
+    ]
+    ps_res = execute_variational_optimization(
+        VariationalOptimizeRequest(
+            project=p_ps,
+            hamiltonian_str="-1.0*Z0*Z1 - 0.5*X0 - 0.5*X1",
+            method="Parameter-Shift",
+            max_iter=45,
+            backend="trajectory",
+        )
+    )
+    assert ps_res["method"] == "Parameter-Shift"
+    assert abs(ps_res["optimal_energy"] - (-math.sqrt(2.0))) < 2e-3
+
+
+
 
 
 

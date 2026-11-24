@@ -195,9 +195,19 @@ class VariationalOptimizeRequest(BaseModel):
     project: ProjectModel
     hamiltonian_str: str
     param_names: List[str] = Field(default_factory=list)
-    method: Literal["COBYLA", "Powell", "Nelder-Mead", "L-BFGS-B"] = "COBYLA"
+    method: Literal["Parameter-Shift", "COBYLA", "Powell", "Nelder-Mead", "L-BFGS-B"] = "COBYLA"
     max_iter: int = 50
     backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "trajectory"
+
+
+class ZneRequest(BaseModel):
+    """Zero-Noise Extrapolation (ZNE) quantum error mitigation request."""
+
+    project: ProjectModel
+    scale_factors: List[float] = Field(default_factory=lambda: [1.0, 2.0, 3.0])
+    observed_qubit: int = 0
+    hamiltonian_str: Optional[str] = None
+    backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "kraus"
 
 
 class NlCircuitRequest(BaseModel):

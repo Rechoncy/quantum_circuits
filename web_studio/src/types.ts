@@ -204,7 +204,7 @@ export interface Sweep2DResponse {
 export type SweepResponse = Sweep1DResponse | Sweep2DResponse;
 
 export interface VariationalOptimizeResponse {
-  method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+  method: 'Parameter-Shift' | 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
   backend: string;
   hamiltonian_str: string;
   param_names: string[];
@@ -218,6 +218,40 @@ export interface VariationalOptimizeResponse {
   energy_trace: number[];
   best_so_far_trace: number[];
   dominant_states: { bitstring: string; probability: number }[];
+}
+
+export interface ZnePerQubitRow {
+  qubit: number;
+  name: string;
+  noisy: number;
+  zne_linear: number;
+  zne_richardson: number;
+  ideal: number;
+}
+
+export interface ZneResponse {
+  backend: string;
+  scale_factors: number[];
+  fit_x: number[];
+  observed_qubit: number;
+  observed_qubit_name: string;
+  fidelities_by_scale: number[];
+  z_by_scale: number[];
+  z_unmitigated: number;
+  z_zne_linear: number;
+  z_zne_richardson: number;
+  z_ideal: number;
+  z_linear_curve: number[];
+  z_richardson_curve: number[];
+  hamiltonian_str?: string | null;
+  energy_by_scale?: number[] | null;
+  energy_unmitigated?: number | null;
+  energy_zne_linear?: number | null;
+  energy_zne_richardson?: number | null;
+  energy_ideal?: number | null;
+  energy_linear_curve?: number[] | null;
+  energy_richardson_curve?: number[] | null;
+  per_qubit_z: ZnePerQubitRow[];
 }
 
 export interface HardwareBenchmarkEntry {

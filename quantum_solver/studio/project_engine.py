@@ -53,6 +53,7 @@ from .models import (
     SweepRequest,
     SynthesizeUnitaryRequest,
     VariationalOptimizeRequest,
+    ZneRequest,
 )
 
 
@@ -2268,43 +2269,144 @@ def execute_variational_optimization(req: VariationalOptimizeRequest) -> Dict[st
     best_vec = x0.copy()
     best_fid = 1.0
     best_probs: Dict[str, float] = {}
+    total_circuit_runs = 0
 
-    def _objective(vec: np.ndarray) -> float:
-        nonlocal best_energy, best_vec, best_fid, best_probs
-        curr_vars = dict(project.variables)
-        for idx_p, pname in enumerate(param_names):
-            curr_vars[pname] = float(vec[idx_p])
-        circ = compile_project_circuit(project, variables_override=curr_vars)
+    def _run_circuit_energy(
+        target_proj: ProjectModel,
+        vars_override: Dict[str, float],
+        seed_val: int,
+    ) -> Tuple[float, float, Dict[str, float]]:
+        nonlocal total_circuit_runs
+        total_circuit_runs += 1
+        circ = compile_project_circuit(target_proj, variables_override=vars_override)
         res = solver.solve(
             circ,
             backend=eff_backend,
             hardware=base_hw,
             shots=shots,
-            seed=1024 + len(energy_trace),
+            seed=seed_val,
             initial_state=init_psi,
             initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
             observable_terms=parsed_ham,
         )
         en = float(evaluate_result_hamiltonian(res, parsed_ham, n_q))
+        fid = float(res.final_fidelity if res.final_fidelity is not None else 1.0)
+        return en, fid, dict(res.final_probabilities)
+
+    def _record_iterate(vec: np.ndarray, seed_val: int = 1024) -> float:
+        nonlocal best_energy, best_vec, best_fid, best_probs
+        curr_vars = dict(project.variables)
+        for idx_p, pname in enumerate(param_names):
+            curr_vars[pname] = float(vec[idx_p])
+        en, fid, probs = _run_circuit_energy(project, curr_vars, seed_val)
         energy_trace.append(round(en, 6))
         if en < best_energy:
             best_energy = en
             best_vec = vec.copy()
-            best_fid = float(res.final_fidelity if res.final_fidelity is not None else 1.0)
-            best_probs = dict(res.final_probabilities)
+            best_fid = fid
+            best_probs = probs
         best_so_far_trace.append(round(best_energy, 6))
         return en
 
-    # Always evaluate exact initial point first so index 0 is guaranteed to be initial_params
-    _objective(x0)
+    if req.method == "Parameter-Shift":
+        # Exact quantum Parameter-Shift Rule + Adam optimizer!
+        pauli_gen_gates = {"RX", "RY", "RZ", "RXX", "RYY", "RZZ", "MS"}
+        # Map each parameter name to its direct Pauli-generator occurrences [(op_index, slot_index)]
+        param_occurrences: Dict[str, Optional[List[Tuple[int, int]]]] = {}
+        for pname in param_names:
+            occ: List[Tuple[int, int]] = []
+            exact_shiftable = True
+            for op_idx, op in enumerate(project.operations):
+                if op.kind != "gate":
+                    continue
+                uname = op.name.upper()
+                for s_idx, raw_p in enumerate(op.params):
+                    if isinstance(raw_p, str) and pname in extract_symbolic_parameters(raw_p):
+                        if raw_p.strip() == pname and (
+                            (uname in pauli_gen_gates and s_idx == 0)
+                            or (uname == "RXY" and s_idx == 0)
+                        ):
+                            occ.append((op_idx, s_idx))
+                        else:
+                            exact_shiftable = False
+            param_occurrences[pname] = occ if (exact_shiftable and 1 <= len(occ) <= 16) else None
 
-    opts: Dict[str, Any] = {"maxiter": max_evals}
-    if req.method == "COBYLA":
-        opts["rhobeg"] = 0.5
-    elif req.method == "L-BFGS-B":
-        opts["eps"] = 1e-3
+        vec = x0.copy()
+        _record_iterate(vec, seed_val=1024)
 
-    scipy_minimize(_objective, x0, method=req.method, options=opts)
+        m_adam = np.zeros_like(vec)
+        v_adam = np.zeros_like(vec)
+        beta1, beta2, eps_adam = 0.85, 0.99, 1e-8
+        lr_base = 0.28
+        n_steps = max(6, min(80, int(req.max_iter)))
+
+        for step_t in range(1, n_steps + 1):
+            curr_vars = dict(project.variables)
+            for idx_p, pname in enumerate(param_names):
+                curr_vars[pname] = float(vec[idx_p])
+
+            grad = np.zeros_like(vec)
+            seed_step = 2000 + step_t * 37
+            for idx_p, pname in enumerate(param_names):
+                occ = param_occurrences[pname]
+                if occ is not None and len(occ) == 1:
+                    # Single-gate exact parameter shift: 0.5 * (E(theta + pi/2) - E(theta - pi/2))
+                    vp = dict(curr_vars)
+                    vm = dict(curr_vars)
+                    vp[pname] = float(vec[idx_p] + math.pi / 2.0)
+                    vm[pname] = float(vec[idx_p] - math.pi / 2.0)
+                    ep, _, _ = _run_circuit_energy(project, vp, seed_step + idx_p)
+                    em, _, _ = _run_circuit_energy(project, vm, seed_step + idx_p)
+                    grad[idx_p] = 0.5 * (ep - em)
+                elif occ is not None and len(occ) > 1:
+                    # Shared parameter across M Pauli-rotation gates: exact chain-rule sum over each gate!
+                    g_sum = 0.0
+                    base_val = float(vec[idx_p])
+                    for m_i, (op_idx, s_idx) in enumerate(occ):
+                        p_plus = project.model_copy(deep=True)
+                        p_minus = project.model_copy(deep=True)
+                        p_plus.operations[op_idx].params[s_idx] = base_val + math.pi / 2.0
+                        p_minus.operations[op_idx].params[s_idx] = base_val - math.pi / 2.0
+                        ep, _, _ = _run_circuit_energy(p_plus, curr_vars, seed_step + m_i)
+                        em, _, _ = _run_circuit_energy(p_minus, curr_vars, seed_step + m_i)
+                        g_sum += 0.5 * (ep - em)
+                    grad[idx_p] = g_sum
+                else:
+                    # Wide noise-resilient trigonometric shift delta = pi/8 for general composite expressions
+                    delta = math.pi / 8.0
+                    vp = dict(curr_vars)
+                    vm = dict(curr_vars)
+                    vp[pname] = float(vec[idx_p] + delta)
+                    vm[pname] = float(vec[idx_p] - delta)
+                    ep, _, _ = _run_circuit_energy(project, vp, seed_step + idx_p)
+                    em, _, _ = _run_circuit_energy(project, vm, seed_step + idx_p)
+                    grad[idx_p] = (ep - em) / (2.0 * math.sin(delta))
+
+            if float(np.linalg.norm(grad)) < 1e-6:
+                break
+
+            m_adam = beta1 * m_adam + (1.0 - beta1) * grad
+            v_adam = beta2 * v_adam + (1.0 - beta2) * (grad * grad)
+            m_hat = m_adam / (1.0 - beta1**step_t)
+            v_hat = v_adam / (1.0 - beta2**step_t)
+            lr_t = lr_base * (0.5 * (1.0 + math.cos(math.pi * (step_t - 1) / max(1, n_steps))))
+            lr_t = max(0.03, lr_t)
+            vec = vec - lr_t * m_hat / (np.sqrt(v_hat) + eps_adam)
+            _record_iterate(vec, seed_val=1024 + step_t)
+    else:
+        # Always evaluate exact initial point first so index 0 is guaranteed to be initial_params
+        _record_iterate(x0, seed_val=1024)
+
+        def _objective(vec_cand: np.ndarray) -> float:
+            return _record_iterate(vec_cand, seed_val=1024 + len(energy_trace))
+
+        opts: Dict[str, Any] = {"maxiter": max_evals}
+        if req.method == "COBYLA":
+            opts["rhobeg"] = 0.5
+        elif req.method == "L-BFGS-B":
+            opts["eps"] = 1e-3
+
+        scipy_minimize(_objective, x0, method=req.method, options=opts)
 
     optimal_params = {
         pname: round(float(best_vec[idx_p]), 6) for idx_p, pname in enumerate(param_names)
@@ -2322,10 +2424,205 @@ def execute_variational_optimization(req: VariationalOptimizeRequest) -> Dict[st
         "optimal_energy": round(float(best_energy), 6),
         "energy_improvement": round(float(energy_trace[0] - best_energy), 6),
         "optimal_fidelity": round(float(best_fid), 6),
-        "num_evaluations": len(energy_trace),
+        "num_evaluations": total_circuit_runs,
         "energy_trace": energy_trace,
         "best_so_far_trace": best_so_far_trace,
         "dominant_states": [
             {"bitstring": k, "probability": round(float(v), 6)} for k, v in top_states if v > 1e-4
         ],
+    }
+
+
+def _richardson_weights(scales: Sequence[float]) -> List[float]:
+    """Lagrange interpolation weights at lambda = 0 for arbitrary distinct scale factors."""
+    m = len(scales)
+    weights: List[float] = []
+    for i in range(m):
+        w = 1.0
+        for j in range(m):
+            if i != j:
+                w *= -scales[j] / (scales[i] - scales[j])
+        weights.append(w)
+    return weights
+
+
+def execute_zne_mitigation(req: ZneRequest) -> Dict[str, Any]:
+    """
+    Execute Zero-Noise Extrapolation (ZNE) across noise amplification factors `scale_factors`
+    (default [1.0, 2.0, 3.0]), computing Linear & Richardson mitigated expectations vs Ideal!
+    """
+    project = req.project
+    n_q = max(1, len(project.qubits))
+    raw_scales = sorted({round(float(s), 4) for s in req.scale_factors if float(s) >= 0.5})
+    scales = raw_scales[:6] if len(raw_scales) >= 2 else [1.0, 2.0, 3.0]
+
+    eff_backend = req.backend
+    if eff_backend == "qutip" and n_q > 9:
+        eff_backend = "kraus" if n_q <= 13 else ("trajectory" if n_q <= 24 else "stim")
+    elif eff_backend == "kraus" and n_q > 14:
+        eff_backend = "trajectory" if n_q <= 24 else "stim"
+    elif eff_backend == "trajectory" and n_q > 24:
+        eff_backend = "stim"
+
+    ham_clean = (req.hamiltonian_str or "").strip()
+    parsed_ham = parse_sparse_pauli_terms(ham_clean, n_q) if ham_clean else []
+    obs_q = max(0, min(n_q - 1, int(req.observed_qubit)))
+    obs_q_name = project.qubits[obs_q].name if obs_q < len(project.qubits) else f"q{obs_q}"
+
+    init_labels = [q.init_state for q in project.qubits]
+    init_psi = (
+        build_initial_statevector(project.qubits)
+        if eff_backend in ("qutip", "kraus", "trajectory") and n_q <= 24
+        else None
+    )
+    shots = max(4096, project.sim_settings.shots)
+
+    def _run_at_scale(lam: float, seed_val: int) -> EvolutionResult:
+        sp = project.model_copy(deep=True)
+        if lam <= 1e-9:
+            sp.sim_settings.enable_t1_t2 = False
+            sp.sim_settings.enable_depol = False
+            sp.sim_settings.enable_zz = False
+            sp.sim_settings.enable_readout = False
+            sp.operations = [op for op in sp.operations if op.kind != "noise"]
+            for op in sp.operations:
+                if op.kind == "gate":
+                    op.noise_mode = "none"
+        else:
+            # Ensure dynamical noise is active even if user toggled off hardware switches, unless inline noise exists
+            has_inline_noise = any(op.kind == "noise" for op in sp.operations)
+            if not (sp.sim_settings.enable_t1_t2 or sp.sim_settings.enable_depol or has_inline_noise):
+                sp.sim_settings.enable_t1_t2 = True
+                sp.sim_settings.enable_depol = True
+            for hp in sp.hardware_profiles:
+                if hp.t1_us > 0:
+                    hp.t1_us = max(0.05, hp.t1_us / lam)
+                if hp.t2_us > 0:
+                    hp.t2_us = max(0.05, hp.t2_us / lam)
+                hp.depol_1q = min(0.74, 1.0 - ((1.0 - min(0.74, hp.depol_1q)) ** lam))
+                hp.depol_2q = min(0.93, 1.0 - ((1.0 - min(0.93, hp.depol_2q)) ** lam))
+                hp.zz_khz = hp.zz_khz * lam
+                if sp.sim_settings.enable_readout:
+                    hp.readout_err = min(0.45, 1.0 - ((1.0 - min(0.45, hp.readout_err)) ** lam))
+            for qspec in sp.qubits:
+                if qspec.t1_us is not None and qspec.t1_us > 0:
+                    qspec.t1_us = max(0.05, qspec.t1_us / lam)
+                if qspec.t2_us is not None and qspec.t2_us > 0:
+                    qspec.t2_us = max(0.05, qspec.t2_us / lam)
+                if qspec.depol_1q is not None:
+                    qspec.depol_1q = min(0.74, 1.0 - ((1.0 - min(0.74, qspec.depol_1q)) ** lam))
+            for op in sp.operations:
+                if op.kind == "noise" and op.params:
+                    p0 = eval_math_expr(str(op.params[0]), sp.variables)
+                    p_scaled = min(0.74, 1.0 - ((1.0 - min(0.74, max(0.0, p0))) ** lam))
+                    op.params = [round(p_scaled, 6)] + list(op.params[1:])
+                elif op.kind == "gate" and op.noise_mode == "custom" and op.custom_depol is not None:
+                    op.custom_depol = min(0.74, 1.0 - ((1.0 - min(0.74, op.custom_depol)) ** lam))
+
+        hw_s = build_hardware_model(sp)
+        circ_s = compile_project_circuit(sp)
+        loc_solver = QuantumSolver(hardware=hw_s, intra_gate_steps=10)
+        return loc_solver.solve(
+            circ_s,
+            backend=eff_backend,
+            hardware=hw_s,
+            shots=shots,
+            seed=seed_val,
+            initial_state=init_psi,
+            initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
+            observable_terms=parsed_ham if parsed_ham else None,
+        )
+
+    scale_results = [_run_at_scale(lam, 700 + i) for i, lam in enumerate(scales)]
+    ideal_res = _run_at_scale(0.0, 999)
+
+    rich_w = _richardson_weights(scales)
+    x_arr = np.array(scales, dtype=np.float64)
+    dense_x = np.linspace(0.0, float(max(scales)), 40)
+
+    def _extrapolate(vals: List[float]) -> Tuple[float, float, List[float], List[float]]:
+        y_arr = np.array(vals, dtype=np.float64)
+        lin_coeffs = np.polyfit(x_arr, y_arr, 1)
+        lin_0 = float(np.polyval(lin_coeffs, 0.0))
+        lin_curve = np.round(np.polyval(lin_coeffs, dense_x), 6).tolist()
+
+        deg_r = min(len(scales) - 1, 3)
+        poly_r = np.polyfit(x_arr, y_arr, deg_r)
+        rich_0 = float(sum(w * v for w, v in zip(rich_w, vals)))
+        rich_curve = np.round(np.polyval(poly_r, dense_x), 6).tolist()
+        return lin_0, rich_0, lin_curve, rich_curve
+
+    z_by_scale = [
+        round(float(r.steps[-1].bloch_vectors.get(obs_q, (0.0, 0.0, 0.0))[2]), 6)
+        for r in scale_results
+    ]
+    z_ideal = round(float(ideal_res.steps[-1].bloch_vectors.get(obs_q, (0.0, 0.0, 0.0))[2]), 6)
+    z_lin, z_rich, z_lin_curve, z_rich_curve = _extrapolate(z_by_scale)
+    z_lin_clamped = float(max(-1.0, min(1.0, z_lin)))
+    z_rich_clamped = float(max(-1.0, min(1.0, z_rich)))
+
+    fid_by_scale = [
+        round(float(r.final_fidelity if r.final_fidelity is not None else 1.0), 6)
+        for r in scale_results
+    ]
+
+    en_by_scale: Optional[List[float]] = None
+    en_ideal: Optional[float] = None
+    en_lin: Optional[float] = None
+    en_rich: Optional[float] = None
+    en_lin_curve: Optional[List[float]] = None
+    en_rich_curve: Optional[List[float]] = None
+    if parsed_ham:
+        en_by_scale = [
+            round(float(evaluate_result_hamiltonian(r, parsed_ham, n_q)), 6) for r in scale_results
+        ]
+        en_ideal = round(float(evaluate_result_hamiltonian(ideal_res, parsed_ham, n_q)), 6)
+        el, er, elc, erc = _extrapolate(en_by_scale)
+        en_lin = round(el, 6)
+        en_rich = round(er, 6)
+        en_lin_curve = elc
+        en_rich_curve = erc
+
+    # Per-qubit ZNE <Z_q> table across up to 32 qubits
+    n_show = min(n_q, 32)
+    per_qubit_z: List[Dict[str, Any]] = []
+    for qi in range(n_show):
+        zv = [float(r.steps[-1].bloch_vectors.get(qi, (0.0, 0.0, 0.0))[2]) for r in scale_results]
+        zi = float(ideal_res.steps[-1].bloch_vectors.get(qi, (0.0, 0.0, 0.0))[2])
+        zl_q = float(max(-1.0, min(1.0, float(np.polyfit(x_arr, np.array(zv), 1)[-1]))))
+        zr_q = float(max(-1.0, min(1.0, sum(w * v for w, v in zip(rich_w, zv)))))
+        per_qubit_z.append(
+            {
+                "qubit": qi,
+                "name": project.qubits[qi].name if qi < len(project.qubits) else f"q{qi}",
+                "noisy": round(zv[0], 5),
+                "zne_linear": round(zl_q, 5),
+                "zne_richardson": round(zr_q, 5),
+                "ideal": round(zi, 5),
+            }
+        )
+
+    return {
+        "backend": eff_backend,
+        "scale_factors": scales,
+        "fit_x": np.round(dense_x, 4).tolist(),
+        "observed_qubit": obs_q,
+        "observed_qubit_name": obs_q_name,
+        "fidelities_by_scale": fid_by_scale,
+        "z_by_scale": z_by_scale,
+        "z_unmitigated": z_by_scale[0],
+        "z_zne_linear": round(z_lin_clamped, 6),
+        "z_zne_richardson": round(z_rich_clamped, 6),
+        "z_ideal": z_ideal,
+        "z_linear_curve": z_lin_curve,
+        "z_richardson_curve": z_rich_curve,
+        "hamiltonian_str": ham_clean if parsed_ham else None,
+        "energy_by_scale": en_by_scale,
+        "energy_unmitigated": en_by_scale[0] if en_by_scale else None,
+        "energy_zne_linear": en_lin,
+        "energy_zne_richardson": en_rich,
+        "energy_ideal": en_ideal,
+        "energy_linear_curve": en_lin_curve,
+        "energy_richardson_curve": en_rich_curve,
+        "per_qubit_z": per_qubit_z,
     }

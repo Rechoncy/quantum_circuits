@@ -266,8 +266,8 @@ class QuantumCircuitOptimizer:
         # Stage 3: Consolidate 2-qubit blocks and resynthesize via KAK / Cartan decomposition
         work = consolidate_2q_blocks(work, gset, tol=tol)
 
-        # Stage 4: Commute Virtual-Z rotations across diagonal 2Q gates (CZ / RZZ)
-        if gset.primary_2q_gate.upper() in ("CZ", "RZZ"):
+        # Stage 4: Commute Virtual-Z / Pauli rotations across CZ, RZZ, and CNOT
+        if gset.primary_2q_gate.upper() in ("CZ", "RZZ", "CNOT", "CX"):
             work = commute_rz_through_cz(work, tol=tol)
 
         # Stage 5: Fuse all contiguous 1-qubit runs into minimal physical pulses
@@ -276,7 +276,7 @@ class QuantumCircuitOptimizer:
         # Second pass of 2Q block consolidation + 1Q fusion if circuit has >= 2 qubits
         if work.num_qubits >= 2:
             work2 = consolidate_2q_blocks(work, gset, tol=tol)
-            if gset.primary_2q_gate.upper() in ("CZ", "RZZ"):
+            if gset.primary_2q_gate.upper() in ("CZ", "RZZ", "CNOT", "CX"):
                 work2 = commute_rz_through_cz(work2, tol=tol)
             work2 = fuse_1q_runs(work2, gset, tol=tol)
             m1 = evaluate_circuit_metrics(work, gset, hw)

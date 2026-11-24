@@ -9,6 +9,7 @@ import type {
   SimulationResponse,
   SweepResponse,
   VariationalOptimizeResponse,
+  ZneResponse,
 } from './types';
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
@@ -140,13 +141,26 @@ export async function runVariationalOptimization(
     project: ProjectModel;
     hamiltonian_str: string;
     param_names?: string[];
-    method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+    method: 'Parameter-Shift' | 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
     max_iter: number;
     backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
   },
   signal?: AbortSignal
 ): Promise<VariationalOptimizeResponse> {
   return postJson('/api/vqe-optimize', payload, signal);
+}
+
+export async function runZneMitigation(
+  payload: {
+    project: ProjectModel;
+    scale_factors?: number[];
+    observed_qubit?: number;
+    hamiltonian_str?: string;
+    backend?: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
+  },
+  signal?: AbortSignal
+): Promise<ZneResponse> {
+  return postJson('/api/zne', payload, signal);
 }
 
 export async function runSweep(
