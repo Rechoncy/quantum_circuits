@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Plus,
   Play,
@@ -93,6 +93,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
   const [extraCols, setExtraCols] = useState(2);
   const [dragHoverCell, setDragHoverCell] = useState<{ q: number; c: number } | null>(null);
+  const [hoverCell, setHoverCell] = useState<{ q: number; c: number } | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   const customGateMap = useMemo(() => {
     const m = new Map<string, CustomGateDef>();
@@ -105,44 +107,39 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     return m;
   }, []);
 
-  // Compute active hardware coupling edge set to flag topology/blockade violations live on canvas
-  const connectedPairSet = useMemo(() => {
+  // O(1) / sparse hardware coupling lookup to flag topology/blockade violations live on canvas
+  const activeHwTopology = useMemo(() => {
     const hw =
       project.hardware_profiles.find((h) => h.id === project.active_hardware_id) ||
       project.hardware_profiles[0];
-    const set = new Set<string>();
-    const n = project.qubits.length;
-    if (!hw || hw.topology_mode === 'all') {
-      for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) set.add(`${i}-${j}`);
-      }
-      return { set, hwName: hw?.name || 'All', mode: hw?.topology_mode || 'all' };
-    }
-    if (hw.topology_mode === 'linear') {
-      for (let i = 0; i < n - 1; i++) set.add(`${i}-${i + 1}`);
-    } else if (hw.topology_mode === 'custom') {
+    const customSet = new Set<string>();
+    if (hw?.topology_mode === 'custom') {
       for (const [u, v] of hw.edges) {
-        if (u !== v) set.add(`${Math.min(u, v)}-${Math.max(u, v)}`);
-      }
-    } else if (hw.topology_mode === 'rydberg_radius') {
-      const rb = Math.max(0.1, hw.blockade_radius_um);
-      for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) {
-          const d = Math.hypot(
-            project.qubits[i].pos_x - project.qubits[j].pos_x,
-            project.qubits[i].pos_y - project.qubits[j].pos_y
-          );
-          if (d <= rb + 1e-9) set.add(`${i}-${j}`);
-        }
+        if (u !== v) customSet.add(`${Math.min(u, v)}-${Math.max(u, v)}`);
       }
     }
-    return { set, hwName: hw.name, mode: hw.topology_mode };
-  }, [project.hardware_profiles, project.active_hardware_id, project.qubits]);
+    return {
+      mode: hw?.topology_mode || 'all',
+      rb: Math.max(0.1, hw?.blockade_radius_um ?? 6.5),
+      customSet,
+    };
+  }, [project.hardware_profiles, project.active_hardware_id]);
 
   const isPairTopologyViolated = (validQ: number[]) => {
     if (validQ.length !== 2) return false;
-    const key = `${Math.min(validQ[0], validQ[1])}-${Math.max(validQ[0], validQ[1])}`;
-    return !connectedPairSet.set.has(key);
+    const [qa, qb] = validQ;
+    const mode = activeHwTopology.mode;
+    if (mode === 'all') return false;
+    if (mode === 'linear') return Math.abs(qa - qb) !== 1;
+    if (mode === 'rydberg_radius') {
+      const a = project.qubits[qa];
+      const b = project.qubits[qb];
+      if (!a || !b) return false;
+      const d = Math.hypot(a.pos_x - b.pos_x, a.pos_y - b.pos_y);
+      return d > activeHwTopology.rb + 1e-9;
+    }
+    const key = `${Math.min(qa, qb)}-${Math.max(qa, qb)}`;
+    return !activeHwTopology.customSet.has(key);
   };
 
   const handleExportSvg = () => {
@@ -633,8 +630,63 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             </div>
           )}
 
-          {/* Qubit Wires & Click/Drop Targets */}
-          <div className="relative" style={{ height: project.qubits.length * rowH }}>
+          {/* Qubit Wires & Zero-Empty-Cell Coordinate Hit-Testing Stage */}
+          <div
+            ref={gridRef}
+            className={`relative ${
+              !readOnly && (activeToolGate || pendingFirstQubit) ? 'cursor-crosshair' : ''
+            }`}
+            style={{ height: project.qubits.length * rowH }}
+            onMouseMove={(e) => {
+              if (readOnly || (!activeToolGate && !pendingFirstQubit) || !gridRef.current) return;
+              const rect = gridRef.current.getBoundingClientRect();
+              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const q = Math.floor((e.clientY - rect.top) / rowH);
+              if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
+                if (hoverCell?.q !== q || hoverCell?.c !== c) setHoverCell({ q, c });
+              } else if (hoverCell !== null) {
+                setHoverCell(null);
+              }
+            }}
+            onMouseLeave={() => {
+              if (hoverCell !== null) setHoverCell(null);
+            }}
+            onClick={(e) => {
+              if (readOnly || !gridRef.current) return;
+              const rect = gridRef.current.getBoundingClientRect();
+              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const q = Math.floor((e.clientY - rect.top) / rowH);
+              if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
+                handleCellClick(q, c);
+              }
+            }}
+            onDragOver={(e) => {
+              if (readOnly || !gridRef.current) return;
+              const rect = gridRef.current.getBoundingClientRect();
+              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const q = Math.floor((e.clientY - rect.top) / rowH);
+              if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
+                e.preventDefault();
+                if (dragHoverCell?.q !== q || dragHoverCell?.c !== c) setDragHoverCell({ q, c });
+              }
+            }}
+            onDragLeave={(e) => {
+              if (e.currentTarget === e.target && dragHoverCell !== null) {
+                setDragHoverCell(null);
+              }
+            }}
+            onDrop={(e) => {
+              if (readOnly || !gridRef.current) return;
+              const rect = gridRef.current.getBoundingClientRect();
+              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const q = Math.floor((e.clientY - rect.top) / rowH);
+              if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
+                handleDropOnCell(e, q, c);
+              } else {
+                setDragHoverCell(null);
+              }
+            }}
+          >
             {/* Blue Vertical Time Cursor in Simulate Mode (60fps GPU translate3d) */}
             {cursorX !== null && (
               <div
@@ -645,13 +697,50 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
               </div>
             )}
 
-            {project.qubits.map((q, qIdx) => {
+            {/* Single Lightweight Hover / Drag-Drop Preview Highlight */}
+            {!readOnly && (dragHoverCell || ((activeToolGate || pendingFirstQubit) && hoverCell)) && (() => {
+              const target = dragHoverCell || hoverCell!;
+              const isDrag = Boolean(dragHoverCell);
+              return (
+                <div
+                  className={`absolute rounded-lg pointer-events-none transition-transform duration-75 ${
+                    isDrag
+                      ? 'bg-[#0A84FF]/18 ring-1 ring-inset ring-[#0A84FF]/55'
+                      : 'bg-[#0A84FF]/8 ring-1 ring-inset ring-[#0A84FF]/25'
+                  }`}
+                  style={{
+                    left: LEFT_PAD + target.c * COL_W + 4,
+                    top: target.q * rowH + 3,
+                    width: COL_W - 8,
+                    height: rowH - 6,
+                  }}
+                />
+              );
+            })()}
+
+            {/* Pending Multi-Qubit First-Click Anchor Dots */}
+            {pendingFirstQubit &&
+              pendingFirstQubit.qubits.map((pq) => (
+                <span
+                  key={`pend_${pq}`}
+                  className="absolute w-3.5 h-3.5 rounded-full bg-[#0A84FF] ring-4 ring-[#0A84FF]/25 pointer-events-none z-20"
+                  style={{
+                    left: LEFT_PAD + pendingFirstQubit.step * COL_W + COL_W / 2 - 7,
+                    top: pq * rowH + rowH / 2 - 7,
+                  }}
+                />
+              ))}
+
+            {project.qubits.map((q) => {
               const isQSelected = selection.type === 'qubit' && selection.qubitId === q.id;
               return (
                 <div key={q.id} className="relative flex items-center" style={{ height: rowH }}>
                   {/* Sticky Qubit Label (Opaque Mask so scrolled gates slide cleanly underneath) */}
                   <button
-                    onClick={() => !readOnly && onSelect({ type: 'qubit', qubitId: q.id })}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!readOnly) onSelect({ type: 'qubit', qubitId: q.id });
+                    }}
                     style={{ width: LEFT_PAD, height: rowH }}
                     className={`sticky left-0 z-30 pr-3 text-right flex items-center justify-end gap-1.5 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]/60 transition-colors cursor-pointer shrink-0 ${
                       isQSelected
@@ -680,43 +769,6 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                       top: rowH / 2,
                     }}
                   />
-
-                  {/* Interactive Grid Cells */}
-                  <div className="flex items-center" style={{ marginLeft: 4 }}>
-                    {Array.from({ length: numCols }).map((_, c) => {
-                      const isPendingHere =
-                        pendingFirstQubit?.step === c && pendingFirstQubit.qubits.includes(qIdx);
-                      const isDragOver = dragHoverCell?.q === qIdx && dragHoverCell?.c === c;
-                      return (
-                        <div
-                          key={c}
-                          onClick={() => handleCellClick(qIdx, c)}
-                          onDragOver={(e) => {
-                            if (!readOnly) {
-                              e.preventDefault();
-                              if (!isDragOver) setDragHoverCell({ q: qIdx, c });
-                            }
-                          }}
-                          onDragLeave={() => {
-                            if (isDragOver) setDragHoverCell(null);
-                          }}
-                          onDrop={(e) => handleDropOnCell(e, qIdx, c)}
-                          style={{ width: COL_W, height: rowH }}
-                          className={`relative flex items-center justify-center transition-colors shrink-0 rounded-lg ${
-                            isDragOver
-                              ? 'bg-[#0A84FF]/18 ring-1 ring-inset ring-[#0A84FF]/50'
-                              : !readOnly && (activeToolGate || pendingFirstQubit)
-                              ? 'hover:bg-[#0A84FF]/8 cursor-crosshair'
-                              : ''
-                          }`}
-                        >
-                          {isPendingHere && (
-                            <span className="w-3.5 h-3.5 rounded-full bg-[#0A84FF] ring-4 ring-[#0A84FF]/25 z-10" />
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
                 </div>
               );
             })}

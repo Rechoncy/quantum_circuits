@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
 import type {
   CircuitOpModel,
@@ -356,23 +356,42 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Bidirectional sync: Project -> DSL & OpenQASM 3 whenever operations/qubits/vars change
+  // Bidirectional sync: Project -> DSL & OpenQASM 3 ONLY when code-relevant structure changes (debounced 150ms)
+  const projectRef = useRef<ProjectModel | null>(null);
+  projectRef.current = project;
+
+  const dslStructuralSig = useMemo(() => {
+    if (!project) return '';
+    return JSON.stringify({
+      n: project.qubits.length,
+      ops: project.operations.map((o) => [o.step, o.kind, o.name, o.qubits, o.params]),
+      vars: project.variables,
+    });
+  }, [project?.qubits.length, project?.operations, project?.variables]);
+
   useEffect(() => {
-    if (!project) return;
+    if (!dslStructuralSig || !projectRef.current) return;
     let cancelled = false;
-    syncProjectToDsl(project)
-      .then((res) => {
-        if (!cancelled) {
-          setDslText(res.dsl);
-          setQasmText(res.openqasm3);
-          setDslError(null);
-        }
-      })
-      .catch(() => {});
+    const delay = dslText === '' ? 0 : 150;
+    const timer = window.setTimeout(() => {
+      const snap = projectRef.current;
+      if (!snap) return;
+      syncProjectToDsl(snap)
+        .then((res) => {
+          if (!cancelled) {
+            setDslText(res.dsl);
+            setQasmText(res.openqasm3);
+            setDslError(null);
+          }
+        })
+        .catch(() => {});
+    }, delay);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [project]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dslStructuralSig]);
 
   // Smoothly animate timeCursorStep to a discrete target step (e.g. clicking step buttons or table rows)
   const handleSmoothStepJump = useCallback((targetStep: number) => {
@@ -536,28 +555,93 @@ export default function App() {
   }, [past, future, project, selection, mode, isBusy, nlModalOpen, simResponse, mutateProject, handleRunOptimize, handleRunSweep, handleRunSimulation]);
 
   // ---- Handlers for Quantum Register ----
-  const handleAddQubit = () => {
+  const handleResizeRegister = (rawTarget: number) => {
+    const targetN = Math.max(1, Math.min(500, Math.round(rawTarget)));
     mutateProject((p) => {
-      const nextId = p.qubits.length;
-      const maxX = p.qubits.reduce((acc, q) => Math.max(acc, q.pos_x), -4.5);
-      const newQ: QubitSpec = {
-        id: nextId,
-        name: `q${nextId}`,
-        color: QUBIT_DOT_PALETTE[nextId % QUBIT_DOT_PALETTE.length],
-        init_state: '|0>',
-        init_theta: 0,
-        init_phi: 0,
-        t1_us: null,
-        t2_us: null,
-        freq_ghz: null,
-        depol_1q: null,
-        readout_err: null,
-        pos_x: Number((maxX + 4.5).toFixed(1)),
-        pos_y: 0,
+      const oldN = p.qubits.length;
+      if (targetN === oldN) return p;
+
+      if (targetN < oldN) {
+        const keptQ = p.qubits.slice(0, targetN).map((q, idx) => ({ ...q, id: idx }));
+        const keptOps: CircuitOpModel[] = [];
+        for (const op of p.operations) {
+          if (op.kind === 'measure') {
+            const mq = op.qubits.filter((q) => q < targetN);
+            if (mq.length > 0) keptOps.push({ ...op, qubits: mq });
+          } else if (op.qubits.every((q) => q < targetN)) {
+            keptOps.push(op);
+          }
+        }
+        return { ...p, qubits: keptQ, operations: keptOps };
+      }
+
+      // Growing register: layout on 2D boustrophedon (snake) grid if targetN > 8
+      const cols = Math.max(1, Math.ceil(Math.sqrt(targetN)));
+      const allOn1D = p.qubits.every((q) => Math.abs(q.pos_y) < 1e-6);
+      const nextQ: QubitSpec[] = [];
+      for (let i = 0; i < targetN; i++) {
+        const gridPos =
+          targetN <= 8
+            ? { x: Number((i * 4.5).toFixed(1)), y: 0 }
+            : (() => {
+                const r = Math.floor(i / cols);
+                const c = r % 2 === 0 ? i % cols : cols - 1 - (i % cols);
+                return { x: Number((c * 4.5).toFixed(1)), y: Number((r * 4.5).toFixed(1)) };
+              })();
+        if (i < oldN) {
+          nextQ.push({
+            ...p.qubits[i],
+            id: i,
+            pos_x: targetN > 8 && allOn1D ? gridPos.x : p.qubits[i].pos_x,
+            pos_y: targetN > 8 && allOn1D ? gridPos.y : p.qubits[i].pos_y,
+          });
+        } else {
+          nextQ.push({
+            id: i,
+            name: `q${i}`,
+            color: QUBIT_DOT_PALETTE[i % QUBIT_DOT_PALETTE.length],
+            init_state: '|0>',
+            init_theta: 0,
+            init_phi: 0,
+            t1_us: null,
+            t2_us: null,
+            freq_ghz: null,
+            depol_1q: null,
+            readout_err: null,
+            pos_x: gridPos.x,
+            pos_y: gridPos.y,
+          });
+        }
+      }
+
+      const nextOps = p.operations.map((op) =>
+        op.kind === 'measure' && op.qubits.length >= oldN
+          ? { ...op, qubits: Array.from({ length: targetN }, (_, idx) => idx) }
+          : op
+      );
+
+      let nextBackend = p.sim_settings.backend;
+      if (targetN > 24 && (nextBackend === 'qutip' || nextBackend === 'kraus' || nextBackend === 'trajectory')) {
+        nextBackend = 'stim';
+      } else if (targetN > 14 && (nextBackend === 'qutip' || nextBackend === 'kraus')) {
+        nextBackend = 'trajectory';
+      } else if (targetN > 9 && nextBackend === 'qutip') {
+        nextBackend = 'kraus';
+      }
+
+      return {
+        ...p,
+        qubits: nextQ,
+        operations: nextOps,
+        sim_settings: { ...p.sim_settings, backend: nextBackend },
       };
-      return { ...p, qubits: [...p.qubits, newQ] };
     });
-    addLog('已添加新量子比特', 'info');
+    addLog(`已调整量子寄存器规模为 ${targetN} Qubits`, 'info');
+  };
+
+  const handleAddQubit = () => {
+    if (!project) return;
+    handleResizeRegister(project.qubits.length + 1);
   };
 
   const handleDeleteQubit = (qubitId: number) => {
@@ -1003,6 +1087,7 @@ export default function App() {
             compareRunId={compareRunId}
             onSelect={setSelection}
             onAddQubit={handleAddQubit}
+            onResizeRegister={handleResizeRegister}
             onDeleteQubit={handleDeleteQubit}
             onRenameQubit={(qid, name) =>
               mutateProject((p) => ({

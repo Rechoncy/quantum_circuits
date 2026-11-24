@@ -513,8 +513,51 @@ def _gen_bell(text: str, hw_id: Optional[str]) -> Tuple[str, str, List[str], Dic
 def _gen_ghz(text: str, hw_id: Optional[str]) -> Tuple[str, str, List[str], Dict[str, float], int]:
     n = _extract_qubit_count(text, default=4, max_qubits=500) or 4
     n = max(2, min(500, n))
+    low = text.lower()
+    use_log_tree = n >= 4 and any(
+        k in low for k in ("对数", "二叉树", "树形", "浅层", "并行", "分治", "log", "tree")
+    )
     lines = [f"qubits {n}"]
     ket_str = f"(|{'0'*n}⟩ + |{'1'*n}⟩)/√2" if n <= 10 else f"(|0⟩⊗{n} + |1⟩⊗{n})/√2"
+
+    if use_log_tree:
+        # Non-crossing divide-and-conquer binary tree: disjoint wire intervals pack into ceil(log2(n)) parallel layers!
+        stages = 0
+        intervals: List[Tuple[int, int]] = [(0, n - 1)]
+        tree_edges: List[Tuple[int, int]] = []
+        while any(hi > lo for lo, hi in intervals):
+            stages += 1
+            nxt_iv: List[Tuple[int, int]] = []
+            for lo, hi in intervals:
+                if hi <= lo:
+                    nxt_iv.append((lo, hi))
+                else:
+                    mid = lo + (hi - lo + 1) // 2
+                    tree_edges.append((lo, mid))
+                    nxt_iv.append((lo, mid - 1))
+                    nxt_iv.append((mid, hi))
+            intervals = nxt_iv
+
+        if hw_id == "hw_neutral_atom":
+            for q in range(n):
+                lines.append(f"RXY(1.5708, -1.5708) {q}")
+            for u, v in tree_edges:
+                lines.append(f"CZ {u} {v}")
+                lines.append(f"RXY(1.5708, 1.5708) {v}")
+            desc = (
+                f"已生成 {n} 比特中性原子对数深度（{stages} 层无交叉分治二叉树）GHZ 态线路，"
+                f"大幅压缩闲置等待退相干时长，理想输出 {ket_str}。"
+            )
+        else:
+            lines.append("H 0")
+            for u, v in tree_edges:
+                lines.append(f"CNOT {u} {v}")
+            desc = (
+                f"已生成 {n} 比特对数深度（1 + {stages} 层无交叉并行二叉树 CNOT）GHZ 最大纠缠态线路，"
+                f"理想输出 {ket_str}。"
+            )
+        return f"NL_GHZ_LogTree_{n}Q.qproj", desc, lines, {}, n
+
     if hw_id == "hw_neutral_atom":
         lines.append("RXY(1.5708, -1.5708) 0")
         for q in range(1, n):

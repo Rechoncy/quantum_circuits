@@ -1078,7 +1078,7 @@ def execute_project_optimization(req: OptimizeRequest) -> Dict[str, Any]:
     report = optimizer.optimize_circuit(
         circ,
         hardware=hw,
-        evaluate_noisy_fidelity=(req.evaluate_noisy_fidelity and circ.num_qubits <= 5),
+        evaluate_noisy_fidelity=(req.evaluate_noisy_fidelity and circ.num_qubits <= 12),
     )
 
     opt_ops = _circuit_to_op_models(report.optimized_circuit)

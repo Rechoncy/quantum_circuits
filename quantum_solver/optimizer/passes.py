@@ -348,8 +348,8 @@ def commute_rz_through_cz(
     """
     out = circuit.copy()
     ops = out.operations
-    changed = True
-    while changed:
+    max_iters = min(max(8, len(ops)), 64)
+    for _ in range(max_iters):
         changed = False
         for idx in range(len(ops) - 1):
             op_a = ops[idx]
@@ -362,6 +362,8 @@ def commute_rz_through_cz(
                 # Swap order: [RZ(q), CZ(q0, q1)] -> [CZ(q0, q1), RZ(q)]
                 ops[idx], ops[idx + 1] = op_b, op_a
                 changed = True
+        if not changed:
+            break
     return out
 
 

@@ -726,6 +726,92 @@ def test_high_qubit_scaling_kraus_trajectory_stim_and_nl() -> None:
     assert len(out_guard["warnings"]) >= 1
 
 
+def test_large_scale_optimizer_parallel_trajectory_and_log_depth_ghz() -> None:
+    """
+    Verify P0-P2 optimization pass:
+      1. 60-qubit QuantumCircuitOptimizer compiles without dense 2^60 OOM and computes critical-path duration
+      2. 12-qubit Haar-probe equivalence check verifies exact native compilation fidelity > 1 - 1e-9
+      3. Multi-threaded TrajectoryBackend produces deterministic bit-identical noisy results on 12Q
+      4. 32-qubit Log-Depth Non-Crossing Binary-Tree GHZ uses <= 6 gate columns and outperforms linear chain under T1/T2 noise
+    """
+    from quantum_solver.optimizer.compiler import evaluate_circuit_metrics
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        NlCircuitRequest,
+        QubitSpec,
+        build_preset_projects,
+        execute_project_simulation,
+        generate_circuit_from_nl,
+    )
+
+    # 1. Critical-path parallel duration on 60 parallel SX gates (20 ns each -> 20 ns total, NOT 1200 ns!)
+    hw_60 = HardwareModel.superconducting_processor(num_qubits=60, t_1q_ns=20.0, t_2q_ns=40.0)
+    c60_par = QuantumCircuit(60, name="Parallel60Q")
+    for q in range(60):
+        c60_par.sx(q)
+    m_par = evaluate_circuit_metrics(c60_par, hw_60.native_gate_set, hw_60)
+    assert abs(m_par.duration_ns - 20.0) < 1e-6
+
+    # Compile a 60Q redundant circuit (T + TDG cancels, CNOT -> CZ + 1Q) in milliseconds
+    c60 = QuantumCircuit(60, name="Redundant60Q")
+    c60.h(0)
+    for q in range(59):
+        c60.cnot(q, q + 1).t(q).tdg(q)
+    opt_60 = QuantumCircuitOptimizer(hardware=hw_60)
+    rep_60 = opt_60.optimize_circuit(c60, evaluate_noisy_fidelity=False)
+    assert rep_60.unitary_fidelity == 1.0
+    assert rep_60.optimized_metrics.num_2q_gates == 59
+    assert "omitted for large circuit" in rep_60.summary()
+
+    # 2. 12-qubit Haar-probe equivalence verification
+    hw_12 = HardwareModel.neutral_atom_processor(num_qubits=12)
+    c12 = QuantumCircuit(12, name="Target12Q")
+    for q in range(12):
+        c12.rx(q, 0.3 + 0.1 * q).rz(q, 0.5)
+    for q in range(11):
+        c12.cnot(q, q + 1)
+    rep_12 = QuantumCircuitOptimizer(hardware=hw_12).optimize_circuit(c12, evaluate_noisy_fidelity=False)
+    assert rep_12.unitary_fidelity > 1.0 - 1e-9
+
+    # 3. Deterministic multi-threaded TrajectoryBackend on 12Q noisy circuit
+    solver = QuantumSolver(hardware=hw_12)
+    r_mt1 = solver.trajectory_backend.run(c12, hardware=hw_12, shots=2048, seed=2026, num_trajectories=8)
+    r_mt2 = solver.trajectory_backend.run(c12, hardware=hw_12, shots=2048, seed=2026, num_trajectories=8)
+    assert r_mt1.final_fidelity == r_mt2.final_fidelity
+    assert r_mt1.final_purity == r_mt2.final_purity
+    assert r_mt1.measurement_counts == r_mt2.measurement_counts
+
+    # 4. 32-qubit Log-Depth Non-Crossing Binary-Tree GHZ vs Linear Chain GHZ
+    base = build_preset_projects()[0]
+    nl_tree = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="生成 32 比特对数深度二叉树 GHZ 态并测量", project=base)
+    )
+    gate_ops = [op for op in nl_tree["operations"] if op["kind"] == "gate"]
+    max_gate_col = max(op["step"] for op in gate_ops)
+    # 1 H gate (step 0) + log2(32) = 5 non-crossing parallel CNOT layers (steps 1..5) => max_gate_col == 5!
+    assert max_gate_col == 5, f"Expected 6 visual gate columns (0..5), got 0..{max_gate_col}"
+
+    p_tree = base.model_copy(deep=True)
+    p_tree.qubits = [QubitSpec(**q) for q in nl_tree["qubits"]]
+    p_tree.operations = [CircuitOpModel(**o) for o in nl_tree["operations"]]
+    p_tree.sim_settings.backend = "stim"
+    p_tree.sim_settings.shots = 8000
+
+    nl_chain = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="生成 32 比特 GHZ 态并测量", project=base)
+    )
+    p_chain = p_tree.model_copy(deep=True)
+    p_chain.operations = [CircuitOpModel(**o) for o in nl_chain["operations"]]
+
+    sim_tree = execute_project_simulation(p_tree)["results"]["stim"]
+    sim_chain = execute_project_simulation(p_chain)["results"]["stim"]
+    coh_tree = sim_tree["final_probabilities"].get("0" * 32, 0.0) + sim_tree["final_probabilities"].get("1" * 32, 0.0)
+    coh_chain = sim_chain["final_probabilities"].get("0" * 32, 0.0) + sim_chain["final_probabilities"].get("1" * 32, 0.0)
+    assert sim_tree["total_duration_ns"] < sim_chain["total_duration_ns"] * 0.35
+    assert coh_tree > coh_chain
+
+
+
 
 
 

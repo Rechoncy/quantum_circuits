@@ -44,8 +44,8 @@ const STARTER_PROMPTS: { label: string; prompt: string }[] = [
     prompt: '用中性原子里德堡阵列生成 4 比特 GHZ 态并加入 1% 退极化噪声后测量',
   },
   {
-    label: '50Q 里德堡 GHZ (百比特级)',
-    prompt: '用中性原子里德堡阵列生成 50 比特 GHZ 纠缠态线路并测量',
+    label: '50Q 对数深度 GHZ',
+    prompt: '生成 50 比特对数深度二叉树 GHZ 纠缠态线路并测量',
   },
   {
     label: '16Q 变分 VQE (态矢量)',

@@ -16,7 +16,9 @@ quantum trajectories (|psi_A>, |psi_B>) alongside |psi_ideal>, yielding:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import math
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -533,89 +535,150 @@ class TrajectoryBackend:
                 metadata={"trajectories": 1, "mode": "exact_statevector"},
             )
 
-        # ---- Noisy Path: Lockstep Paired Monte-Carlo Quantum Trajectories ----
+        # ---- Noisy Path: Lockstep Paired Monte-Carlo Quantum Trajectories (Multi-Threaded) ----
         m_req = num_trajectories or self.default_trajectories or self.recommended_trajectory_count(n)
         num_pairs = max(1, (int(m_req) + 1) // 2)
         total_trajs = 2 * num_pairs
 
         base_seed = 42 if seed is None else int(seed)
         master_rng = np.random.default_rng(base_seed)
+        pair_seeds = [
+            (
+                idx,
+                int(master_rng.integers(0, 2**31 - 1)),
+                int(master_rng.integers(0, 2**31 - 1)),
+            )
+            for idx in range(num_pairs)
+        ]
+
+        # Precompute ideal statevector trajectory once when n <= 15 to avoid redundant work per pair
+        precomputed_ideal: Optional[List[np.ndarray]] = None
+        saved_ideal_vecs: Dict[int, np.ndarray] = {}
+        if n <= 15:
+            psi_id = psi_init.copy()
+            precomputed_ideal = [psi_id.copy()]
+            if store_ideal_vec:
+                saved_ideal_vecs[0] = psi_id.copy()
+            for s_idx, item in enumerate(evolution_items, start=1):
+                if isinstance(item, list):
+                    for g in item:
+                        psi_id = apply_operator_to_statevector(psi_id, g.unitary(), g.qubits, n)
+                precomputed_ideal.append(psi_id.copy())
+                if store_ideal_vec:
+                    saved_ideal_vecs[s_idx] = psi_id.copy()
+
+        accum_step_probs = n <= 14
+
+        def _simulate_pair(
+            args: Tuple[int, int, int],
+        ) -> Tuple[
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            Optional[np.ndarray],
+            Dict[int, Dict[str, float]],
+        ]:
+            pair_idx, seed_a, seed_b = args
+            rng_a = np.random.default_rng(seed_a)
+            rng_b = np.random.default_rng(seed_b)
+
+            loc_bloch = np.zeros((num_steps, n, 3), dtype=np.float64)
+            loc_fid = np.zeros(num_steps, dtype=np.float64)
+            loc_pur = np.zeros(num_steps, dtype=np.float64)
+            loc_step_prob = (
+                np.zeros((num_steps, dim), dtype=np.float64) if accum_step_probs else None
+            )
+            loc_rep_pops: Dict[int, Dict[str, float]] = {}
+
+            psi_ideal_loc = None if precomputed_ideal is not None else psi_init.copy()
+            psi_a = psi_init.copy()
+            psi_b = psi_init.copy()
+
+            ba0 = compute_statevector_bloch(psi_a, n)
+            bb0 = compute_statevector_bloch(psi_b, n)
+            for q in range(n):
+                loc_bloch[0, q, 0] = ba0[q][0] + bb0[q][0]
+                loc_bloch[0, q, 1] = ba0[q][1] + bb0[q][1]
+                loc_bloch[0, q, 2] = ba0[q][2] + bb0[q][2]
+            loc_fid[0] = 2.0
+            loc_pur[0] = 1.0
+            if loc_step_prob is not None:
+                pa_0 = np.real(psi_a * psi_a.conj())
+                pb_0 = np.real(psi_b * psi_b.conj())
+                loc_step_prob[0] = pa_0 + pb_0
+            elif pair_idx == 0:
+                loc_rep_pops[0] = probabilities_array_to_dict(
+                    np.real(psi_a * psi_a.conj()), n, max_entries=64
+                )
+
+            for s_idx, item in enumerate(evolution_items, start=1):
+                if precomputed_ideal is not None:
+                    ref_ideal = precomputed_ideal[s_idx]
+                else:
+                    assert psi_ideal_loc is not None
+                    if isinstance(item, list):
+                        for g in item:
+                            psi_ideal_loc = apply_operator_to_statevector(
+                                psi_ideal_loc, g.unitary(), g.qubits, n
+                            )
+                    ref_ideal = psi_ideal_loc
+
+                psi_a = self._evolve_single_noisy_trajectory(psi_a, item, hardware, n, rng_a)
+                psi_b = self._evolve_single_noisy_trajectory(psi_b, item, hardware, n, rng_b)
+
+                fid_a = float(abs(np.vdot(ref_ideal, psi_a)) ** 2)
+                fid_b = float(abs(np.vdot(ref_ideal, psi_b)) ** 2)
+                loc_fid[s_idx] = fid_a + fid_b
+                loc_pur[s_idx] = float(abs(np.vdot(psi_a, psi_b)) ** 2)
+
+                ba = compute_statevector_bloch(psi_a, n)
+                bb = compute_statevector_bloch(psi_b, n)
+                for q in range(n):
+                    loc_bloch[s_idx, q, 0] = ba[q][0] + bb[q][0]
+                    loc_bloch[s_idx, q, 1] = ba[q][1] + bb[q][1]
+                    loc_bloch[s_idx, q, 2] = ba[q][2] + bb[q][2]
+
+                if loc_step_prob is not None:
+                    pa_s = np.real(psi_a * psi_a.conj())
+                    pb_s = np.real(psi_b * psi_b.conj())
+                    loc_step_prob[s_idx] = pa_s + pb_s
+                elif pair_idx == 0:
+                    pa_s = np.real(psi_a * psi_a.conj())
+                    pb_s = np.real(psi_b * psi_b.conj())
+                    loc_rep_pops[s_idx] = probabilities_array_to_dict(
+                        0.5 * (pa_s + pb_s), n, max_entries=64
+                    )
+
+            loc_final_prob = np.real(psi_a * psi_a.conj()) + np.real(psi_b * psi_b.conj())
+            return loc_bloch, loc_fid, loc_pur, loc_final_prob, loc_step_prob, loc_rep_pops
+
+        # Dispatch across CPU threads when workload benefits from parallelism and memory fits easily
+        max_workers = min(num_pairs, max(1, min(4, os.cpu_count() or 4)))
+        if max_workers > 1 and 8 <= n <= 20:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                pair_outputs = list(pool.map(_simulate_pair, pair_seeds))
+        else:
+            pair_outputs = [_simulate_pair(ps) for ps in pair_seeds]
 
         bloch_accum = np.zeros((num_steps, n, 3), dtype=np.float64)
         fidelity_accum = np.zeros(num_steps, dtype=np.float64)
         purity_accum = np.zeros(num_steps, dtype=np.float64)
         final_prob_accum = np.zeros(dim, dtype=np.float64)
-
-        # For n <= 14, accumulate exact intermediate step probability arrays across trajectories;
-        # for n > 14, capture representative intermediate populations on the first pair to save RAM.
-        accum_step_probs = n <= 14
         step_prob_accum = (
             np.zeros((num_steps, dim), dtype=np.float64) if accum_step_probs else None
         )
         rep_step_pops: Dict[int, Dict[str, float]] = {}
-        saved_ideal_vecs: Dict[int, np.ndarray] = {}
 
-        for pair_idx in range(num_pairs):
-            rng_a = np.random.default_rng(int(master_rng.integers(0, 2**31 - 1)))
-            rng_b = np.random.default_rng(int(master_rng.integers(0, 2**31 - 1)))
-
-            psi_ideal = psi_init.copy()
-            psi_a = psi_init.copy()
-            psi_b = psi_init.copy()
-
-            # Record Step 0
-            if pair_idx == 0 and store_ideal_vec:
-                saved_ideal_vecs[0] = psi_ideal.copy()
-            ba0 = compute_statevector_bloch(psi_a, n)
-            bb0 = compute_statevector_bloch(psi_b, n)
-            for q in range(n):
-                bloch_accum[0, q, 0] += ba0[q][0] + bb0[q][0]
-                bloch_accum[0, q, 1] += ba0[q][1] + bb0[q][1]
-                bloch_accum[0, q, 2] += ba0[q][2] + bb0[q][2]
-            fidelity_accum[0] += 2.0
-            purity_accum[0] += 1.0
-            if step_prob_accum is not None:
-                pa_0 = np.real(psi_a * psi_a.conj())
-                pb_0 = np.real(psi_b * psi_b.conj())
-                step_prob_accum[0] += pa_0 + pb_0
-            elif pair_idx == 0:
-                rep_step_pops[0] = probabilities_array_to_dict(np.real(psi_a * psi_a.conj()), n, max_entries=64)
-
-            # Evolve Steps 1 .. num_steps - 1
-            for s_idx, item in enumerate(evolution_items, start=1):
-                if isinstance(item, list):
-                    for g in item:
-                        psi_ideal = apply_operator_to_statevector(psi_ideal, g.unitary(), g.qubits, n)
-                if pair_idx == 0 and store_ideal_vec:
-                    saved_ideal_vecs[s_idx] = psi_ideal.copy()
-
-                psi_a = self._evolve_single_noisy_trajectory(psi_a, item, hardware, n, rng_a)
-                psi_b = self._evolve_single_noisy_trajectory(psi_b, item, hardware, n, rng_b)
-
-                fid_a = float(abs(np.vdot(psi_ideal, psi_a)) ** 2)
-                fid_b = float(abs(np.vdot(psi_ideal, psi_b)) ** 2)
-                fidelity_accum[s_idx] += fid_a + fid_b
-
-                swap_pur = float(abs(np.vdot(psi_a, psi_b)) ** 2)
-                purity_accum[s_idx] += swap_pur
-
-                ba = compute_statevector_bloch(psi_a, n)
-                bb = compute_statevector_bloch(psi_b, n)
-                for q in range(n):
-                    bloch_accum[s_idx, q, 0] += ba[q][0] + bb[q][0]
-                    bloch_accum[s_idx, q, 1] += ba[q][1] + bb[q][1]
-                    bloch_accum[s_idx, q, 2] += ba[q][2] + bb[q][2]
-
-                if step_prob_accum is not None:
-                    pa_s = np.real(psi_a * psi_a.conj())
-                    pb_s = np.real(psi_b * psi_b.conj())
-                    step_prob_accum[s_idx] += pa_s + pb_s
-                elif pair_idx == 0:
-                    pa_s = np.real(psi_a * psi_a.conj())
-                    pb_s = np.real(psi_b * psi_b.conj())
-                    rep_step_pops[s_idx] = probabilities_array_to_dict(0.5 * (pa_s + pb_s), n, max_entries=64)
-
-            final_prob_accum += np.real(psi_a * psi_a.conj()) + np.real(psi_b * psi_b.conj())
+        for loc_bloch, loc_fid, loc_pur, loc_fprob, loc_sprob, loc_rep in pair_outputs:
+            bloch_accum += loc_bloch
+            fidelity_accum += loc_fid
+            purity_accum += loc_pur
+            final_prob_accum += loc_fprob
+            if step_prob_accum is not None and loc_sprob is not None:
+                step_prob_accum += loc_sprob
+            if loc_rep:
+                rep_step_pops.update(loc_rep)
 
         final_prob_accum /= float(total_trajs)
 

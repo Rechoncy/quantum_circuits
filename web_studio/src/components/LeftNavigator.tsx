@@ -33,6 +33,7 @@ interface LeftNavigatorProps {
   compareRunId: string | null;
   onSelect: (sel: SelectionTarget) => void;
   onAddQubit: () => void;
+  onResizeRegister?: (targetCount: number) => void;
   onDeleteQubit: (qubitId: number) => void;
   onRenameQubit: (qubitId: number, name: string) => void;
   onReorderQubit: (fromIdx: number, toIdx: number) => void;
@@ -54,6 +55,7 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
   compareRunId,
   onSelect,
   onAddQubit,
+  onResizeRegister,
   onDeleteQubit,
   onRenameQubit,
   onReorderQubit,
@@ -74,6 +76,9 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
   const [renamingQ, setRenamingQ] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [dragQIdx, setDragQIdx] = useState<number | null>(null);
+  const [qubitFilter, setQubitFilter] = useState('');
+  const [showBatchResize, setShowBatchResize] = useState(false);
+  const [targetQDraft, setTargetQDraft] = useState('');
 
   const customGateIcon = (type: CustomGateDef['definition_type']) => {
     if (type === 'matrix') return <Box className="w-3.5 h-3.5 text-purple-500 shrink-0" />;
@@ -96,12 +101,20 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
             量子寄存器
           </button>
           <div className="flex items-center gap-1">
-            <span className="px-1.5 py-0.25 rounded-md bg-black/[0.045] dark:bg-white/[0.07] text-[10px] font-mono-num text-[var(--text-secondary)]">
+            <button
+              type="button"
+              onClick={() => {
+                setTargetQDraft(String(project.qubits.length));
+                setShowBatchResize((v) => !v);
+              }}
+              title="点击批量设置量子比特数量 (1~500Q)"
+              className="px-1.5 py-0.25 rounded-md bg-black/[0.045] dark:bg-white/[0.07] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[10px] font-mono-num text-[var(--text-secondary)] cursor-pointer transition-colors"
+            >
               {project.qubits.length}Q
-            </span>
+            </button>
             <button
               onClick={onAddQubit}
-              title="快速添加比特"
+              title="快速添加 1 个比特"
               className="w-5 h-5 rounded-md flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -109,98 +122,187 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
           </div>
         </div>
 
-        {openReg && (
-          <div className="mt-0.5 pl-2 space-y-0.5">
-            {project.qubits.map((q, idx) => {
-              const isSelected = selection.type === 'qubit' && selection.qubitId === q.id;
-              const hasOverride =
-                q.t1_us !== null ||
-                q.t2_us !== null ||
-                q.depol_1q !== null ||
-                q.readout_err !== null;
-              return (
-                <div
-                  key={q.id}
-                  draggable
-                  onDragStart={() => setDragQIdx(idx)}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => {
-                    if (dragQIdx !== null && dragQIdx !== idx) {
-                      onReorderQubit(dragQIdx, idx);
-                    }
-                    setDragQIdx(null);
+        {/* Batch Qubit Count Popover Strip */}
+        {showBatchResize && onResizeRegister && (
+          <div className="mx-2 mt-1 mb-1.5 p-2 rounded-lg bg-[var(--bg-panel)] border border-[var(--border-hairline)] shadow-2xs space-y-1.5">
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={targetQDraft}
+                onChange={(e) => setTargetQDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const v = Number(targetQDraft);
+                    if (v >= 1) onResizeRegister(v);
+                    setShowBatchResize(false);
+                  }
+                }}
+                placeholder="1~500"
+                className="w-16 px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] font-mono-num outline-none focus:border-[#0A84FF]"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const v = Number(targetQDraft);
+                  if (v >= 1) onResizeRegister(v);
+                  setShowBatchResize(false);
+                }}
+                className="px-2 py-0.5 rounded bg-[#0A84FF] text-white text-[11px] font-medium cursor-pointer"
+              >
+                设为 NQ
+              </button>
+              <button
+                type="button"
+                onClick={() => onResizeRegister(project.qubits.length + 5)}
+                className="px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] hover:border-[#0A84FF] text-[10.5px] font-mono-num cursor-pointer"
+              >
+                +5
+              </button>
+            </div>
+            <div className="flex items-center gap-1 text-[10px] font-mono-num">
+              {[8, 16, 32, 64, 100].map((presetQ) => (
+                <button
+                  key={presetQ}
+                  type="button"
+                  onClick={() => {
+                    onResizeRegister(presetQ);
+                    setShowBatchResize(false);
                   }}
-                  onClick={() => onSelect({ type: 'qubit', qubitId: q.id })}
-                  onDoubleClick={() => {
-                    setRenamingQ(q.id);
-                    setRenameDraft(q.name);
-                  }}
-                  className={`group flex items-center justify-between px-2 py-1 rounded-md text-[12.5px] cursor-pointer transition-colors ${
-                    isSelected
-                      ? 'bg-[#0A84FF]/12 text-[#0A84FF] font-medium'
-                      : 'text-[var(--text-primary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
-                  }`}
+                  className="flex-1 py-0.5 rounded bg-[var(--bg-subtle)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[var(--text-secondary)] cursor-pointer transition-colors"
                 >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <GripVertical className="w-3 h-3 opacity-0 group-hover:opacity-40 shrink-0 cursor-grab" />
-                    <span
-                      className="w-2 h-2 rounded-full shrink-0"
-                      style={{ backgroundColor: q.color }}
-                    />
-                    {renamingQ === q.id ? (
-                      <input
-                        value={renameDraft}
-                        autoFocus
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setRenameDraft(e.target.value)}
-                        onBlur={() => {
-                          if (renameDraft.trim()) onRenameQubit(q.id, renameDraft.trim());
-                          setRenamingQ(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            if (renameDraft.trim()) onRenameQubit(q.id, renameDraft.trim());
-                            setRenamingQ(null);
-                          }
-                        }}
-                        className="w-16 px-1 text-[12px] bg-[var(--bg-panel)] border border-[#0A84FF] rounded outline-none font-mono-num"
-                      />
-                    ) : (
-                      <span className="font-mono-num truncate">{q.name}</span>
-                    )}
-                    <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
-                      {q.init_state.replace('>', '⟩')}
-                    </span>
-                    {hasOverride && (
-                      <span
-                        className="w-1.5 h-1.5 rounded-full bg-amber-500"
-                        title="已单独覆盖物理参数"
-                      />
-                    )}
-                  </div>
-                  {project.qubits.length > 1 && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteQubit(q.id);
-                      }}
-                      title="删除此比特"
-                      className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-500/15 hover:text-red-500 transition-opacity"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
+                  {presetQ}Q
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
-            <button
-              onClick={onAddQubit}
-              className="w-full flex items-center gap-1.5 px-3 py-1.5 mt-0.5 rounded-md text-[12px] text-[var(--text-secondary)] hover:text-[#0A84FF] hover:bg-[#0A84FF]/8 transition-colors cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>添加比特</span>
-            </button>
+        {openReg && (
+          <div className="mt-0.5 pl-2 space-y-1">
+            {project.qubits.length > 10 && (
+              <div className="pr-1">
+                <input
+                  value={qubitFilter}
+                  onChange={(e) => setQubitFilter(e.target.value)}
+                  placeholder={`搜索比特 (共 ${project.qubits.length}Q)...`}
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-panel)] border border-[var(--border-hairline)] text-[11px] font-mono-num outline-none focus:border-[#0A84FF]"
+                />
+              </div>
+            )}
+
+            <div className={`space-y-0.5 ${project.qubits.length > 10 ? 'max-h-[228px] overflow-y-auto pr-0.5' : ''}`}>
+              {project.qubits
+                .map((q, idx) => ({ q, idx }))
+                .filter(({ q, idx }) => {
+                  const kw = qubitFilter.trim().toLowerCase();
+                  if (!kw) return true;
+                  return q.name.toLowerCase().includes(kw) || String(idx) === kw;
+                })
+                .map(({ q, idx }) => {
+                  const isSelected = selection.type === 'qubit' && selection.qubitId === q.id;
+                  const hasOverride =
+                    q.t1_us !== null ||
+                    q.t2_us !== null ||
+                    q.depol_1q !== null ||
+                    q.readout_err !== null;
+                  return (
+                    <div
+                      key={q.id}
+                      draggable={project.qubits.length <= 40}
+                      onDragStart={() => setDragQIdx(idx)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => {
+                        if (dragQIdx !== null && dragQIdx !== idx) {
+                          onReorderQubit(dragQIdx, idx);
+                        }
+                        setDragQIdx(null);
+                      }}
+                      onClick={() => onSelect({ type: 'qubit', qubitId: q.id })}
+                      onDoubleClick={() => {
+                        setRenamingQ(q.id);
+                        setRenameDraft(q.name);
+                      }}
+                      className={`group flex items-center justify-between px-2 py-1 rounded-md text-[12.5px] cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'bg-[#0A84FF]/12 text-[#0A84FF] font-medium'
+                          : 'text-[var(--text-primary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <GripVertical className="w-3 h-3 opacity-0 group-hover:opacity-40 shrink-0 cursor-grab" />
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: q.color }}
+                        />
+                        {renamingQ === q.id ? (
+                          <input
+                            value={renameDraft}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onBlur={() => {
+                              if (renameDraft.trim()) onRenameQubit(q.id, renameDraft.trim());
+                              setRenamingQ(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                if (renameDraft.trim()) onRenameQubit(q.id, renameDraft.trim());
+                                setRenamingQ(null);
+                              }
+                            }}
+                            className="w-16 px-1 text-[12px] bg-[var(--bg-panel)] border border-[#0A84FF] rounded outline-none font-mono-num"
+                          />
+                        ) : (
+                          <span className="font-mono-num truncate">{q.name}</span>
+                        )}
+                        <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                          {q.init_state.replace('>', '⟩')}
+                        </span>
+                        {hasOverride && (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-amber-500"
+                            title="已单独覆盖物理参数"
+                          />
+                        )}
+                      </div>
+                      {project.qubits.length > 1 && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteQubit(q.id);
+                          }}
+                          title="删除此比特"
+                          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-500/15 hover:text-red-500 transition-opacity"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+
+            <div className="flex items-center gap-1 pt-0.5">
+              <button
+                onClick={onAddQubit}
+                className="flex-1 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] text-[var(--text-secondary)] hover:text-[#0A84FF] hover:bg-[#0A84FF]/8 transition-colors cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>添加比特</span>
+              </button>
+              {onResizeRegister && (
+                <button
+                  type="button"
+                  onClick={() => onResizeRegister(project.qubits.length + 5)}
+                  title="一次添加 5 个量子比特"
+                  className="px-2 py-1.5 rounded-md text-[11px] font-mono-num text-[var(--text-secondary)] hover:text-[#0A84FF] hover:bg-[#0A84FF]/8 transition-colors cursor-pointer"
+                >
+                  +5Q
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>

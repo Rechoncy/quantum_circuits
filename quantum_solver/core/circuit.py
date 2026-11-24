@@ -346,13 +346,22 @@ class QuantumCircuit:
         return max(qubit_depths) if qubit_depths else 0
 
     def unitary(self) -> np.ndarray:
-        """Compute the ideal total unitary matrix U of the circuit."""
+        """Compute the ideal total unitary matrix U of the circuit via O(G * 4^N) tensor contraction."""
+        if self.num_qubits > 12:
+            raise ValueError(
+                f"Dense 2^{self.num_qubits}x2^{self.num_qubits} unitary matrix exceeds memory limits; "
+                "use statevector probe verification or Trajectory/Stim backends."
+            )
         dim = 1 << self.num_qubits
-        U = np.eye(dim, dtype=np.complex128)
+        U_tensor = np.eye(dim, dtype=np.complex128).reshape([2] * self.num_qubits + [dim])
         for g in self.gate_instructions:
-            U_gate = embed_gate_unitary(g.unitary(), g.qubits, self.num_qubits)
-            U = U_gate @ U
-        return U
+            k = len(g.qubits)
+            if k == 0:
+                continue
+            op_t = g.unitary().reshape([2] * (2 * k))
+            U_tensor = np.tensordot(op_t, U_tensor, axes=(list(range(k, 2 * k)), list(g.qubits)))
+            U_tensor = np.moveaxis(U_tensor, list(range(k)), list(g.qubits))
+        return U_tensor.reshape((dim, dim))
 
     def ascii_diagram(self) -> str:
         """Render a clean text diagram of the quantum circuit."""
