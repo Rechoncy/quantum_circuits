@@ -294,15 +294,21 @@ class QuantumCircuitOptimizer:
 
         noisy_orig: Optional[float] = None
         noisy_opt: Optional[float] = None
-        if evaluate_noisy_fidelity and hw is not None and circuit.num_qubits <= 16:
+        if evaluate_noisy_fidelity and hw is not None:
             solver = QuantumSolver(hardware=hw)
-            sim_b = (
-                "qutip"
-                if circuit.num_qubits <= 6
-                else ("kraus" if circuit.num_qubits <= 11 else "trajectory")
-            )
-            noisy_orig = solver.solve(circuit, backend=sim_b).final_fidelity
-            noisy_opt = solver.solve(work, backend=sim_b).final_fidelity
+            if circuit.num_qubits <= 6:
+                sim_b: Optional[str] = "qutip"
+            elif circuit.num_qubits <= 11:
+                sim_b = "kraus"
+            elif circuit.num_qubits <= 20:
+                sim_b = "trajectory"
+            elif circuit.num_qubits <= 120 and circuit.is_clifford() and work.is_clifford():
+                sim_b = "stim"
+            else:
+                sim_b = None
+            if sim_b is not None:
+                noisy_orig = solver.solve(circuit, backend=sim_b, shots=2048).final_fidelity
+                noisy_opt = solver.solve(work, backend=sim_b, shots=2048).final_fidelity
 
         return OptimizationReport(
             original_circuit=circuit,

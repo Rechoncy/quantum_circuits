@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.linalg import expm
+from scipy.optimize import minimize as scipy_minimize
 
 from ..core.circuit import GateInstruction, MeasureInstruction, NoiseInstruction, QuantumCircuit
 from ..core.gates import FIXED_MATRICES, NativeGateSet, NativeGateSpec
@@ -29,6 +30,7 @@ from ..gui.sweep_engine import HARDWARE_SWEEP_PARAMS, apply_hardware_param
 from ..optimizer.compiler import QuantumCircuitOptimizer
 from ..solver.base import (
     EvolutionResult,
+    compute_entanglement_from_density_matrix,
     evaluate_pauli_sum_density_matrix,
     evaluate_pauli_sum_statevector,
 )
@@ -40,6 +42,7 @@ from .custom_gates import (
     validate_unitary_matrix,
 )
 from .models import (
+    BenchmarkHardwareRequest,
     CircuitOpModel,
     CustomGateDef,
     HardwareProfileModel,
@@ -49,6 +52,7 @@ from .models import (
     SimulationSettingsModel,
     SweepRequest,
     SynthesizeUnitaryRequest,
+    VariationalOptimizeRequest,
 )
 
 
@@ -1506,6 +1510,17 @@ def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
             }
         )
 
+    mi_matrix: Optional[List[List[float]]] = None
+    bip_entropy: Optional[float] = None
+    if "mutual_information" in res.metadata:
+        mi_matrix = res.metadata["mutual_information"]  # type: ignore[assignment]
+        raw_bip = res.metadata.get("bipartite_entropy")
+        bip_entropy = float(raw_bip) if isinstance(raw_bip, (int, float)) else None
+    elif res.steps and res.steps[-1].density_matrix is not None and 2 <= res.num_qubits <= 11:
+        mi_matrix, bip_entropy = compute_entanglement_from_density_matrix(
+            res.steps[-1].density_matrix, res.num_qubits
+        )
+
     return {
         "backend_name": res.backend_name,
         "num_qubits": res.num_qubits,
@@ -1513,6 +1528,8 @@ def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
         "shots": res.shots,
         "final_fidelity": round(float(res.final_fidelity), 6) if res.final_fidelity is not None else None,
         "final_purity": round(float(res.final_purity), 6) if res.final_purity is not None else None,
+        "bipartite_entropy": bip_entropy,
+        "mutual_information": mi_matrix,
         "final_probabilities": {k: round(float(v), 6) for k, v in res.final_probabilities.items()},
         "measurement_counts": res.measurement_counts,
         "stim_circuit_str": res.stim_circuit_str,
@@ -1663,10 +1680,11 @@ def execute_project_optimization(req: OptimizeRequest) -> Dict[str, Any]:
     hw = build_hardware_model(project, preferred_native_2q=req.preferred_native_2q)
     optimizer = QuantumCircuitOptimizer(hardware=hw)
 
+    can_eval_noisy = circ.num_qubits <= 20 or (circ.num_qubits <= 120 and circ.is_clifford())
     report = optimizer.optimize_circuit(
         circ,
         hardware=hw,
-        evaluate_noisy_fidelity=(req.evaluate_noisy_fidelity and circ.num_qubits <= 12),
+        evaluate_noisy_fidelity=(req.evaluate_noisy_fidelity and can_eval_noisy),
     )
 
     opt_ops = _circuit_to_op_models(report.optimized_circuit)
@@ -2142,4 +2160,172 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         "fidelity_grid": np.round(fid_grid, 5).tolist(),
         "z0_grid": np.round(z_grid, 5).tolist(),
         "energy_grid": np.round(en_grid, 5).tolist() if parsed_ham else None,
+    }
+
+
+def execute_cross_hardware_benchmark(req: BenchmarkHardwareRequest) -> Dict[str, Any]:
+    """
+    Compile and benchmark the active project circuit across all configured hardware profiles
+    (Neutral Atom Rydberg, Superconducting CZ, Superconducting iSWAP, Trapped Ion MS, etc.).
+    """
+    project = req.project
+    circ = compile_project_circuit(project)
+    profiles = project.hardware_profiles or _default_hardware_profiles()
+
+    def _bench_one(hp: HardwareProfileModel) -> Dict[str, Any]:
+        sub_proj = project.model_copy(deep=True)
+        sub_proj.active_hardware_id = hp.id
+        hw = build_hardware_model(sub_proj)
+        opt = QuantumCircuitOptimizer(hardware=hw)
+        rep = opt.optimize_circuit(circ, hardware=hw, evaluate_noisy_fidelity=False)
+        m = rep.optimized_metrics
+        opt_ops = _circuit_to_op_models(rep.optimized_circuit)
+        return {
+            "hardware_id": hp.id,
+            "hardware_name": hp.name,
+            "platform": hp.platform,
+            "gate_set_name": rep.gate_set_name,
+            "primary_2q_gate": hw.native_gate_set.primary_2q_gate,
+            "unitary_fidelity": round(float(rep.unitary_fidelity), 8),
+            "total_gates": m.total_gates,
+            "num_2q_gates": m.num_2q_gates,
+            "num_1q_physical_pulses": m.num_1q_physical_pulses,
+            "num_1q_virtual_gates": m.num_1q_virtual_gates,
+            "depth": m.depth,
+            "duration_ns": round(float(m.duration_ns), 2),
+            "expected_gate_fidelity": round(float(m.expected_gate_fidelity), 6),
+            "gate_breakdown": m.gate_breakdown,
+            "optimized_operations": [op.model_dump() for op in opt_ops],
+        }
+
+    max_w = max(1, min(len(profiles), os.cpu_count() or 4))
+    if max_w > 1 and len(profiles) > 1:
+        with ThreadPoolExecutor(max_workers=max_w) as pool:
+            entries = list(pool.map(_bench_one, profiles))
+    else:
+        entries = [_bench_one(hp) for hp in profiles]
+
+    best_id = ""
+    if entries:
+        ranked = sorted(
+            entries,
+            key=lambda e: (-e["expected_gate_fidelity"], e["num_2q_gates"], e["duration_ns"]),
+        )
+        best_id = ranked[0]["hardware_id"]
+
+    return {
+        "num_qubits": circ.num_qubits,
+        "original_gate_count": len(circ.gate_instructions),
+        "recommended_hardware_id": best_id,
+        "entries": entries,
+    }
+
+
+def execute_variational_optimization(req: VariationalOptimizeRequest) -> Dict[str, Any]:
+    """
+    Closed-loop variational optimizer (VQE / QAOA) using `scipy.optimize.minimize`
+    (COBYLA, Powell, Nelder-Mead, or L-BFGS-B) to find `theta* = argmin <psi(theta)|H|psi(theta)>`.
+    """
+    project = req.project
+    n_q = max(1, len(project.qubits))
+    ham_clean = (req.hamiltonian_str or "").strip()
+    if not ham_clean:
+        raise ValueError("请输入泡利哈密顿量代价函数，例如 '-1.0*Z0*Z1 - 0.5*X0 - 0.5*X1'")
+    parsed_ham = parse_sparse_pauli_terms(ham_clean, n_q)
+    if not parsed_ham:
+        raise ValueError("哈密顿量有效项为空，请检查表达式")
+
+    all_var_names = list(project.variables.keys())
+    param_names = [p for p in req.param_names if p in project.variables] if req.param_names else all_var_names
+    if not param_names:
+        raise ValueError("当前项目没有可优化的符号参数（请先在右侧检查器或底部参数栏添加如 theta、gamma 等符号变量）")
+
+    eff_backend = req.backend
+    if eff_backend == "qutip" and n_q > 9:
+        eff_backend = "kraus" if n_q <= 13 else ("trajectory" if n_q <= 24 else "stim")
+    elif eff_backend == "kraus" and n_q > 14:
+        eff_backend = "trajectory" if n_q <= 24 else "stim"
+    elif eff_backend == "trajectory" and n_q > 24:
+        eff_backend = "stim"
+
+    base_hw = build_hardware_model(project)
+    init_labels = [q.init_state for q in project.qubits]
+    init_psi = (
+        build_initial_statevector(project.qubits)
+        if eff_backend in ("qutip", "kraus", "trajectory") and n_q <= 24
+        else None
+    )
+    solver = QuantumSolver(hardware=base_hw, intra_gate_steps=8)
+    shots = max(2048, min(project.sim_settings.shots, 8192))
+
+    x0 = np.array([float(project.variables[k]) for k in param_names], dtype=np.float64)
+    initial_params = {k: round(float(project.variables[k]), 6) for k in param_names}
+
+    max_evals = max(8, min(220, int(req.max_iter)))
+    energy_trace: List[float] = []
+    best_so_far_trace: List[float] = []
+    best_energy = float("inf")
+    best_vec = x0.copy()
+    best_fid = 1.0
+    best_probs: Dict[str, float] = {}
+
+    def _objective(vec: np.ndarray) -> float:
+        nonlocal best_energy, best_vec, best_fid, best_probs
+        curr_vars = dict(project.variables)
+        for idx_p, pname in enumerate(param_names):
+            curr_vars[pname] = float(vec[idx_p])
+        circ = compile_project_circuit(project, variables_override=curr_vars)
+        res = solver.solve(
+            circ,
+            backend=eff_backend,
+            hardware=base_hw,
+            shots=shots,
+            seed=1024 + len(energy_trace),
+            initial_state=init_psi,
+            initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
+            observable_terms=parsed_ham,
+        )
+        en = float(evaluate_result_hamiltonian(res, parsed_ham, n_q))
+        energy_trace.append(round(en, 6))
+        if en < best_energy:
+            best_energy = en
+            best_vec = vec.copy()
+            best_fid = float(res.final_fidelity if res.final_fidelity is not None else 1.0)
+            best_probs = dict(res.final_probabilities)
+        best_so_far_trace.append(round(best_energy, 6))
+        return en
+
+    # Always evaluate exact initial point first so index 0 is guaranteed to be initial_params
+    _objective(x0)
+
+    opts: Dict[str, Any] = {"maxiter": max_evals}
+    if req.method == "COBYLA":
+        opts["rhobeg"] = 0.5
+    elif req.method == "L-BFGS-B":
+        opts["eps"] = 1e-3
+
+    scipy_minimize(_objective, x0, method=req.method, options=opts)
+
+    optimal_params = {
+        pname: round(float(best_vec[idx_p]), 6) for idx_p, pname in enumerate(param_names)
+    }
+    top_states = sorted(best_probs.items(), key=lambda kv: kv[1], reverse=True)[:8]
+
+    return {
+        "method": req.method,
+        "backend": eff_backend,
+        "hamiltonian_str": ham_clean,
+        "param_names": param_names,
+        "initial_params": initial_params,
+        "optimal_params": optimal_params,
+        "initial_energy": energy_trace[0],
+        "optimal_energy": round(float(best_energy), 6),
+        "energy_improvement": round(float(energy_trace[0] - best_energy), 6),
+        "optimal_fidelity": round(float(best_fid), 6),
+        "num_evaluations": len(energy_trace),
+        "energy_trace": energy_trace,
+        "best_so_far_trace": best_so_far_trace,
+        "dominant_states": [
+            {"bitstring": k, "probability": round(float(v), 6)} for k, v in top_states if v > 1e-4
+        ],
     }

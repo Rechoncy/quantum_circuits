@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
-import { ArrowRightLeft, CheckCircle2, Copy, Check, Zap, Sparkles } from 'lucide-react';
-import type { OptimizeResponse, ProjectModel } from '../types';
+import { ArrowRightLeft, Award, BarChart3, CheckCircle2, Copy, Check, Zap, Sparkles } from 'lucide-react';
+import type {
+  CircuitOpModel,
+  HardwareBenchmarkResponse,
+  OptimizeResponse,
+  ProjectModel,
+} from '../types';
 import { CircuitCanvas } from './CircuitCanvas';
+import { PlotlyChart } from './PlotlyChart';
 
 export interface DirectSynthPayload {
   mode: 'matrix' | 'hamiltonian';
@@ -14,9 +20,13 @@ export interface DirectSynthPayload {
 interface OptimizeWorkspaceProps {
   project: ProjectModel;
   optResponse: OptimizeResponse | null;
+  benchResponse?: HardwareBenchmarkResponse | null;
+  darkMode?: boolean;
   onRunOptimize: () => void;
+  onRunBenchmark?: () => void;
   onRunUnitarySynthesis: (payload: DirectSynthPayload) => void;
   onApplyOptimizedToDesign: (targetNumQubits?: number) => void;
+  onSelectHardwareAndApply?: (hardwareId: string, ops: CircuitOpModel[]) => void;
   isBusy: boolean;
 }
 
@@ -100,12 +110,16 @@ const MATRIX_PRESETS: {
 export const OptimizeWorkspace: React.FC<OptimizeWorkspaceProps> = ({
   project,
   optResponse,
+  benchResponse = null,
+  darkMode = false,
   onRunOptimize,
+  onRunBenchmark,
   onRunUnitarySynthesis,
   onApplyOptimizedToDesign,
+  onSelectHardwareAndApply,
   isBusy,
 }) => {
-  const [optMode, setOptMode] = useState<'circuit' | 'unitary'>('circuit');
+  const [optMode, setOptMode] = useState<'circuit' | 'unitary' | 'benchmark'>('circuit');
   const [synthInputMode, setSynthInputMode] = useState<'matrix' | 'hamiltonian'>('matrix');
   const [synthQubits, setSynthQubits] = useState<number>(2);
   const [matrixExprs, setMatrixExprs] = useState<string[][]>(MATRIX_PRESETS[0].matrix!);
@@ -176,6 +190,22 @@ export const OptimizeWorkspace: React.FC<OptimizeWorkspaceProps> = ({
             >
               <Sparkles className="w-3 h-3" />
               目标酉矩阵直出综合
+            </button>
+            <button
+              onClick={() => {
+                setOptMode('benchmark');
+                if (!benchResponse && !isBusy && onRunBenchmark) {
+                  onRunBenchmark();
+                }
+              }}
+              className={`px-2.5 py-1 rounded-md text-[11.5px] cursor-pointer transition-colors flex items-center gap-1 ${
+                optMode === 'benchmark'
+                  ? 'bg-[var(--bg-panel)] text-emerald-600 dark:text-emerald-400 font-semibold shadow-2xs'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              <BarChart3 className="w-3 h-3" />
+              跨硬件平台基准对比
             </button>
           </div>
 
@@ -355,8 +385,206 @@ export const OptimizeWorkspace: React.FC<OptimizeWorkspaceProps> = ({
         </div>
       )}
 
-      {/* Body: Empty state or Visual Comparison + Metrics/Code Dock */}
-      {!optResponse || !m1 ? (
+      {/* Body: Cross-Hardware Shootout OR Empty state OR Visual Comparison + Metrics/Code Dock */}
+      {optMode === 'benchmark' ? (
+        !benchResponse ? (
+          <div className="flex-1 flex flex-col items-center justify-center dot-grid-canvas gap-3 p-8">
+            <div className="studio-card max-w-md p-6 text-center space-y-3">
+              <div className="text-[15px] font-semibold text-[var(--text-primary)]">
+                跨实验硬件平台横向编译基准 (Cross-Hardware Shootout)
+              </div>
+              <p className="text-[12.5px] text-[var(--text-secondary)] leading-relaxed">
+                将当前量子线路并发编译至中性原子 Rydberg、超导 CZ、超导 iSWAP 与离子阱 MS 等全部硬件体系，直观对比各平台的原生两比特纠缠门开销、物理脉冲时长与预期门保真度。
+              </p>
+              <button
+                onClick={() => onRunBenchmark && onRunBenchmark()}
+                disabled={isBusy}
+                className="mx-auto px-4 py-2 rounded-xl studio-btn-primary text-[13px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                <BarChart3 className="w-4 h-4" />
+                立即执行跨硬件平台基准对比
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 p-3.5 flex flex-col gap-3 overflow-auto">
+            {(() => {
+              const mutedColor = darkMode ? '#98989D' : '#6E6E73';
+              const textColor = darkMode ? '#E5E5EA' : '#1D1D1F';
+              const gridColor = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)';
+              const names = benchResponse.entries.map((e) => e.hardware_name);
+              return (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 min-h-[230px] shrink-0">
+                    <div className="studio-card flex flex-col overflow-hidden h-[240px]">
+                      <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                        <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                          各硬件平台编译后量子门开销对比
+                        </span>
+                        <button
+                          onClick={() => onRunBenchmark && onRunBenchmark()}
+                          disabled={isBusy}
+                          className="text-[11px] text-[#0A84FF] hover:underline cursor-pointer"
+                        >
+                          重新评测
+                        </button>
+                      </div>
+                      <div className="flex-1 min-h-0 p-1.5">
+                        <PlotlyChart
+                          data={[
+                            {
+                              type: 'bar',
+                              name: '2Q 纠缠门数',
+                              x: names,
+                              y: benchResponse.entries.map((e) => e.num_2q_gates),
+                              marker: { color: '#0A84FF' },
+                            },
+                            {
+                              type: 'bar',
+                              name: '物理 1Q 脉冲数',
+                              x: names,
+                              y: benchResponse.entries.map((e) => e.num_1q_physical_pulses),
+                              marker: { color: '#8B5CF6' },
+                            },
+                          ]}
+                          layout={{
+                            barmode: 'group',
+                            paper_bgcolor: 'rgba(0,0,0,0)',
+                            plot_bgcolor: 'rgba(0,0,0,0)',
+                            margin: { l: 42, r: 14, t: 18, b: 36 },
+                            xaxis: { tickfont: { size: 11, color: mutedColor } },
+                            yaxis: { gridcolor: gridColor, tickfont: { size: 10.5, color: mutedColor } },
+                            legend: { orientation: 'h', y: 1.15, font: { size: 10.5, color: textColor } },
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="studio-card flex flex-col overflow-hidden h-[240px]">
+                      <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                        <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                          预期门级总保真度 (%) 与关键路径脉冲时长
+                        </span>
+                        <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                          {benchResponse.num_qubits}Q · 原始 {benchResponse.original_gate_count} 门
+                        </span>
+                      </div>
+                      <div className="flex-1 min-h-0 p-1.5">
+                        <PlotlyChart
+                          data={[
+                            {
+                              type: 'bar',
+                              name: '预期门保真度 (%)',
+                              x: names,
+                              y: benchResponse.entries.map((e) =>
+                                Number((e.expected_gate_fidelity * 100).toFixed(3))
+                              ),
+                              marker: {
+                                color: benchResponse.entries.map((e) =>
+                                  e.hardware_id === benchResponse.recommended_hardware_id
+                                    ? '#10B981'
+                                    : '#0A84FF'
+                                ),
+                              },
+                              text: benchResponse.entries.map(
+                                (e) => `${(e.expected_gate_fidelity * 100).toFixed(2)}%`
+                              ),
+                              textposition: 'auto',
+                            },
+                          ]}
+                          layout={{
+                            paper_bgcolor: 'rgba(0,0,0,0)',
+                            plot_bgcolor: 'rgba(0,0,0,0)',
+                            margin: { l: 48, r: 14, t: 16, b: 36 },
+                            xaxis: { tickfont: { size: 11, color: mutedColor } },
+                            yaxis: {
+                              title: { text: 'F_gate (%)', font: { size: 10.5, color: mutedColor } },
+                              gridcolor: gridColor,
+                              tickfont: { size: 10.5, color: mutedColor },
+                            },
+                            showlegend: false,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="studio-card flex-1 min-h-[190px] overflow-auto">
+                    <table className="w-full text-[12px] font-mono-num border-collapse">
+                      <thead className="sticky top-0 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] text-left text-[11px] text-[var(--text-secondary)]">
+                        <tr>
+                          <th className="py-2 px-3 font-sans">硬件平台</th>
+                          <th className="py-2 px-3 font-sans">原生 2Q 门基</th>
+                          <th className="py-2 px-3">2Q 门数</th>
+                          <th className="py-2 px-3">1Q 物理脉冲</th>
+                          <th className="py-2 px-3">Virtual-Z</th>
+                          <th className="py-2 px-3">深度</th>
+                          <th className="py-2 px-3">关键路径时长</th>
+                          <th className="py-2 px-3">预期门保真度</th>
+                          <th className="py-2 px-3 text-right font-sans">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[var(--border-hairline)]">
+                        {benchResponse.entries.map((entry) => {
+                          const isBest = entry.hardware_id === benchResponse.recommended_hardware_id;
+                          return (
+                            <tr
+                              key={entry.hardware_id}
+                              className={
+                                isBest
+                                  ? 'bg-emerald-500/[0.07]'
+                                  : 'hover:bg-black/[0.025] dark:hover:bg-white/[0.03]'
+                              }
+                            >
+                              <td className="py-2 px-3 font-sans font-semibold flex items-center gap-1.5">
+                                <span>{entry.hardware_name}</span>
+                                {isBest && (
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.25 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold">
+                                    <Award className="w-3 h-3" />
+                                    最优推荐
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-[#0A84FF] font-semibold">
+                                {entry.primary_2q_gate}
+                              </td>
+                              <td className="py-2 px-3 font-semibold">{entry.num_2q_gates}</td>
+                              <td className="py-2 px-3">{entry.num_1q_physical_pulses}</td>
+                              <td className="py-2 px-3 text-[var(--text-secondary)]">
+                                {entry.num_1q_virtual_gates}
+                              </td>
+                              <td className="py-2 px-3">{entry.depth}</td>
+                              <td className="py-2 px-3">{entry.duration_ns.toFixed(1)} ns</td>
+                              <td className="py-2 px-3 font-semibold text-emerald-600 dark:text-emerald-400">
+                                {(entry.expected_gate_fidelity * 100).toFixed(3)}%
+                              </td>
+                              <td className="py-2 px-3 text-right font-sans">
+                                {onSelectHardwareAndApply && (
+                                  <button
+                                    onClick={() =>
+                                      onSelectHardwareAndApply(
+                                        entry.hardware_id,
+                                        entry.optimized_operations
+                                      )
+                                    }
+                                    className="px-2.5 py-1 rounded-md bg-[#0A84FF]/12 hover:bg-[#0A84FF]/20 text-[#0A84FF] text-[11px] font-semibold cursor-pointer transition-colors"
+                                  >
+                                    选用并应用至画布
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )
+      ) : !optResponse || !m1 ? (
         <div className="flex-1 flex flex-col items-center justify-center dot-grid-canvas gap-3 p-8">
           <div className="studio-card max-w-md p-6 text-center space-y-3">
             <div className="text-[15px] font-semibold text-[var(--text-primary)]">

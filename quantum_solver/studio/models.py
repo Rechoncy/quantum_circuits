@@ -155,6 +155,10 @@ class OptimizeRequest(BaseModel):
     preferred_native_2q: Optional[str] = None
 
 
+class BenchmarkHardwareRequest(BaseModel):
+    project: ProjectModel
+
+
 class SynthesizeUnitaryRequest(BaseModel):
     """Direct target unitary / Pauli Hamiltonian optimal native gate synthesis request."""
 
@@ -183,6 +187,17 @@ class SweepRequest(BaseModel):
     observed_qubit: int = 0
     hamiltonian_str: Optional[str] = None
     backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "qutip"
+
+
+class VariationalOptimizeRequest(BaseModel):
+    """Closed-loop VQE / QAOA parameter optimization minimizing <psi(theta)|H|psi(theta)>."""
+
+    project: ProjectModel
+    hamiltonian_str: str
+    param_names: List[str] = Field(default_factory=list)
+    method: Literal["COBYLA", "Powell", "Nelder-Mead", "L-BFGS-B"] = "COBYLA"
+    max_iter: int = 50
+    backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "trajectory"
 
 
 class NlCircuitRequest(BaseModel):

@@ -1,12 +1,14 @@
 import type {
   CircuitOpModel,
   CustomGateDef,
+  HardwareBenchmarkResponse,
   NlCircuitResponse,
   OptimizeResponse,
   ProjectModel,
   QubitSpec,
   SimulationResponse,
   SweepResponse,
+  VariationalOptimizeResponse,
 } from './types';
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
@@ -124,6 +126,27 @@ export async function runUnitarySynthesis(
   signal?: AbortSignal
 ): Promise<OptimizeResponse> {
   return postJson('/api/optimize/synthesize', payload, signal);
+}
+
+export async function runCrossHardwareBenchmark(
+  project: ProjectModel,
+  signal?: AbortSignal
+): Promise<HardwareBenchmarkResponse> {
+  return postJson('/api/optimize/benchmark', { project }, signal);
+}
+
+export async function runVariationalOptimization(
+  payload: {
+    project: ProjectModel;
+    hamiltonian_str: string;
+    param_names?: string[];
+    method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+    max_iter: number;
+    backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
+  },
+  signal?: AbortSignal
+): Promise<VariationalOptimizeResponse> {
+  return postJson('/api/vqe-optimize', payload, signal);
 }
 
 export async function runSweep(

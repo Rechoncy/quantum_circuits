@@ -124,6 +124,8 @@ export interface EvolutionResultJson {
   shots: number;
   final_fidelity: number | null;
   final_purity: number | null;
+  bipartite_entropy?: number | null;
+  mutual_information?: number[][] | null;
   final_probabilities: Record<string, number>;
   measurement_counts: Record<string, number>;
   stim_circuit_str: string | null;
@@ -200,6 +202,48 @@ export interface Sweep2DResponse {
 }
 
 export type SweepResponse = Sweep1DResponse | Sweep2DResponse;
+
+export interface VariationalOptimizeResponse {
+  method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+  backend: string;
+  hamiltonian_str: string;
+  param_names: string[];
+  initial_params: Record<string, number>;
+  optimal_params: Record<string, number>;
+  initial_energy: number;
+  optimal_energy: number;
+  energy_improvement: number;
+  optimal_fidelity: number;
+  num_evaluations: number;
+  energy_trace: number[];
+  best_so_far_trace: number[];
+  dominant_states: { bitstring: string; probability: number }[];
+}
+
+export interface HardwareBenchmarkEntry {
+  hardware_id: string;
+  hardware_name: string;
+  platform: HardwarePlatformType;
+  gate_set_name: string;
+  primary_2q_gate: string;
+  unitary_fidelity: number;
+  total_gates: number;
+  num_2q_gates: number;
+  num_1q_physical_pulses: number;
+  num_1q_virtual_gates: number;
+  depth: number;
+  duration_ns: number;
+  expected_gate_fidelity: number;
+  gate_breakdown: Record<string, number>;
+  optimized_operations: CircuitOpModel[];
+}
+
+export interface HardwareBenchmarkResponse {
+  num_qubits: number;
+  original_gate_count: number;
+  recommended_hardware_id: string;
+  entries: HardwareBenchmarkEntry[];
+}
 
 export interface RunHistoryItem {
   id: string;

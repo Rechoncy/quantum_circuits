@@ -27,7 +27,7 @@ import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from '../constants';
 import { TopologyEditor } from './TopologyEditor';
 
 export interface SweepConfigState {
-  mode: '1d' | '2d';
+  mode: '1d' | '2d' | 'vqe';
   param_x: string;
   x_start: number;
   x_stop: number;
@@ -39,6 +39,8 @@ export interface SweepConfigState {
   target_bitstring: string;
   observed_qubit: number;
   hamiltonian_str: string;
+  vqe_method: 'COBYLA' | 'Powell' | 'Nelder-Mead' | 'L-BFGS-B';
+  vqe_max_iter: number;
   backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
 }
 
@@ -108,6 +110,7 @@ interface RightInspectorProps {
   onDeleteOp: (opId: string) => void;
   onDuplicateOp: (opId: string) => void;
   onUpdateQubit: (qubitId: number, patch: Partial<QubitSpec>) => void;
+  onApplyLatticeLayout?: (positions: { x: number; y: number }[]) => void;
   onUpdateHardware: (hwId: string, patch: Partial<HardwareProfileModel>) => void;
   onToggleCustomEdge: (u: number, v: number) => void;
   onUpdateSimSettings: (patch: Partial<ProjectModel['sim_settings']>) => void;
@@ -167,6 +170,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onDeleteOp,
   onDuplicateOp,
   onUpdateQubit,
+  onApplyLatticeLayout,
   onUpdateHardware,
   onToggleCustomEdge,
   onUpdateSimSettings,
@@ -443,28 +447,45 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
     return (
       <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
-        <div className="text-[14px] font-semibold text-[var(--text-primary)]">参数扫描设置</div>
+        <div className="text-[14px] font-semibold text-[var(--text-primary)]">
+          参数扫描与变分寻优
+        </div>
 
         <div className="space-y-3">
-          <SectionTitle>扫描维度与后端</SectionTitle>
-          <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg grid grid-cols-2 gap-0.5">
-            {(['1d', '2d'] as const).map((m) => (
+          <SectionTitle>任务模式与后端</SectionTitle>
+          <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg grid grid-cols-3 gap-0.5">
+            {(
+              [
+                ['1d', '1D 曲线'],
+                ['2d', '2D 相图'],
+                ['vqe', 'VQE 寻优'],
+              ] as const
+            ).map(([m, lbl]) => (
               <button
                 key={m}
-                onClick={() => onSweepConfigChange({ mode: m })}
-                className={`py-1.5 rounded-[7px] text-[12px] font-medium cursor-pointer ${
+                onClick={() => {
+                  if (m === 'vqe' && !sweepConfig.hamiltonian_str.trim()) {
+                    onSweepConfigChange({
+                      mode: m,
+                      hamiltonian_str: buildPresetHamiltonian('tfim', project),
+                    });
+                  } else {
+                    onSweepConfigChange({ mode: m });
+                  }
+                }}
+                className={`py-1.5 rounded-[7px] text-[11.5px] font-medium cursor-pointer ${
                   sweepConfig.mode === m
                     ? 'bg-[var(--bg-panel)] text-[#0A84FF] font-semibold shadow-2xs'
                     : 'text-[var(--text-secondary)]'
                 }`}
               >
-                {m === '1d' ? '一维曲线 (1D)' : '二维相图 (2D)'}
+                {lbl}
               </button>
             ))}
           </div>
 
           <div>
-            <label className="block text-[11px] text-[var(--text-secondary)] mb-1">扫描引擎</label>
+            <label className="block text-[11px] text-[var(--text-secondary)] mb-1">求解引擎</label>
             <select
               value={sweepConfig.backend}
               onChange={(e) =>
@@ -480,76 +501,125 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </select>
           </div>
 
-          <div>
-            <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-              观测比特 (Bloch / ⟨Z⟩)
-            </label>
+          {sweepConfig.mode !== 'vqe' && (
+            <div>
+              <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
+                观测比特 (Bloch / ⟨Z⟩)
+              </label>
+              <select
+                value={Math.min(sweepConfig.observed_qubit, Math.max(0, project.qubits.length - 1))}
+                onChange={(e) => onSweepConfigChange({ observed_qubit: Number(e.target.value) })}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+              >
+                {project.qubits.map((q, idx) => (
+                  <option key={q.id} value={idx}>
+                    {q.name} (index {idx})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {sweepConfig.mode === 'vqe' ? (
+          <div className="pt-4 border-t border-[var(--border-hairline)] space-y-3">
+            <SectionTitle>闭环变分优化器 (SciPy)</SectionTitle>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  优化算法
+                </label>
+                <select
+                  value={sweepConfig.vqe_method}
+                  onChange={(e) =>
+                    onSweepConfigChange({
+                      vqe_method: e.target.value as SweepConfigState['vqe_method'],
+                    })
+                  }
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                >
+                  <option value="COBYLA">COBYLA (信赖域)</option>
+                  <option value="Powell">Powell (方向搜索)</option>
+                  <option value="Nelder-Mead">Nelder-Mead</option>
+                  <option value="L-BFGS-B">L-BFGS-B (准牛顿)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  最大迭代步数
+                </label>
+                <input
+                  type="number"
+                  min={10}
+                  max={200}
+                  step={10}
+                  value={sweepConfig.vqe_max_iter}
+                  onChange={(e) => onSweepConfigChange({ vqe_max_iter: Number(e.target.value) })}
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                />
+              </div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] text-[var(--text-secondary)] leading-relaxed">
+              待寻优符号参数 ({symKeys.length}):{' '}
+              <span className="font-mono-num text-[#0A84FF] font-semibold">
+                {symKeys.length > 0 ? symKeys.join(', ') : '无（请先添加符号变量）'}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="pt-4 border-t border-[var(--border-hairline)] space-y-2.5">
+            <SectionTitle>主扫描参数 X</SectionTitle>
             <select
-              value={Math.min(sweepConfig.observed_qubit, Math.max(0, project.qubits.length - 1))}
-              onChange={(e) => onSweepConfigChange({ observed_qubit: Number(e.target.value) })}
-              className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+              value={sweepConfig.param_x}
+              onChange={(e) => {
+                const k = e.target.value;
+                const [s0, s1] = defaultSweepRange(k);
+                onSweepConfigChange({ param_x: k, x_start: s0, x_stop: s1 });
+              }}
+              className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] outline-none"
             >
-              {project.qubits.map((q, idx) => (
-                <option key={q.id} value={idx}>
-                  {q.name} (index {idx})
+              {paramOptions.map((o) => (
+                <option key={o.key} value={o.key}>
+                  {o.label}
                 </option>
               ))}
             </select>
-          </div>
-        </div>
 
-        <div className="pt-4 border-t border-[var(--border-hairline)] space-y-2.5">
-          <SectionTitle>主扫描参数 X</SectionTitle>
-          <select
-            value={sweepConfig.param_x}
-            onChange={(e) => {
-              const k = e.target.value;
-              const [s0, s1] = defaultSweepRange(k);
-              onSweepConfigChange({ param_x: k, x_start: s0, x_stop: s1 });
-            }}
-            className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] outline-none"
-          >
-            {paramOptions.map((o) => (
-              <option key={o.key} value={o.key}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-
-          <div className="grid grid-cols-3 gap-2">
-            <div>
-              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">起始</label>
-              <input
-                type="number"
-                step={0.1}
-                value={sweepConfig.x_start}
-                onChange={(e) => onSweepConfigChange({ x_start: Number(e.target.value) })}
-                className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">终止</label>
-              <input
-                type="number"
-                step={0.1}
-                value={sweepConfig.x_stop}
-                onChange={(e) => onSweepConfigChange({ x_stop: Number(e.target.value) })}
-                className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">点数</label>
-              <input
-                type="number"
-                min={3}
-                max={120}
-                value={sweepConfig.x_points}
-                onChange={(e) => onSweepConfigChange({ x_points: Number(e.target.value) })}
-                className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
-              />
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">起始</label>
+                <input
+                  type="number"
+                  step={0.1}
+                  value={sweepConfig.x_start}
+                  onChange={(e) => onSweepConfigChange({ x_start: Number(e.target.value) })}
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">终止</label>
+                <input
+                  type="number"
+                  step={0.1}
+                  value={sweepConfig.x_stop}
+                  onChange={(e) => onSweepConfigChange({ x_stop: Number(e.target.value) })}
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">点数</label>
+                <input
+                  type="number"
+                  min={3}
+                  max={120}
+                  value={sweepConfig.x_points}
+                  onChange={(e) => onSweepConfigChange({ x_points: Number(e.target.value) })}
+                  className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                />
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {sweepConfig.mode === '2d' && (
           <div className="pt-4 border-t border-[var(--border-hairline)] space-y-2.5">
@@ -674,7 +744,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             className="flex-1 py-2 rounded-xl studio-btn-primary text-[12.5px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            执行参数扫描
+            {sweepConfig.mode === 'vqe' ? '启动变分基态寻优' : '执行参数扫描'}
           </button>
           {isBusy && onCancelSweep && (
             <button
@@ -1198,6 +1268,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           qubits={project.qubits}
           hardware={hw}
           onUpdateQubitPos={(qid, x, y) => onUpdateQubit(qid, { pos_x: x, pos_y: y })}
+          onApplyLatticeLayout={onApplyLatticeLayout}
           onToggleCustomEdge={onToggleCustomEdge}
         />
 

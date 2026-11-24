@@ -1,6 +1,7 @@
 """Quantum Studio v2 unified project data model, custom gate engine, and FastAPI backend."""
 
 from .models import (
+    BenchmarkHardwareRequest,
     CircuitOpModel,
     CustomGateDef,
     HardwareProfileModel,
@@ -12,16 +13,19 @@ from .models import (
     SimulationSettingsModel,
     SweepRequest,
     SynthesizeUnitaryRequest,
+    VariationalOptimizeRequest,
 )
 from .nl_circuit import generate_circuit_from_nl
 from .project_engine import (
     build_preset_projects,
     compile_project_circuit,
     dsl_to_project_ops,
+    execute_cross_hardware_benchmark,
     execute_project_optimization,
     execute_project_simulation,
     execute_project_sweep,
     execute_unitary_synthesis,
+    execute_variational_optimization,
     openqasm_to_project_ops,
     parse_sparse_pauli_terms,
     project_to_dsl,
@@ -37,9 +41,11 @@ __all__ = [
     "HardwareProfileModel",
     "SimulationSettingsModel",
     "QasmSyncRequest",
+    "BenchmarkHardwareRequest",
     "OptimizeRequest",
     "SynthesizeUnitaryRequest",
     "SweepRequest",
+    "VariationalOptimizeRequest",
     "NlCircuitRequest",
     "generate_circuit_from_nl",
     "build_preset_projects",
@@ -51,8 +57,10 @@ __all__ = [
     "parse_sparse_pauli_terms",
     "execute_project_simulation",
     "execute_project_optimization",
+    "execute_cross_hardware_benchmark",
     "execute_unitary_synthesis",
     "execute_project_sweep",
+    "execute_variational_optimization",
     "create_app",
     "app",
 ]

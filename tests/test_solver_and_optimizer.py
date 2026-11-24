@@ -1019,6 +1019,88 @@ def test_openqasm_bidirectional_hamiltonian_sweep_and_flagship_presets() -> None
     p_zero32 = res_ghz32["final_probabilities"].get("0" * 32, 0.0)
     p_one32 = res_ghz32["final_probabilities"].get("1" * 32, 0.0)
     assert 0.45 < p_zero32 < 0.55 and 0.45 < p_one32 < 0.55
+    # Exact GF(2) stabilizer entanglement diagnostics on 32-qubit GHZ: S_A = 1.0 bit, I(q0:q31) = 1.0 bit
+    assert abs((res_ghz32["bipartite_entropy"] or 0.0) - 1.0) < 1e-5
+    assert abs(res_ghz32["mutual_information"][0][31] - 1.0) < 1e-5
+
+
+def test_vqe_optimizer_mutual_info_and_cross_hardware_benchmark() -> None:
+    """
+    Verify v2.2 scientific upgrades:
+      1. Closed-loop VQE (`execute_variational_optimization`) reaches exact 2Q TFIM ground-state energy -sqrt(2)
+      2. Mutual Information Matrix I(q_i:q_j) = 2.0 bits & Bipartite Entropy S_A = 1.0 bit across QuTiP, Kraus, Trajectory & Stim
+      3. Cross-Hardware Benchmark (`execute_cross_hardware_benchmark`) & 16Q noisy optimizer evaluation via Trajectory
+    """
+    from quantum_solver.studio import (
+        BenchmarkHardwareRequest,
+        CircuitOpModel,
+        OptimizeRequest,
+        VariationalOptimizeRequest,
+        build_preset_projects,
+        execute_cross_hardware_benchmark,
+        execute_project_optimization,
+        execute_project_simulation,
+        execute_variational_optimization,
+    )
+
+    presets = build_preset_projects()
+
+    # 1. 2Q Transverse-Field Ising Model H = -1.0*Z0*Z1 - 0.5*X0 - 0.5*X1 via 2-param QAOA/HVA ansatz:
+    # Exact ground-state eigenvalue is E_0 = -sqrt(J^2 + h^2) = -sqrt(1 + 1) = -sqrt(2) ≈ -1.41421356
+    p_vqe2 = presets[2].model_copy(deep=True)  # 2Q template
+    p_vqe2.sim_settings.enable_t1_t2 = False
+    p_vqe2.sim_settings.enable_depol = False
+    p_vqe2.sim_settings.enable_zz = False
+    p_vqe2.sim_settings.enable_readout = False
+    p_vqe2.variables = {"gamma": 0.2, "beta": 0.2}
+    p_vqe2.operations = [
+        CircuitOpModel(id="v_h0", step=0, kind="gate", name="H", qubits=[0], params=[]),
+        CircuitOpModel(id="v_h1", step=0, kind="gate", name="H", qubits=[1], params=[]),
+        CircuitOpModel(id="v_zz", step=1, kind="gate", name="RZZ", qubits=[0, 1], params=["gamma"]),
+        CircuitOpModel(id="v_x0", step=2, kind="gate", name="RX", qubits=[0], params=["beta"]),
+        CircuitOpModel(id="v_x1", step=2, kind="gate", name="RX", qubits=[1], params=["beta"]),
+        CircuitOpModel(id="vm", step=3, kind="measure", name="MEASURE", qubits=[0, 1], params=[]),
+    ]
+    vqe_res = execute_variational_optimization(
+        VariationalOptimizeRequest(
+            project=p_vqe2,
+            hamiltonian_str="-1.0*Z0*Z1 - 0.5*X0 - 0.5*X1",
+            method="COBYLA",
+            max_iter=60,
+            backend="trajectory",
+        )
+    )
+    assert vqe_res["optimal_energy"] < vqe_res["initial_energy"] - 0.35
+    assert abs(vqe_res["optimal_energy"] - (-math.sqrt(2.0))) < 1e-3
+
+    # 2. Exact Bell state mutual information I(0:1) = 2.0 bits and S_A = 1.0 bit across all 4 engines!
+    p_bell = p_vqe2.model_copy(deep=True)
+    p_bell.operations = [
+        CircuitOpModel(id="b_h", step=0, kind="gate", name="H", qubits=[0], params=[]),
+        CircuitOpModel(id="b_cx", step=1, kind="gate", name="CNOT", qubits=[0, 1], params=[]),
+        CircuitOpModel(id="b_m", step=2, kind="measure", name="MEASURE", qubits=[0, 1], params=[]),
+    ]
+    p_bell.sim_settings.backend = "compare"
+    bell_cmp = execute_project_simulation(p_bell)["results"]
+    for bk in ("qutip", "kraus", "trajectory", "stim"):
+        r_bk = bell_cmp[bk]
+        assert abs((r_bk["bipartite_entropy"] or 0.0) - 1.0) < 1e-4
+        assert abs(r_bk["mutual_information"][0][1] - 2.0) < 1e-4
+        assert abs(r_bk["mutual_information"][0][0] - 1.0) < 1e-4
+
+    # 3. Cross-Hardware Shootout across all 4 hardware profiles + 16Q noisy optimizer check
+    bench = execute_cross_hardware_benchmark(BenchmarkHardwareRequest(project=presets[1]))
+    assert len(bench["entries"]) >= 4
+    assert bench["recommended_hardware_id"] in {e["hardware_id"] for e in bench["entries"]}
+
+    p_16q_noisy = presets[4].model_copy(deep=True)  # 16Q VQE
+    p_16q_noisy.sim_settings.enable_depol = True
+    opt_16 = execute_project_optimization(
+        OptimizeRequest(project=p_16q_noisy, evaluate_noisy_fidelity=True)
+    )
+    assert opt_16["unitary_fidelity"] > 0.99999
+    assert opt_16["noisy_fidelity_optimized"] is not None
+
 
 
 

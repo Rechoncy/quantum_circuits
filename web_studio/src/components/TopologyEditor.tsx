@@ -5,13 +5,84 @@ interface TopologyEditorProps {
   qubits: QubitSpec[];
   hardware: HardwareProfileModel;
   onUpdateQubitPos: (qubitId: number, x: number, y: number) => void;
+  onApplyLatticeLayout?: (positions: { x: number; y: number }[]) => void;
   onToggleCustomEdge: (u: number, v: number) => void;
+}
+
+export function generateAtomLatticeCoords(
+  kind: 'square' | 'triangular' | 'kagome' | 'ring',
+  n: number,
+  blockadeRadiusUm: number
+): { x: number; y: number }[] {
+  if (n <= 0) return [];
+  // Bond length a = 0.82 * Rb ensures nearest neighbors (a <= Rb) couple cleanly while
+  // next-nearest neighbors (sqrt(2)*a = 1.16*Rb for square, sqrt(3)*a = 1.42*Rb for tri/kagome) stay uncoupled!
+  const a = Math.max(1.0, Number((0.82 * Math.max(1.5, blockadeRadiusUm)).toFixed(2)));
+  if (n === 1) return [{ x: 0, y: 0 }];
+
+  if (kind === 'ring') {
+    if (n === 2) return [{ x: 0, y: 0 }, { x: a, y: 0 }];
+    const radius = a / (2 * Math.sin(Math.PI / n));
+    return Array.from({ length: n }, (_, i) => {
+      const ang = (2 * Math.PI * i) / n - Math.PI / 2;
+      return {
+        x: Number((radius * Math.cos(ang)).toFixed(2)),
+        y: Number((radius * Math.sin(ang)).toFixed(2)),
+      };
+    });
+  }
+
+  if (kind === 'square') {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+    return Array.from({ length: n }, (_, i) => {
+      const r = Math.floor(i / cols);
+      const c = r % 2 === 0 ? i % cols : cols - 1 - (i % cols);
+      return { x: Number((c * a).toFixed(2)), y: Number((r * a).toFixed(2)) };
+    });
+  }
+
+  if (kind === 'triangular') {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+    const h = (Math.sqrt(3) / 2) * a;
+    return Array.from({ length: n }, (_, i) => {
+      const r = Math.floor(i / cols);
+      const c = i % cols;
+      return {
+        x: Number((c * a + (r % 2 === 1 ? 0.5 * a : 0)).toFixed(2)),
+        y: Number((r * h).toFixed(2)),
+      };
+    });
+  }
+
+  // Kagome lattice: 3-atom unit cell at (0,0), (a,0), (0.5a, sqrt(3)/2 a) with Bravais vectors L1=(2a,0), L2=(a, sqrt(3)a)
+  const cellsNeeded = Math.max(1, Math.ceil(n / 3));
+  const cellCols = Math.max(1, Math.ceil(Math.sqrt(cellsNeeded)));
+  const h = (Math.sqrt(3) / 2) * a;
+  const pts: { x: number; y: number }[] = [];
+  for (let r = 0; pts.length < n; r++) {
+    for (let c = 0; c < cellCols && pts.length < n; c++) {
+      const ox = c * 2 * a + (r % 2 === 1 ? a : 0);
+      const oy = r * 2 * h;
+      const basis: [number, number][] = [
+        [ox, oy],
+        [ox + a, oy],
+        [ox + 0.5 * a, oy + h],
+      ];
+      for (const [bx, by] of basis) {
+        if (pts.length < n) {
+          pts.push({ x: Number(bx.toFixed(2)), y: Number(by.toFixed(2)) });
+        }
+      }
+    }
+  }
+  return pts;
 }
 
 export const TopologyEditor: React.FC<TopologyEditorProps> = ({
   qubits,
   hardware,
   onUpdateQubitPos,
+  onApplyLatticeLayout,
   onToggleCustomEdge,
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -46,13 +117,50 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
       }
     }
   } else {
-    // rydberg_radius
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const d = Math.hypot(qubits[i].pos_x - qubits[j].pos_x, qubits[i].pos_y - qubits[j].pos_y);
-        if (d <= rb + 1e-6) {
-          totalEdgeCount++;
-          if (edges.length < 220) edges.push([i, j]);
+    // rydberg_radius (O(N) spatial cell bucketing when n > 60)
+    if (n > 60) {
+      const cellMap = new Map<string, number[]>();
+      for (let i = 0; i < n; i++) {
+        const cx = Math.floor(qubits[i].pos_x / rb);
+        const cy = Math.floor(qubits[i].pos_y / rb);
+        const k = `${cx}_${cy}`;
+        const bucket = cellMap.get(k);
+        if (bucket) bucket.push(i);
+        else cellMap.set(k, [i]);
+      }
+      for (const [key, idxs] of cellMap.entries()) {
+        const [cxStr, cyStr] = key.split('_');
+        const cx = Number(cxStr);
+        const cy = Number(cyStr);
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            const nbrs = cellMap.get(`${cx + dx}_${cy + dy}`);
+            if (!nbrs) continue;
+            for (const i of idxs) {
+              for (const j of nbrs) {
+                if (i < j) {
+                  const d = Math.hypot(
+                    qubits[i].pos_x - qubits[j].pos_x,
+                    qubits[i].pos_y - qubits[j].pos_y
+                  );
+                  if (d <= rb + 1e-6) {
+                    totalEdgeCount++;
+                    if (edges.length < 220) edges.push([i, j]);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const d = Math.hypot(qubits[i].pos_x - qubits[j].pos_x, qubits[i].pos_y - qubits[j].pos_y);
+          if (d <= rb + 1e-6) {
+            totalEdgeCount++;
+            if (edges.length < 220) edges.push([i, j]);
+          }
         }
       }
     }
@@ -207,6 +315,30 @@ export const TopologyEditor: React.FC<TopologyEditorProps> = ({
         </span>
         <span className="font-mono-num">{totalEdgeCount} 条耦合</span>
       </div>
+
+      {onApplyLatticeLayout && n >= 2 && (
+        <div className="flex flex-wrap items-center gap-1 pt-0.5">
+          <span className="text-[10.5px] text-[var(--text-secondary)] mr-0.5">晶格预设:</span>
+          {(
+            [
+              ['square', '正方'],
+              ['triangular', '三角'],
+              ['kagome', 'Kagome'],
+              ['ring', '环形'],
+            ] as const
+          ).map(([lk, lbl]) => (
+            <button
+              key={lk}
+              type="button"
+              onClick={() => onApplyLatticeLayout(generateAtomLatticeCoords(lk, n, rb))}
+              title={`按阻塞半径 Rb=${rb.toFixed(1)}μm 一键生成最近邻${lbl}光镊阵列`}
+              className="px-2 py-0.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[10.5px] font-medium cursor-pointer transition-colors"
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

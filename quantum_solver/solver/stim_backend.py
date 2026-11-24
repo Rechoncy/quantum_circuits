@@ -29,6 +29,7 @@ from .base import (
     compute_bloch_vectors,
     compute_populations,
     count_boolean_samples,
+    gf2_rank,
 )
 from .qutip_backend import QuTiPBackend
 
@@ -608,6 +609,45 @@ class StimBackend:
                     + stim_lines[-30:]
                 )
 
+        stim_meta: Dict[str, object] = {}
+        if 2 <= n <= 48:
+            try:
+                canon = tab_sim.canonical_stabilizers()
+                if len(canon) == n:
+                    x_mat = np.zeros((n, n), dtype=np.uint8)
+                    z_mat = np.zeros((n, n), dtype=np.uint8)
+                    for r_idx, p_str in enumerate(canon):
+                        xs_b, zs_b = p_str.to_numpy()
+                        x_mat[r_idx, : len(xs_b)] = xs_b.astype(np.uint8)
+                        z_mat[r_idx, : len(zs_b)] = zs_b.astype(np.uint8)
+                    s1_stab = [
+                        float(max(0, gf2_rank(np.column_stack((x_mat[:, q], z_mat[:, q]))) - 1))
+                        for q in range(n)
+                    ]
+                    loc_surv = (
+                        float(est_fid ** (2.0 / max(2, n)))
+                        if (est_fid is not None and 0.0 <= est_fid < 0.999999)
+                        else 1.0
+                    )
+                    mi_stab = [[0.0] * n for _ in range(n)]
+                    for qi in range(n):
+                        mi_stab[qi][qi] = round(s1_stab[qi], 5)
+                        for qj in range(qi + 1, n):
+                            sub_ij = np.column_stack(
+                                (x_mat[:, qi], x_mat[:, qj], z_mat[:, qi], z_mat[:, qj])
+                            )
+                            s2_ij = float(max(0, gf2_rank(sub_ij) - 2))
+                            mi_val = round(max(0.0, (s1_stab[qi] + s1_stab[qj] - s2_ij) * loc_surv), 5)
+                            mi_stab[qi][qj] = mi_val
+                            mi_stab[qj][qi] = mi_val
+                    k_half = max(1, n // 2)
+                    sub_half = np.hstack((x_mat[:, :k_half], z_mat[:, :k_half]))
+                    bip_stab = float(max(0, gf2_rank(sub_half) - k_half))
+                    stim_meta["mutual_information"] = mi_stab
+                    stim_meta["bipartite_entropy"] = round(bip_stab, 5)
+            except Exception:
+                pass
+
         return EvolutionResult(
             backend_name="Stim-PauliFrame" + ("+QuTiPCalibrated" if self.use_qutip_calibration else ""),
             num_qubits=n,
@@ -619,4 +659,5 @@ class StimBackend:
             final_fidelity=est_fid,
             final_purity=est_pur,
             stim_circuit_str=raw_stim_str,
+            metadata=stim_meta,
         )

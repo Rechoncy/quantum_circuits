@@ -3,6 +3,7 @@ import { CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
 import type {
   CircuitOpModel,
   CustomGateDef,
+  HardwareBenchmarkResponse,
   NlCircuitResponse,
   OptimizeResponse,
   ProjectModel,
@@ -11,15 +12,18 @@ import type {
   SelectionTarget,
   SimulationResponse,
   SweepResponse,
+  VariationalOptimizeResponse,
   WorkMode,
 } from './types';
 import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from './constants';
 import {
   fetchPresets,
+  runCrossHardwareBenchmark,
   runOptimization,
   runSimulation,
   runSweep,
   runUnitarySynthesis,
+  runVariationalOptimization,
   syncDslToProject,
   syncProjectToDsl,
   syncQasmToProject,
@@ -86,11 +90,13 @@ export default function App() {
 
   // Optimize state
   const [optResponse, setOptResponse] = useState<OptimizeResponse | null>(null);
+  const [benchResponse, setBenchResponse] = useState<HardwareBenchmarkResponse | null>(null);
   const [preferredNative2Q, setPreferredNative2Q] = useState('');
   const [evalNoisyOpt, setEvalNoisyOpt] = useState(true);
 
-  // Sweep state
+  // Sweep & VQE state
   const [sweepResponse, setSweepResponse] = useState<SweepResponse | null>(null);
+  const [vqeResponse, setVqeResponse] = useState<VariationalOptimizeResponse | null>(null);
   const [sweepConfig, setSweepConfig] = useState<SweepConfigState>({
     mode: '1d',
     param_x: 'theta',
@@ -104,6 +110,8 @@ export default function App() {
     target_bitstring: '0000',
     observed_qubit: 1,
     hamiltonian_str: '',
+    vqe_method: 'COBYLA',
+    vqe_max_iter: 50,
     backend: 'kraus',
   });
   const taskAbortRef = useRef<AbortController | null>(null);
@@ -302,7 +310,39 @@ export default function App() {
     [project, evalNoisyOpt, preferredNative2Q, addLog]
   );
 
-  // Run Parameter Sweep action (with AbortController cancelation support)
+  // Run Cross-Hardware Benchmark
+  const handleRunHwBenchmark = useCallback(
+    async (projOverride?: ProjectModel) => {
+      const target = projOverride || project;
+      if (!target) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
+      setIsBusy(true);
+      setStatusMsg('正在并发执行跨硬件平台原生门编译对比基准...');
+      try {
+        const res = await runCrossHardwareBenchmark(target, controller.signal);
+        setBenchResponse(res);
+        const msg = `跨硬件平台基准对比完成 · 共评测 ${res.entries.length} 种硬件体系`;
+        setStatusMsg(msg);
+        addLog(msg, 'info');
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+        const errTxt = err instanceof Error ? err.message : String(err);
+        setStatusMsg(`硬件对比失败: ${errTxt}`);
+        addLog(`硬件对比失败: ${errTxt}`, 'error');
+      } finally {
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
+      }
+    },
+    [project, addLog]
+  );
+
+  // Run Parameter Sweep OR Closed-Loop VQE Optimization (with AbortController cancelation support)
   const handleCancelSweep = handleStopTask;
 
   const handleRunSweep = useCallback(
@@ -312,6 +352,43 @@ export default function App() {
       if (taskAbortRef.current) taskAbortRef.current.abort();
       const controller = new AbortController();
       taskAbortRef.current = controller;
+
+      if (sweepConfig.mode === 'vqe') {
+        const hamStr =
+          sweepConfig.hamiltonian_str.trim() || buildPresetHamiltonian('tfim', target);
+        if (!sweepConfig.hamiltonian_str.trim()) {
+          setSweepConfig((prev) => ({ ...prev, hamiltonian_str: hamStr }));
+        }
+        setIsBusy(true);
+        setStatusMsg(`正在执行 ${sweepConfig.vqe_method} 闭环变分寻优...`);
+        try {
+          const vRes = await runVariationalOptimization(
+            {
+              project: target,
+              hamiltonian_str: hamStr,
+              method: sweepConfig.vqe_method,
+              max_iter: sweepConfig.vqe_max_iter,
+              backend: sweepConfig.backend,
+            },
+            controller.signal
+          );
+          setVqeResponse(vRes);
+          const msg = `变分寻优完成 · ${vRes.method} (${vRes.num_evaluations} 步) · E* = ${vRes.optimal_energy.toFixed(5)}`;
+          setStatusMsg(msg);
+          addLog(msg, 'info');
+        } catch (err) {
+          if ((err as Error)?.name === 'AbortError') return;
+          const errTxt = err instanceof Error ? err.message : String(err);
+          setStatusMsg(`变分寻优失败: ${errTxt}`);
+          addLog(`变分寻优失败: ${errTxt}`, 'error');
+        } finally {
+          if (taskAbortRef.current === controller) {
+            taskAbortRef.current = null;
+            setIsBusy(false);
+          }
+        }
+        return;
+      }
 
       setIsBusy(true);
       setStatusMsg(`正在并发执行 ${sweepConfig.mode.toUpperCase()} 参数扫描 (${sweepConfig.param_x})...`);
@@ -1069,7 +1146,9 @@ export default function App() {
           setPast([]);
           setFuture([]);
           setOptResponse(null);
+          setBenchResponse(null);
           setSweepResponse(null);
+          setVqeResponse(null);
           setSelection({ type: 'none' });
           setQasmError(null);
           addLog(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q)`, 'info');
@@ -1133,7 +1212,9 @@ export default function App() {
           setPast([]);
           setFuture([]);
           setOptResponse(null);
+          setBenchResponse(null);
           setSweepResponse(null);
+          setVqeResponse(null);
           const varKeys = Object.keys(clone.variables);
           const firstVar = varKeys[0] || 'hw:depol_2q';
           const secondVar = varKeys[1] || 'hw:depol_2q';
@@ -1400,7 +1481,10 @@ export default function App() {
             <OptimizeWorkspace
               project={project}
               optResponse={optResponse}
+              benchResponse={benchResponse}
+              darkMode={darkMode}
               onRunOptimize={() => handleRunOptimize()}
+              onRunBenchmark={() => handleRunHwBenchmark()}
               onRunUnitarySynthesis={handleRunUnitarySynthesis}
               onApplyOptimizedToDesign={(targetNumQubits) => {
                 if (!optResponse) return;
@@ -1435,15 +1519,45 @@ export default function App() {
                 setMode('design');
                 addLog('已将最优硬件原生门序列应用到设计画布', 'info');
               }}
+              onSelectHardwareAndApply={(hardwareId, ops) => {
+                mutateProject((p) => ({
+                  ...p,
+                  active_hardware_id: hardwareId,
+                  operations: ops,
+                }));
+                setMode('design');
+                addLog(`已切换硬件配置 (${hardwareId}) 并应用最优原生门序列`, 'info');
+              }}
               isBusy={isBusy}
             />
           )}
 
           {mode === 'sweep' && (
             <SweepWorkspace
+              activeSubMode={sweepConfig.mode}
               sweepResponse={sweepResponse}
+              vqeResponse={vqeResponse}
               darkMode={darkMode}
               onRunSweep={() => handleRunSweep()}
+              onApplyOptimalParams={(optParams, runSim) => {
+                const updated: ProjectModel = {
+                  ...project,
+                  variables: { ...project.variables, ...optParams },
+                };
+                setPast((p) => [...p.slice(-30), project]);
+                setFuture([]);
+                setProject(updated);
+                setSimDirty(true);
+                addLog(
+                  `已写回变分最优参数: ${Object.entries(optParams)
+                    .map(([k, v]) => `${k}=${v.toFixed(4)}`)
+                    .join(', ')}`,
+                  'info'
+                );
+                if (runSim) {
+                  handleRunSimulation(updated, true);
+                }
+              }}
               isBusy={isBusy}
             />
           )}
@@ -1478,6 +1592,15 @@ export default function App() {
                 qubits: p.qubits.map((q) => (q.id === qubitId ? { ...q, ...patch } : q)),
               }))
             }
+            onApplyLatticeLayout={(positions) => {
+              mutateProject((p) => ({
+                ...p,
+                qubits: p.qubits.map((q, idx) =>
+                  positions[idx] ? { ...q, pos_x: positions[idx].x, pos_y: positions[idx].y } : q
+                ),
+              }));
+              addLog(`已应用二维中性原子晶格排布 (${positions.length} 原子)`, 'info');
+            }}
             onUpdateHardware={(hwId, patch) =>
               mutateProject((p) => ({
                 ...p,

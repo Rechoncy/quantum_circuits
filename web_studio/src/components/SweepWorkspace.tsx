@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
-import { Download, Maximize2, Minimize2, Play } from 'lucide-react';
-import type { SweepResponse } from '../types';
+import { ArrowRightLeft, CheckCircle2, Download, Maximize2, Minimize2, Play, Sparkles } from 'lucide-react';
+import type { SweepResponse, VariationalOptimizeResponse } from '../types';
 import { PlotlyChart } from './PlotlyChart';
 
 interface SweepWorkspaceProps {
+  activeSubMode?: '1d' | '2d' | 'vqe';
   sweepResponse: SweepResponse | null;
+  vqeResponse?: VariationalOptimizeResponse | null;
   darkMode: boolean;
   onRunSweep: () => void;
+  onApplyOptimalParams?: (params: Record<string, number>, runSim: boolean) => void;
   isBusy: boolean;
 }
 
@@ -30,9 +33,12 @@ function formatSweepKet(bstr: string): string {
 }
 
 export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
+  activeSubMode = '1d',
   sweepResponse,
+  vqeResponse = null,
   darkMode,
   onRunSweep,
+  onApplyOptimalParams,
   isBusy,
 }) => {
   const [focused1D, setFocused1D] = useState<'none' | 'pop' | 'bloch' | 'fid' | 'table'>('none');
@@ -78,6 +84,251 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  // =========================================================================
+  // VQE / QAOA CLOSED-LOOP VARIATIONAL OPTIMIZER VIEW
+  // =========================================================================
+  if (activeSubMode === 'vqe') {
+    if (!vqeResponse) {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center dot-grid-canvas gap-3 p-8">
+          <div className="studio-card max-w-md p-6 text-center space-y-3">
+            <div className="text-[15px] font-semibold text-[var(--text-primary)] flex items-center justify-center gap-1.5">
+              <Sparkles className="w-4 h-4 text-[#0A84FF]" />
+              VQE / QAOA 闭环变分基态求解器
+            </div>
+            <p className="text-[12.5px] text-[var(--text-secondary)] leading-relaxed">
+              利用 SciPy 经典优化器（COBYLA / Powell / Nelder-Mead / L-BFGS-B）联合优化线路中所有符号变分参数，自动搜索目标泡利哈密顿量 ⟨ψ(θ)|H|ψ(θ)⟩ 的最低基态能量与最优参数向量。
+            </p>
+            <button
+              onClick={onRunSweep}
+              disabled={isBusy}
+              className="mx-auto px-4 py-2 rounded-xl studio-btn-primary text-[13px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              立即启动变分基态寻优
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const evalSteps = vqeResponse.energy_trace.map((_, i) => i + 1);
+    const handleExportVqeCsv = () => {
+      const lines = [
+        'eval_step,energy,best_energy_so_far',
+        ...vqeResponse.energy_trace.map(
+          (e, i) => `${i + 1},${e},${vqeResponse.best_so_far_trace[i] ?? e}`
+        ),
+      ];
+      const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vqe_convergence_${vqeResponse.method}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    return (
+      <div className="flex-1 min-h-0 flex flex-col bg-[var(--bg-app)] overflow-hidden">
+        {/* Header Bar */}
+        <div className="h-11 px-4 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 text-[12px] min-w-0">
+            <span className="font-semibold text-[var(--text-primary)] whitespace-nowrap">
+              VQE / QAOA 闭环变分寻优
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] font-mono-num text-[11px] text-[var(--text-secondary)] truncate">
+              {vqeResponse.method} · {vqeResponse.backend} · {vqeResponse.param_names.length} 参数
+            </span>
+            <span className="hidden md:inline-flex px-2 py-0.5 rounded-md bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 font-mono-num text-[11px] font-semibold">
+              E* = {vqeResponse.optimal_energy.toFixed(5)}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleExportVqeCsv}
+              className="px-2.5 py-1 rounded-lg border border-[var(--border-input)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[11.5px] font-medium flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              导出收敛 CSV
+            </button>
+            {onApplyOptimalParams && (
+              <button
+                onClick={() => onApplyOptimalParams(vqeResponse.optimal_params, true)}
+                className="px-3 py-1 rounded-lg studio-btn-primary text-[11.5px] font-semibold flex items-center gap-1.5 cursor-pointer"
+              >
+                <ArrowRightLeft className="w-3.5 h-3.5" />
+                写回最优参数并演化
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* 4-KPI Strip */}
+        <div className="px-3.5 pt-3 grid grid-cols-2 lg:grid-cols-4 gap-2.5 shrink-0">
+          <div className="studio-kpi px-3 py-2">
+            <div className="text-[10px] font-medium text-[var(--text-secondary)] uppercase tracking-wider">
+              初始期望能量 E₀
+            </div>
+            <div className="text-[15px] font-semibold font-mono-num text-[var(--text-primary)] mt-0.5">
+              {vqeResponse.initial_energy.toFixed(5)}
+            </div>
+          </div>
+          <div className="studio-kpi px-3 py-2">
+            <div className="text-[10px] font-medium text-[var(--text-secondary)] uppercase tracking-wider">
+              收敛基态能量 E*
+            </div>
+            <div className="text-[15px] font-semibold font-mono-num text-emerald-600 dark:text-emerald-400 mt-0.5 flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              {vqeResponse.optimal_energy.toFixed(5)}
+            </div>
+          </div>
+          <div className="studio-kpi px-3 py-2">
+            <div className="text-[10px] font-medium text-[var(--text-secondary)] uppercase tracking-wider">
+              变分能量下降 ΔE
+            </div>
+            <div className="text-[15px] font-semibold font-mono-num text-[#0A84FF] mt-0.5">
+              -{Math.max(0, vqeResponse.energy_improvement).toFixed(5)}
+            </div>
+          </div>
+          <div className="studio-kpi px-3 py-2">
+            <div className="text-[10px] font-medium text-[var(--text-secondary)] uppercase tracking-wider">
+              线路评估次数 / 保真度
+            </div>
+            <div className="text-[15px] font-semibold font-mono-num text-[var(--text-primary)] mt-0.5">
+              {vqeResponse.num_evaluations} 次 · F={vqeResponse.optimal_fidelity.toFixed(3)}
+            </div>
+          </div>
+        </div>
+
+        {/* Convergence Curve + Optimal Parameters Table */}
+        <div className="flex-1 min-h-0 p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-3 overflow-hidden">
+          <div className="lg:col-span-7 flex flex-col studio-card overflow-hidden min-h-[250px]">
+            <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+              <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
+                变分能量收敛曲线 ⟨ψ(θₖ)|H|ψ(θₖ)⟩
+              </span>
+              <span className="text-[11px] font-mono-num text-[var(--text-secondary)] truncate max-w-[220px]">
+                H = {vqeResponse.hamiltonian_str}
+              </span>
+            </div>
+            <div className="flex-1 min-h-0 p-2">
+              <PlotlyChart
+                data={[
+                  {
+                    x: evalSteps,
+                    y: vqeResponse.energy_trace,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    name: '当步评估 ⟨H⟩',
+                    line: { width: 1.5, color: 'rgba(10,132,255,0.55)' },
+                    marker: { size: 4.5, color: '#0A84FF' },
+                  },
+                  {
+                    x: evalSteps,
+                    y: vqeResponse.best_so_far_trace,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: '最优包络 min ⟨H⟩',
+                    line: { width: 2.6, color: '#10B981' },
+                  },
+                ]}
+                layout={{
+                  paper_bgcolor: plotBg,
+                  plot_bgcolor: plotBg,
+                  hovermode: 'x unified',
+                  margin: { l: 54, r: 16, t: 16, b: 42 },
+                  xaxis: {
+                    title: { text: '目标函数评估步数 k', font: { size: 11, color: mutedColor } },
+                    gridcolor: gridColor,
+                    tickfont: { color: mutedColor, size: 10.5 },
+                  },
+                  yaxis: {
+                    title: { text: '能量期望值 ⟨H⟩', font: { size: 11, color: mutedColor } },
+                    gridcolor: gridColor,
+                    tickfont: { color: mutedColor, size: 10.5 },
+                  },
+                  legend: { orientation: 'h', y: 1.12, font: { size: 10.5, color: textColor } },
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="lg:col-span-5 flex flex-col studio-card overflow-hidden min-h-[250px]">
+            <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+              <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                最优变分参数 θ* 与基态主导分布
+              </span>
+              {onApplyOptimalParams && (
+                <button
+                  onClick={() => onApplyOptimalParams(vqeResponse.optimal_params, false)}
+                  className="text-[11px] text-[#0A84FF] hover:underline font-medium cursor-pointer"
+                >
+                  仅写回变量表
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-auto p-3 space-y-3">
+              <table className="w-full text-[11.5px] font-mono-num border-collapse">
+                <thead>
+                  <tr className="border-b border-[var(--border-hairline)] text-left text-[var(--text-secondary)]">
+                    <th className="py-1.5 pr-2">符号参数</th>
+                    <th className="py-1.5 pr-2">初始值 θ₀</th>
+                    <th className="py-1.5 pr-2">最优值 θ*</th>
+                    <th className="py-1.5">位移 Δθ</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--border-hairline)]">
+                  {vqeResponse.param_names.map((pname) => {
+                    const v0 = vqeResponse.initial_params[pname] ?? 0;
+                    const v1 = vqeResponse.optimal_params[pname] ?? 0;
+                    const diff = v1 - v0;
+                    return (
+                      <tr key={pname}>
+                        <td className="py-1.5 pr-2 font-semibold text-[#0A84FF]">{pname}</td>
+                        <td className="py-1.5 pr-2 text-[var(--text-secondary)]">{v0.toFixed(4)}</td>
+                        <td className="py-1.5 pr-2 font-semibold text-emerald-600 dark:text-emerald-400">
+                          {v1.toFixed(4)}
+                        </td>
+                        <td className="py-1.5 text-[var(--text-secondary)]">
+                          {diff >= 0 ? '+' : ''}
+                          {diff.toFixed(4)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {vqeResponse.dominant_states.length > 0 && (
+                <div className="pt-2 border-t border-[var(--border-hairline)] space-y-1.5">
+                  <div className="text-[11px] font-semibold text-[var(--text-secondary)]">
+                    最优态 |ψ(θ*)⟩ 主导计算基态分布
+                  </div>
+                  {vqeResponse.dominant_states.slice(0, 6).map((st) => (
+                    <div key={st.bitstring} className="space-y-0.5 font-mono-num text-[11px]">
+                      <div className="flex justify-between">
+                        <span>{formatSweepKet(st.bitstring)}</span>
+                        <span>{(st.probability * 100).toFixed(1)}%</span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.09] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-emerald-500"
+                          style={{ width: `${Math.min(100, st.probability * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!sweepResponse) {
     return (

@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  Download,
+  FileText,
   GitCompareArrows,
   Maximize2,
   Minimize2,
@@ -16,6 +18,7 @@ import {
 import type { ProjectModel, RunHistoryItem, SimulationResponse } from '../types';
 import { PlotlyChart } from './PlotlyChart';
 import { BlochSphere3D } from './BlochSphere3D';
+import { downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface SimulateResultsProps {
   project: ProjectModel;
@@ -109,6 +112,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
 }) => {
   const [tab, setTab] = useState<'evolution' | 'populations' | 'measurement' | 'density' | 'steps'>('evolution');
   const [rhoPart, setRhoPart] = useState<'abs' | 'real' | 'imag'>('abs');
+  const [tomoLeftMode, setTomoLeftMode] = useState<'auto' | 'rho' | 'mi' | 'local'>('auto');
   const [measUnit, setMeasUnit] = useState<'prob' | 'counts'>('prob');
   const [filterSmallBars, setFilterSmallBars] = useState(true);
   const [focusedEvoPanel, setFocusedEvoPanel] = useState<'none' | 'curve' | 'sphere'>('none');
@@ -461,7 +465,10 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               { id: 'evolution', label: '演化' },
               { id: 'populations', label: '布居' },
               { id: 'measurement', label: '测量' },
-              { id: 'density', label: rhoMatrix ? '密度矩阵 ρ' : '局域层析 & 激发' },
+              {
+                id: 'density',
+                label: rhoMatrix ? '密度矩阵 & 互信息' : '纠缠互信息 & 激发',
+              },
               { id: 'steps', label: '指标 & 明细' },
             ] as const
           ).map((t) => (
@@ -493,6 +500,114 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               F = {interpFidelity.toFixed(4)}
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              const baseName = (project.name || 'simulation').replace(/\.[^.]+$/, '');
+              const stepRows = [
+                'step,operation,elapsed_time_ns,fidelity,purity,bloch_x,bloch_y,bloch_z',
+                ...primaryRes.steps.map((s) => {
+                  const bv = s.bloch_vectors[String(observedQubit)] || [0, 0, 0];
+                  return [
+                    s.step_index,
+                    `"${formatOpLabelClean(s.operation_label).replace(/"/g, '""')}"`,
+                    s.elapsed_time_ns,
+                    s.state_fidelity ?? '',
+                    s.purity ?? '',
+                    bv[0],
+                    bv[1],
+                    bv[2],
+                  ].join(',');
+                }),
+                '',
+                'bitstring,probability,counts',
+                ...Object.keys(primaryRes.final_probabilities)
+                  .sort(
+                    (a, b) =>
+                      (primaryRes.final_probabilities[b] ?? 0) -
+                      (primaryRes.final_probabilities[a] ?? 0)
+                  )
+                  .map(
+                    (k) =>
+                      `"=""${k}""",${primaryRes.final_probabilities[k] ?? 0},${
+                        primaryRes.measurement_counts[k] ?? 0
+                      }`
+                  ),
+              ];
+              downloadTextFile(
+                `${baseName}_sim_data.csv`,
+                '\uFEFF' + stepRows.join('\n'),
+                'text/csv;charset=utf-8'
+              );
+            }}
+            title="导出逐步演化轨迹与测量概率分布 (.csv)"
+            className="px-2 py-1 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[11px] font-sans font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+          >
+            <Download className="w-3 h-3" />
+            <span className="hidden sm:inline">CSV</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const baseName = (project.name || 'simulation').replace(/\.[^.]+$/, '');
+              const topProbs = Object.entries(primaryRes.final_probabilities)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 12);
+              const mdLines = [
+                `# Quantum Studio 实验演化报告 — ${project.name}`,
+                '',
+                `- **实验硬件配置**: ${simResponse.hardware_name}`,
+                `- **求解后端**: \`${primaryRes.backend_name}\``,
+                `- **量子比特规模**: ${primaryRes.num_qubits} Qubits`,
+                `- **线路总脉冲时长**: ${primaryRes.total_duration_ns} ns`,
+                `- **采样次数 (Shots)**: ${primaryRes.shots}`,
+                `- **最终态保真度 F**: ${
+                  primaryRes.final_fidelity !== null ? primaryRes.final_fidelity.toFixed(6) : 'N/A'
+                }`,
+                `- **最终纯度 Tr(ρ²)**: ${
+                  primaryRes.final_purity !== null ? primaryRes.final_purity.toFixed(6) : 'N/A'
+                }`,
+                ...(primaryRes.bipartite_entropy != null
+                  ? [`- **半链二分纠缠熵 S(ρ_A)**: ${primaryRes.bipartite_entropy.toFixed(5)} bits`]
+                  : []),
+                '',
+                '## 主导测量结果分布 (Top-12)',
+                '',
+                '| 计算基态 | 精确/理论概率 | 采样计数 |',
+                '| :--- | :---: | :---: |',
+                ...topProbs.map(
+                  ([k, p]) =>
+                    `| \`${formatBasisKet(k)}\` | ${(p * 100).toFixed(3)}% | ${
+                      primaryRes.measurement_counts[k] ?? 0
+                    } |`
+                ),
+                '',
+                '## 逐步量子态演化明细',
+                '',
+                `| Step | 操作指令 | 累计时间 (ns) | 保真度 F | 纯度 Tr(ρ²) | ${obsName} Bloch (X, Y, Z) |`,
+                '| :---: | :--- | :---: | :---: | :---: | :---: |',
+                ...primaryRes.steps.map((s) => {
+                  const bv = s.bloch_vectors[String(observedQubit)] || [0, 0, 0];
+                  return `| ${s.step_index} | \`${formatOpLabelClean(s.operation_label)}\` | ${s.elapsed_time_ns.toFixed(
+                    1
+                  )} | ${s.state_fidelity !== null ? s.state_fidelity.toFixed(5) : '—'} | ${
+                    s.purity !== null ? s.purity.toFixed(5) : '—'
+                  } | (${bv[0].toFixed(3)}, ${bv[1].toFixed(3)}, ${bv[2].toFixed(3)}) |`;
+                }),
+                '',
+              ];
+              downloadTextFile(
+                `${baseName}_report.md`,
+                mdLines.join('\n'),
+                'text/markdown;charset=utf-8'
+              );
+            }}
+            title="导出结构化实验演化报告 (.md)"
+            className="px-2 py-1 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[11px] font-sans font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+          >
+            <FileText className="w-3 h-3" />
+            <span className="hidden md:inline">报告</span>
+          </button>
           {onToggleCircuitCollapsed && (
             <button
               onClick={onToggleCircuitCollapsed}
@@ -1148,141 +1263,250 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
         )}
 
         {/* =============================================================== */}
-        {/* TAB 4: DENSITY MATRIX RHO & PER-QUBIT TOMOGRAPHY                 */}
+        {/* TAB 4: DENSITY MATRIX, MUTUAL INFORMATION & PER-QUBIT TOMOGRAPHY */}
         {/* =============================================================== */}
         {tab === 'density' && (
           <div className="h-full grid grid-cols-12 gap-3 min-h-[320px]">
-            <div className="col-span-7 flex flex-col studio-card overflow-hidden">
-              <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
-                <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
-                  {rhoMatrix
-                    ? `Step ${activeSnap.step_index} 密度矩阵 ρ`
-                    : `Step ${activeSnap.step_index} 全寄存器单比特激发概率 P(|1⟩) 与局域纯度 |r|`}
-                </span>
-                {rhoMatrix ? (
-                  <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex">
-                    {(
-                      [
-                        ['abs', '|ρ| 模'],
-                        ['real', 'Re(ρ)'],
-                        ['imag', 'Im(ρ)'],
-                      ] as const
-                    ).map(([k, lbl]) => (
-                      <button
-                        key={k}
-                        onClick={() => setRhoPart(k)}
-                        className={`px-2 py-0.5 rounded-md text-[11px] cursor-pointer ${
-                          rhoPart === k
-                            ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[var(--text-primary)]'
-                            : 'text-[var(--text-secondary)]'
-                        }`}
-                      >
-                        {lbl}
-                      </button>
-                    ))}
+            {(() => {
+              const miMat = primaryRes.mutual_information ?? null;
+              const hasMi = Array.isArray(miMat) && miMat.length >= 2;
+              const activeLeftMode: 'rho' | 'mi' | 'local' =
+                tomoLeftMode === 'auto'
+                  ? rhoMatrix
+                    ? 'rho'
+                    : hasMi
+                    ? 'mi'
+                    : 'local'
+                  : tomoLeftMode === 'rho' && !rhoMatrix
+                  ? hasMi
+                    ? 'mi'
+                    : 'local'
+                  : tomoLeftMode === 'mi' && !hasMi
+                  ? rhoMatrix
+                    ? 'rho'
+                    : 'local'
+                  : tomoLeftMode;
+
+              const qLabels = project.qubits.map((q) => q.name);
+
+              return (
+                <div className="col-span-7 flex flex-col studio-card overflow-hidden">
+                  <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
+                        {activeLeftMode === 'rho'
+                          ? `Step ${activeSnap.step_index} 密度矩阵 ρ`
+                          : activeLeftMode === 'mi'
+                          ? '两比特量子互信息矩阵 I(qᵢ : qⱼ)'
+                          : `Step ${activeSnap.step_index} 激发概率 P(|1⟩) 与纯度 |r|`}
+                      </span>
+                      {primaryRes.bipartite_entropy != null && (
+                        <span
+                          title="半链冯·诺依曼二分纠缠熵 S(ρ_A) = -Tr(ρ_A log2 ρ_A)"
+                          className="hidden xl:inline-flex px-1.5 py-0.25 rounded bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 font-mono-num text-[10.5px] font-semibold whitespace-nowrap"
+                        >
+                          S_A = {primaryRes.bipartite_entropy.toFixed(3)} bits
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {activeLeftMode === 'rho' && rhoMatrix && (
+                        <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex">
+                          {(
+                            [
+                              ['abs', '|ρ|'],
+                              ['real', 'Re'],
+                              ['imag', 'Im'],
+                            ] as const
+                          ).map(([k, lbl]) => (
+                            <button
+                              key={k}
+                              onClick={() => setRhoPart(k)}
+                              className={`px-1.5 py-0.5 rounded-md text-[10.5px] cursor-pointer ${
+                                rhoPart === k
+                                  ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[var(--text-primary)]'
+                                  : 'text-[var(--text-secondary)]'
+                              }`}
+                            >
+                              {lbl}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex">
+                        {rhoMatrix && (
+                          <button
+                            onClick={() => setTomoLeftMode('rho')}
+                            className={`px-2 py-0.5 rounded-md text-[10.5px] cursor-pointer ${
+                              activeLeftMode === 'rho'
+                                ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[#0A84FF]'
+                                : 'text-[var(--text-secondary)]'
+                            }`}
+                          >
+                            ρ 矩阵
+                          </button>
+                        )}
+                        {hasMi && (
+                          <button
+                            onClick={() => setTomoLeftMode('mi')}
+                            className={`px-2 py-0.5 rounded-md text-[10.5px] cursor-pointer ${
+                              activeLeftMode === 'mi'
+                                ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-emerald-600 dark:text-emerald-400'
+                                : 'text-[var(--text-secondary)]'
+                            }`}
+                          >
+                            互信息 I(i:j)
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setTomoLeftMode('local')}
+                          className={`px-2 py-0.5 rounded-md text-[10.5px] cursor-pointer ${
+                            activeLeftMode === 'local'
+                              ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[#0A84FF]'
+                              : 'text-[var(--text-secondary)]'
+                          }`}
+                        >
+                          激发 & |r|
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                ) : (
-                  <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
-                    {project.qubits.length} Qubits
-                  </span>
-                )}
-              </div>
-              {rhoMatrix ? (
-                <div className="flex-1 min-h-0 p-2">
-                  <PlotlyChart
-                    data={[
-                      {
-                        type: 'heatmap',
-                        z: rhoMatrix,
-                        x: allBasis.map((b) => formatBasisKet(b)),
-                        y: allBasis.map((b) => formatBasisKet(b)),
-                        colorscale:
-                          rhoPart === 'abs'
-                            ? [
-                                [0, darkMode ? '#1F2430' : '#F4F7FB'],
-                                [0.35, '#93C5FD'],
-                                [0.7, '#2563EB'],
-                                [1, '#1E3A8A'],
-                              ]
-                            : 'RdBu',
-                        zmin: rhoPart === 'abs' ? 0 : -rhoMaxAbs,
-                        zmax: rhoMaxAbs,
-                        colorbar: {
-                          thickness: 11,
-                          len: 0.88,
-                          tickfont: { size: 10, color: mutedColor },
-                        },
-                        hovertemplate: '⟨%{y}|ρ|%{x}⟩ = %{z:.4f}<extra></extra>',
-                      },
-                    ]}
-                    layout={{
-                      paper_bgcolor: plotBg,
-                      plot_bgcolor: plotBg,
-                      margin: { l: 54, r: 12, t: 10, b: 48 },
-                      yaxis: {
-                        autorange: 'reversed',
-                        scaleanchor: 'x',
-                        scaleratio: 1,
-                        tickfont: { size: 10, color: mutedColor },
-                      },
-                      xaxis: { tickfont: { size: 10, color: mutedColor } },
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="flex-1 min-h-0 p-2">
-                  {(() => {
-                    const qIndices = project.qubits.map((_, idx) => idx);
-                    const qLabels = project.qubits.map((q) => q.name);
-                    const p1Vals = qIndices.map((idx) => {
-                      const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
-                      return Math.max(0, Math.min(1, 0.5 * (1 - bv[2])));
-                    });
-                    const rVals = qIndices.map((idx) => {
-                      const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
-                      return Math.min(1, Math.hypot(bv[0], bv[1], bv[2]));
-                    });
-                    return (
+
+                  {activeLeftMode === 'rho' && rhoMatrix ? (
+                    <div className="flex-1 min-h-0 p-2">
                       <PlotlyChart
                         data={[
                           {
-                            type: 'bar',
-                            name: '激发率 P(|1⟩)',
-                            x: qLabels,
-                            y: p1Vals,
-                            marker: { color: '#0A84FF', opacity: 0.88 },
-                            hovertemplate: '%{x}: P(|1⟩) = %{y:.3f}<extra></extra>',
-                          },
-                          {
-                            type: 'scatter',
-                            mode: project.qubits.length <= 64 ? 'lines+markers' : 'lines',
-                            name: 'Bloch 模长 |r| (纯度指标)',
-                            x: qLabels,
-                            y: rVals,
-                            line: { color: '#10B981', width: 2 },
-                            marker: { size: 5 },
-                            hovertemplate: '%{x}: |r| = %{y:.3f}<extra></extra>',
+                            type: 'heatmap',
+                            z: rhoMatrix,
+                            x: allBasis.map((b) => formatBasisKet(b)),
+                            y: allBasis.map((b) => formatBasisKet(b)),
+                            colorscale:
+                              rhoPart === 'abs'
+                                ? [
+                                    [0, darkMode ? '#1F2430' : '#F4F7FB'],
+                                    [0.35, '#93C5FD'],
+                                    [0.7, '#2563EB'],
+                                    [1, '#1E3A8A'],
+                                  ]
+                                : 'RdBu',
+                            zmin: rhoPart === 'abs' ? 0 : -rhoMaxAbs,
+                            zmax: rhoMaxAbs,
+                            colorbar: {
+                              thickness: 11,
+                              len: 0.88,
+                              tickfont: { size: 10, color: mutedColor },
+                            },
+                            hovertemplate: '⟨%{y}|ρ|%{x}⟩ = %{z:.4f}<extra></extra>',
                           },
                         ]}
                         layout={{
                           paper_bgcolor: plotBg,
                           plot_bgcolor: plotBg,
-                          hovermode: 'x unified',
-                          margin: { l: 46, r: 16, t: 22, b: 40 },
-                          xaxis: { tickfont: { size: 10, color: mutedColor } },
+                          margin: { l: 54, r: 12, t: 10, b: 48 },
                           yaxis: {
-                            range: [-0.02, 1.08],
-                            gridcolor: gridColor,
+                            autorange: 'reversed',
+                            scaleanchor: 'x',
+                            scaleratio: 1,
                             tickfont: { size: 10, color: mutedColor },
                           },
-                          legend: { orientation: 'h', y: 1.12, font: { size: 10.5, color: textColor } },
+                          xaxis: { tickfont: { size: 10, color: mutedColor } },
                         }}
                       />
-                    );
-                  })()}
+                    </div>
+                  ) : activeLeftMode === 'mi' && hasMi && miMat ? (
+                    <div className="flex-1 min-h-0 p-2">
+                      <PlotlyChart
+                        data={[
+                          {
+                            type: 'heatmap',
+                            z: miMat,
+                            x: qLabels.slice(0, miMat.length),
+                            y: qLabels.slice(0, miMat.length),
+                            colorscale: 'Viridis',
+                            zmin: 0,
+                            zmax: 2,
+                            colorbar: {
+                              title: { text: 'bits', font: { size: 10, color: mutedColor } },
+                              thickness: 11,
+                              len: 0.88,
+                              tickfont: { size: 10, color: mutedColor },
+                            },
+                            hovertemplate:
+                              '%{y} ↔ %{x}: %{z:.4f} bits<br>(对角线为单比特熵 S(ρᵢ)，非对角 >1 bit 表征量子纠缠)<extra></extra>',
+                          },
+                        ]}
+                        layout={{
+                          paper_bgcolor: plotBg,
+                          plot_bgcolor: plotBg,
+                          margin: { l: 52, r: 12, t: 10, b: 46 },
+                          yaxis: {
+                            autorange: 'reversed',
+                            scaleanchor: 'x',
+                            scaleratio: 1,
+                            tickfont: { size: 10, color: mutedColor },
+                          },
+                          xaxis: { tickfont: { size: 10, color: mutedColor } },
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex-1 min-h-0 p-2">
+                      {(() => {
+                        const qIndices = project.qubits.map((_, idx) => idx);
+                        const p1Vals = qIndices.map((idx) => {
+                          const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
+                          return Math.max(0, Math.min(1, 0.5 * (1 - bv[2])));
+                        });
+                        const rVals = qIndices.map((idx) => {
+                          const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
+                          return Math.min(1, Math.hypot(bv[0], bv[1], bv[2]));
+                        });
+                        return (
+                          <PlotlyChart
+                            data={[
+                              {
+                                type: 'bar',
+                                name: '激发率 P(|1⟩)',
+                                x: qLabels,
+                                y: p1Vals,
+                                marker: { color: '#0A84FF', opacity: 0.88 },
+                                hovertemplate: '%{x}: P(|1⟩) = %{y:.3f}<extra></extra>',
+                              },
+                              {
+                                type: 'scatter',
+                                mode: project.qubits.length <= 64 ? 'lines+markers' : 'lines',
+                                name: 'Bloch 模长 |r| (纯度指标)',
+                                x: qLabels,
+                                y: rVals,
+                                line: { color: '#10B981', width: 2 },
+                                marker: { size: 5 },
+                                hovertemplate: '%{x}: |r| = %{y:.3f}<extra></extra>',
+                              },
+                            ]}
+                            layout={{
+                              paper_bgcolor: plotBg,
+                              plot_bgcolor: plotBg,
+                              hovermode: 'x unified',
+                              margin: { l: 46, r: 16, t: 22, b: 40 },
+                              xaxis: { tickfont: { size: 10, color: mutedColor } },
+                              yaxis: {
+                                range: [-0.02, 1.08],
+                                gridcolor: gridColor,
+                                tickfont: { size: 10, color: mutedColor },
+                              },
+                              legend: { orientation: 'h', y: 1.12, font: { size: 10.5, color: textColor } },
+                            }}
+                          />
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })()}
 
             <div className="col-span-5 flex flex-col studio-card overflow-hidden">
               <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">

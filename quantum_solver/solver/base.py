@@ -190,6 +190,128 @@ def evaluate_pauli_sum_density_matrix(
     return float(total)
 
 
+def von_neumann_entropy_hermitian(rho_sub: np.ndarray) -> float:
+    """Compute von Neumann entropy S(rho) = -Tr(rho log2 rho) in bits for a small Hermitian matrix."""
+    vals = np.linalg.eigvalsh(rho_sub)
+    vals = np.maximum(0.0, np.real(vals))
+    s = float(np.sum(vals))
+    if s > 0.0:
+        vals = vals / s
+    nz = vals[vals > 1e-15]
+    if nz.size == 0:
+        return 0.0
+    return float(-np.sum(nz * np.log2(nz)))
+
+
+def compute_entanglement_from_statevector(
+    psi: np.ndarray,
+    num_qubits: int,
+) -> Tuple[List[List[float]], float]:
+    """
+    Compute:
+      1. N x N quantum correlation matrix (diagonal = S(rho_i) in [0,1], off-diagonal = I(q_i : q_j) in [0,2] bits)
+      2. Half-chain bipartite von Neumann entanglement entropy S(rho_{0..N//2-1}) in bits
+    in O(N^2 * 2^N) time via reshape & 4 x 2^(N-2) Gram products (fast up to 16Q).
+    """
+    n = num_qubits
+    if n < 2:
+        return [[0.0]], 0.0
+    psi_nd = psi.reshape([2] * n)
+    s1: List[float] = []
+    for q in range(n):
+        rest = [ax for ax in range(n) if ax != q]
+        m1 = np.transpose(psi_nd, [q] + rest).reshape((2, 1 << (n - 1)))
+        rho_1q = m1 @ m1.conj().T
+        s1.append(von_neumann_entropy_hermitian(rho_1q))
+
+    mi_mat = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        mi_mat[i][i] = round(s1[i], 5)
+        for j in range(i + 1, n):
+            rest = [ax for ax in range(n) if ax != i and ax != j]
+            m2 = np.transpose(psi_nd, [i, j] + rest).reshape((4, 1 << (n - 2)))
+            rho_2q = m2 @ m2.conj().T
+            s2 = von_neumann_entropy_hermitian(rho_2q)
+            mi = max(0.0, s1[i] + s1[j] - s2)
+            val = round(mi, 5)
+            mi_mat[i][j] = val
+            mi_mat[j][i] = val
+
+    k_a = max(1, n // 2)
+    svals = np.linalg.svd(psi.reshape((1 << k_a, 1 << (n - k_a))), compute_uv=False)
+    probs_schmidt = np.maximum(0.0, np.real(svals) ** 2)
+    tot = float(np.sum(probs_schmidt))
+    if tot > 0.0:
+        probs_schmidt /= tot
+    nz = probs_schmidt[probs_schmidt > 1e-15]
+    bip_s = float(-np.sum(nz * np.log2(nz))) if nz.size > 0 else 0.0
+    return mi_mat, round(bip_s, 5)
+
+
+def compute_entanglement_from_density_matrix(
+    rho: np.ndarray,
+    num_qubits: int,
+) -> Tuple[List[List[float]], float]:
+    """
+    Compute N x N quantum mutual information matrix I(q_i : q_j) and half-chain entropy S(rho_A)
+    from a full density matrix `rho` (2 <= N <= 11).
+    """
+    n = num_qubits
+    if n < 2:
+        return [[round(von_neumann_entropy_hermitian(rho), 5)]], 0.0
+    rho_nd = rho.reshape([2] * (2 * n))
+    s1: List[float] = []
+    for q in range(n):
+        d_l = 1 << q
+        d_r = 1 << (n - 1 - q)
+        r6 = rho.reshape((d_l, 2, d_r, d_l, 2, d_r))
+        rho_1q = np.einsum("aibajb->ij", r6)
+        s1.append(von_neumann_entropy_hermitian(rho_1q))
+
+    mi_mat = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        mi_mat[i][i] = round(s1[i], 5)
+        for j in range(i + 1, n):
+            rest = [ax for ax in range(n) if ax != i and ax != j]
+            perm = [i, j] + rest + [n + i, n + j] + [n + ax for ax in rest]
+            view = np.transpose(rho_nd, perm).reshape((4, 1 << (n - 2), 4, 1 << (n - 2)))
+            rho_2q = np.einsum("aibi->ab", view)
+            s2 = von_neumann_entropy_hermitian(rho_2q)
+            val = round(max(0.0, s1[i] + s1[j] - s2), 5)
+            mi_mat[i][j] = val
+            mi_mat[j][i] = val
+
+    k_a = max(1, min(5, n // 2))
+    a_axes = list(range(k_a))
+    b_axes = list(range(k_a, n))
+    perm_bip = a_axes + b_axes + [n + ax for ax in a_axes] + [n + ax for ax in b_axes]
+    view_bip = np.transpose(rho_nd, perm_bip).reshape((1 << k_a, 1 << (n - k_a), 1 << k_a, 1 << (n - k_a)))
+    rho_a = np.einsum("aibi->ab", view_bip)
+    bip_s = von_neumann_entropy_hermitian(rho_a)
+    return mi_mat, round(bip_s, 5)
+
+
+def gf2_rank(mat: np.ndarray) -> int:
+    """Compute rank over GF(2) of a 2D uint8/bool binary matrix via Gaussian elimination."""
+    a = (np.asarray(mat, dtype=np.uint8) & 1).copy()
+    rows, cols = a.shape
+    rank = 0
+    for c in range(cols):
+        if rank >= rows:
+            break
+        piv_rel = np.nonzero(a[rank:, c])[0]
+        if piv_rel.size == 0:
+            continue
+        piv = rank + int(piv_rel[0])
+        if piv != rank:
+            a[[rank, piv]] = a[[piv, rank]]
+        below = np.nonzero(a[rank + 1 :, c])[0] + (rank + 1)
+        if below.size > 0:
+            a[below] ^= a[rank]
+        rank += 1
+    return rank
+
+
 def probabilities_array_to_dict(
     probs: np.ndarray,
     num_qubits: int,

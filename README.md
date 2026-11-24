@@ -1,4 +1,4 @@
-# Quantum Studio v2.1 — 多尺度量子线路演化求解、变分能量景观与硬件感知最优综合工作台
+# Quantum Studio v2.2 — 全尺度量子演化求解、闭环 VQE 寻优、多体纠缠诊断与跨硬件综合工作台
 
 <p align="center">
   <img src="assets/quantum_studio.png" width="96" alt="Quantum Studio Icon" />
@@ -33,8 +33,8 @@
 ## 安装与快速启动
 
 ### 方式一：使用免配置 `.exe` 安装包（推荐）
-直接从 [GitHub Releases](../../releases) 下载 **`QuantumStudio_v2.1.0_Setup.exe`**（已完整内嵌 Python 3.13、QuTiP、SciPy、Stim 及前端构建产物，无需本机安装 Python 或 Node.js）：
-- 双击 `QuantumStudio_v2.1.0_Setup.exe`，选择安装目录即可自动释放并创建桌面/开始菜单快捷方式及标准 `Uninstall.exe` 卸载程序（支持 Windows「设置 → 已安装的应用」一键卸载）。
+直接从 [GitHub Releases](../../releases) 下载 **`QuantumStudio_v2.2.0_Setup.exe`**（已完整内嵌 Python 3.13、QuTiP、SciPy、Stim 及前端构建产物，无需本机安装 Python 或 Node.js）：
+- 双击 `QuantumStudio_v2.2.0_Setup.exe`，选择安装目录即可自动释放并创建桌面/开始菜单快捷方式及标准 `Uninstall.exe` 卸载程序（支持 Windows「设置 → 已安装的应用」一键卸载）。
 
 ### 方式二：项目目录直接运行（已内嵌 `python_env/`）
 ```powershell

@@ -23,6 +23,7 @@ from .custom_gates import (
     validate_unitary_matrix,
 )
 from .models import (
+    BenchmarkHardwareRequest,
     DslSyncRequest,
     NlCircuitRequest,
     OptimizeRequest,
@@ -31,15 +32,18 @@ from .models import (
     SweepRequest,
     SynthesizeUnitaryRequest,
     ValidateCustomGateRequest,
+    VariationalOptimizeRequest,
 )
 from .nl_circuit import generate_circuit_from_nl
 from .project_engine import (
     build_preset_projects,
     dsl_to_project_ops,
+    execute_cross_hardware_benchmark,
     execute_project_optimization,
     execute_project_simulation,
     execute_project_sweep,
     execute_unitary_synthesis,
+    execute_variational_optimization,
     openqasm_to_project_ops,
     project_to_dsl,
     project_to_openqasm3,
@@ -50,7 +54,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.1.0")
+    app = FastAPI(title="Quantum Studio API", version="2.2.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -62,7 +66,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.1.0"}
+        return {"status": "ok", "version": "2.2.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:
@@ -149,10 +153,24 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/optimize/benchmark")
+    def api_optimize_benchmark(req: BenchmarkHardwareRequest) -> Dict[str, Any]:
+        try:
+            return execute_cross_hardware_benchmark(req)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/sweep")
     def api_sweep(req: SweepRequest) -> Dict[str, Any]:
         try:
             return execute_project_sweep(req)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/vqe-optimize")
+    def api_vqe_optimize(req: VariationalOptimizeRequest) -> Dict[str, Any]:
+        try:
+            return execute_variational_optimization(req)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

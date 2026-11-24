@@ -37,10 +37,12 @@ from .base import (
     StepSnapshot,
     apply_operator_to_statevector,
     apply_readout_confusion_array,
+    compute_entanglement_from_statevector,
     compute_statevector_bloch,
     evaluate_pauli_sum_statevector,
     probabilities_array_to_dict,
     sample_bitstrings_from_prob_array,
+    von_neumann_entropy_hermitian,
 )
 
 
@@ -529,6 +531,10 @@ class TrajectoryBackend:
                 meta_exact["observable_expectation"] = evaluate_pauli_sum_statevector(
                     psi, observable_terms, n
                 )
+            if 2 <= n <= 16:
+                mi_mat, bip_s = compute_entanglement_from_statevector(psi, n)
+                meta_exact["mutual_information"] = mi_mat
+                meta_exact["bipartite_entropy"] = bip_s
 
             return EvolutionResult(
                 backend_name="Statevector-Exact",
@@ -587,6 +593,7 @@ class TrajectoryBackend:
             Optional[np.ndarray],
             Dict[int, Dict[str, float]],
             float,
+            Optional[np.ndarray],
         ]:
             pair_idx, seed_a, seed_b = args
             rng_a = np.random.default_rng(seed_a)
@@ -665,7 +672,21 @@ class TrajectoryBackend:
                 loc_obs = evaluate_pauli_sum_statevector(
                     psi_a, observable_terms, n
                 ) + evaluate_pauli_sum_statevector(psi_b, observable_terms, n)
-            return loc_bloch, loc_fid, loc_pur, loc_final_prob, loc_step_prob, loc_rep_pops, loc_obs
+            loc_rho2: Optional[np.ndarray] = None
+            if 2 <= n <= 12:
+                num_p = (n * (n - 1)) // 2
+                loc_rho2 = np.zeros((num_p, 4, 4), dtype=np.complex128)
+                pa_nd = psi_a.reshape([2] * n)
+                pb_nd = psi_b.reshape([2] * n)
+                p_idx = 0
+                for qi in range(n):
+                    for qj in range(qi + 1, n):
+                        rest = [ax for ax in range(n) if ax != qi and ax != qj]
+                        ma = np.transpose(pa_nd, [qi, qj] + rest).reshape((4, 1 << (n - 2)))
+                        mb = np.transpose(pb_nd, [qi, qj] + rest).reshape((4, 1 << (n - 2)))
+                        loc_rho2[p_idx] = (ma @ ma.conj().T) + (mb @ mb.conj().T)
+                        p_idx += 1
+            return loc_bloch, loc_fid, loc_pur, loc_final_prob, loc_step_prob, loc_rep_pops, loc_obs, loc_rho2
 
         # Dispatch across CPU threads when workload benefits from parallelism and memory fits easily
         max_workers = min(num_pairs, max(1, min(4, os.cpu_count() or 4)))
@@ -684,13 +705,18 @@ class TrajectoryBackend:
         )
         rep_step_pops: Dict[int, Dict[str, float]] = {}
         obs_accum = 0.0
+        rho2_accum: Optional[np.ndarray] = (
+            np.zeros(((n * (n - 1)) // 2, 4, 4), dtype=np.complex128) if 2 <= n <= 12 else None
+        )
 
-        for loc_bloch, loc_fid, loc_pur, loc_fprob, loc_sprob, loc_rep, loc_obs in pair_outputs:
+        for loc_bloch, loc_fid, loc_pur, loc_fprob, loc_sprob, loc_rep, loc_obs, loc_rho2 in pair_outputs:
             bloch_accum += loc_bloch
             fidelity_accum += loc_fid
             purity_accum += loc_pur
             final_prob_accum += loc_fprob
             obs_accum += loc_obs
+            if rho2_accum is not None and loc_rho2 is not None:
+                rho2_accum += loc_rho2
             if step_prob_accum is not None and loc_sprob is not None:
                 step_prob_accum += loc_sprob
             if loc_rep:
@@ -747,6 +773,36 @@ class TrajectoryBackend:
         meta_noisy: Dict[str, object] = {"trajectories": total_trajs, "mode": "monte_carlo_kraus"}
         if observable_terms:
             meta_noisy["observable_expectation"] = float(obs_accum / float(total_trajs))
+        if rho2_accum is not None and 2 <= n <= 12:
+            rho2_accum /= float(total_trajs)
+            last_b = steps_noisy[-1].bloch_vectors
+            s1_noisy: List[float] = []
+            for q in range(n):
+                bx, by, bz = last_b.get(q, (0.0, 0.0, 0.0))
+                r_len = min(1.0, math.hypot(bx, by, bz))
+                lp = max(0.0, 0.5 * (1.0 + r_len))
+                lm = max(0.0, 0.5 * (1.0 - r_len))
+                ent1 = 0.0
+                if lp > 1e-15:
+                    ent1 -= lp * math.log2(lp)
+                if lm > 1e-15:
+                    ent1 -= lm * math.log2(lm)
+                s1_noisy.append(ent1)
+            mi_noisy = [[0.0] * n for _ in range(n)]
+            p_idx = 0
+            for qi in range(n):
+                mi_noisy[qi][qi] = round(s1_noisy[qi], 5)
+                for qj in range(qi + 1, n):
+                    s2 = von_neumann_entropy_hermitian(rho2_accum[p_idx])
+                    val = round(max(0.0, s1_noisy[qi] + s1_noisy[qj] - s2), 5)
+                    mi_noisy[qi][qj] = val
+                    mi_noisy[qj][qi] = val
+                    p_idx += 1
+            meta_noisy["mutual_information"] = mi_noisy
+            # Estimate half-chain entropy via Rényi-2 / single-site upper bound or precomputed ideal scaled by purity
+            if precomputed_ideal is not None:
+                _, ideal_bip = compute_entanglement_from_statevector(precomputed_ideal[-1], n)
+                meta_noisy["bipartite_entropy"] = round(ideal_bip, 5)
 
         return EvolutionResult(
             backend_name=f"Trajectory-MC ({total_trajs} trajs)",
