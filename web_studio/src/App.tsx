@@ -22,11 +22,16 @@ import {
   runUnitarySynthesis,
   syncDslToProject,
   syncProjectToDsl,
+  syncQasmToProject,
 } from './api';
 import { TopToolbar } from './components/TopToolbar';
 import { LeftNavigator } from './components/LeftNavigator';
 import { CircuitCanvas } from './components/CircuitCanvas';
-import { RightInspector, type SweepConfigState } from './components/RightInspector';
+import {
+  RightInspector,
+  buildPresetHamiltonian,
+  type SweepConfigState,
+} from './components/RightInspector';
 import { BottomDock } from './components/BottomDock';
 import { SimulateResults } from './components/SimulateResults';
 import { OptimizeWorkspace, type DirectSynthPayload } from './components/OptimizeWorkspace';
@@ -58,6 +63,7 @@ export default function App() {
   const [dslText, setDslText] = useState('');
   const [qasmText, setQasmText] = useState('');
   const [dslError, setDslError] = useState<string | null>(null);
+  const [qasmError, setQasmError] = useState<string | null>(null);
   const [logs, setLogs] = useState<{ time: string; level: 'info' | 'warn' | 'error'; text: string }[]>([]);
 
   // Execution state & results
@@ -97,9 +103,10 @@ export default function App() {
     y_points: 10,
     target_bitstring: '0000',
     observed_qubit: 1,
+    hamiltonian_str: '',
     backend: 'kraus',
   });
-  const sweepAbortRef = useRef<AbortController | null>(null);
+  const taskAbortRef = useRef<AbortController | null>(null);
 
   // Custom Gate & Natural Language Modal state
   const [gateModalOpen, setGateModalOpen] = useState(false);
@@ -151,15 +158,30 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [project]);
 
+  // Unified Stop / Abort handler for Simulate, Optimize, Synthesis, and Sweep
+  const handleStopTask = useCallback(() => {
+    if (taskAbortRef.current) {
+      taskAbortRef.current.abort();
+      taskAbortRef.current = null;
+      setIsBusy(false);
+      setStatusMsg('已中止当前计算任务');
+      addLog('已手动中止当前计算任务', 'warn');
+    }
+  }, [addLog]);
+
   // Run Simulation action
   const handleRunSimulation = useCallback(
     async (projOverride?: ProjectModel, switchToSim = false) => {
       const target = projOverride || project;
       if (!target) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
       setIsBusy(true);
       setStatusMsg(`正在使用 ${target.sim_settings.backend.toUpperCase()} 求解 ${target.qubits.length} 比特演化...`);
       try {
-        const res = await runSimulation(target);
+        const res = await runSimulation(target, controller.signal);
         setSimResponse(res);
         setSimDirty(false);
         const pRes = res.results[res.primary_backend];
@@ -186,11 +208,15 @@ export default function App() {
         addLog(msg, 'info');
         if (switchToSim) setMode('simulate');
       } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
         const errTxt = err instanceof Error ? err.message : String(err);
         setStatusMsg(`求解失败: ${errTxt}`);
         addLog(`求解失败: ${errTxt}`, 'error');
       } finally {
-        setIsBusy(false);
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
       }
     },
     [project, addLog]
@@ -201,20 +227,33 @@ export default function App() {
     async (projOverride?: ProjectModel) => {
       const target = projOverride || project;
       if (!target) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
       setIsBusy(true);
       setStatusMsg('正在执行硬件感知最优量子门综合 (Euler + KAK Cartan)...');
       try {
-        const res = await runOptimization(target, evalNoisyOpt, preferredNative2Q || null);
+        const res = await runOptimization(
+          target,
+          evalNoisyOpt,
+          preferredNative2Q || null,
+          controller.signal
+        );
         setOptResponse(res);
         const msg = `最优综合完成 · ${res.gate_set_name} · 2Q门: ${res.optimized_metrics.num_2q_gates} · 酉保真度 F = ${res.unitary_fidelity.toFixed(6)}`;
         setStatusMsg(msg);
         addLog(msg, 'info');
       } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
         const errTxt = err instanceof Error ? err.message : String(err);
         setStatusMsg(`优化失败: ${errTxt}`);
         addLog(`优化失败: ${errTxt}`, 'error');
       } finally {
-        setIsBusy(false);
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
       }
     },
     [project, evalNoisyOpt, preferredNative2Q, addLog]
@@ -224,52 +263,55 @@ export default function App() {
   const handleRunUnitarySynthesis = useCallback(
     async (payload: DirectSynthPayload) => {
       if (!project) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
       setIsBusy(true);
       setStatusMsg('正在根据当前硬件原生门基综合目标酉矩阵 / 哈密顿量...');
       try {
-        const res = await runUnitarySynthesis({
-          project,
-          mode: payload.mode,
-          num_qubits: payload.num_qubits,
-          matrix_exprs: payload.matrix_exprs,
-          hamiltonian_str: payload.hamiltonian_str,
-          hamiltonian_scale: payload.hamiltonian_scale,
-          evaluate_noisy_fidelity: evalNoisyOpt,
-          preferred_native_2q: preferredNative2Q || null,
-        });
+        const res = await runUnitarySynthesis(
+          {
+            project,
+            mode: payload.mode,
+            num_qubits: payload.num_qubits,
+            matrix_exprs: payload.matrix_exprs,
+            hamiltonian_str: payload.hamiltonian_str,
+            hamiltonian_scale: payload.hamiltonian_scale,
+            evaluate_noisy_fidelity: evalNoisyOpt,
+            preferred_native_2q: preferredNative2Q || null,
+          },
+          controller.signal
+        );
         setOptResponse(res);
         const msg = `目标酉矩阵综合完成 · ${res.gate_set_name} · 2Q门: ${res.optimized_metrics.num_2q_gates} · F = ${res.unitary_fidelity.toFixed(6)}`;
         setStatusMsg(msg);
         addLog(msg, 'info');
       } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
         const errTxt = err instanceof Error ? err.message : String(err);
         setStatusMsg(`酉矩阵综合失败: ${errTxt}`);
         addLog(`酉矩阵综合失败: ${errTxt}`, 'error');
       } finally {
-        setIsBusy(false);
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
       }
     },
     [project, evalNoisyOpt, preferredNative2Q, addLog]
   );
 
   // Run Parameter Sweep action (with AbortController cancelation support)
-  const handleCancelSweep = useCallback(() => {
-    if (sweepAbortRef.current) {
-      sweepAbortRef.current.abort();
-      sweepAbortRef.current = null;
-      setIsBusy(false);
-      setStatusMsg('已中止参数扫描任务');
-      addLog('已手动中止参数扫描任务', 'warn');
-    }
-  }, [addLog]);
+  const handleCancelSweep = handleStopTask;
 
   const handleRunSweep = useCallback(
     async (projOverride?: ProjectModel) => {
       const target = projOverride || project;
       if (!target) return;
-      if (sweepAbortRef.current) sweepAbortRef.current.abort();
+      if (taskAbortRef.current) taskAbortRef.current.abort();
       const controller = new AbortController();
-      sweepAbortRef.current = controller;
+      taskAbortRef.current = controller;
 
       setIsBusy(true);
       setStatusMsg(`正在并发执行 ${sweepConfig.mode.toUpperCase()} 参数扫描 (${sweepConfig.param_x})...`);
@@ -288,6 +330,7 @@ export default function App() {
             y_points: sweepConfig.y_points,
             target_bitstring: sweepConfig.target_bitstring,
             observed_qubit: sweepConfig.observed_qubit,
+            hamiltonian_str: sweepConfig.hamiltonian_str.trim() || undefined,
             backend: sweepConfig.backend,
           },
           controller.signal
@@ -302,8 +345,10 @@ export default function App() {
         setStatusMsg(`参数扫描失败: ${errTxt}`);
         addLog(`参数扫描失败: ${errTxt}`, 'error');
       } finally {
-        if (sweepAbortRef.current === controller) sweepAbortRef.current = null;
-        setIsBusy(false);
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
       }
     },
     [project, sweepConfig, addLog]
@@ -382,6 +427,7 @@ export default function App() {
             setDslText(res.dsl);
             setQasmText(res.openqasm3);
             setDslError(null);
+            setQasmError(null);
           }
         })
         .catch(() => {});
@@ -858,21 +904,55 @@ export default function App() {
     setGateModalOpen(true);
   };
 
-  // ---- Handlers for DSL Sync ----
-  const handleApplyDsl = async (dsl: string) => {
-    if (!project) return;
-    try {
-      const synced = await syncDslToProject(dsl, project);
-      setDslError(null);
-      mutateProject((p) => ({
+  // ---- Handlers for DSL & OpenQASM Sync ----
+  const applySyncedCircuit = (
+    synced: {
+      qubits: QubitSpec[];
+      operations: CircuitOpModel[];
+      variables: Record<string, number>;
+    },
+    sourceLabel: string
+  ) => {
+    setDslError(null);
+    setQasmError(null);
+    mutateProject((p) => {
+      const targetN = synced.qubits.length;
+      let nextBackend = p.sim_settings.backend;
+      if (targetN > 24 && (nextBackend === 'qutip' || nextBackend === 'kraus' || nextBackend === 'trajectory')) {
+        nextBackend = 'stim';
+      } else if (targetN > 14 && (nextBackend === 'qutip' || nextBackend === 'kraus')) {
+        nextBackend = 'trajectory';
+      } else if (targetN > 9 && nextBackend === 'qutip') {
+        nextBackend = 'kraus';
+      }
+      return {
         ...p,
         qubits: synced.qubits,
         operations: synced.operations,
         variables: synced.variables,
-      }));
-      addLog('代码已同步到可视化线路画布', 'info');
+        sim_settings: { ...p.sim_settings, backend: nextBackend },
+      };
+    });
+    addLog(`${sourceLabel}已同步到可视化线路画布 (${synced.qubits.length}Q · ${synced.operations.length} 指令)`, 'info');
+  };
+
+  const handleApplyDsl = async (dsl: string) => {
+    if (!project) return;
+    try {
+      const synced = await syncDslToProject(dsl, project);
+      applySyncedCircuit(synced, 'DSL 代码');
     } catch (err) {
       setDslError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleApplyQasm = async (qasm: string) => {
+    if (!project) return;
+    try {
+      const synced = await syncQasmToProject(qasm, project);
+      applySyncedCircuit(synced, 'OpenQASM 代码');
+    } catch (err) {
+      setQasmError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -965,9 +1045,44 @@ export default function App() {
 
   const handleImportJson = (file: File) => {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
+      const rawText = String(reader.result || '');
+      const isQasm =
+        file.name.toLowerCase().endsWith('.qasm') ||
+        /^\s*(OPENQASM|include\s+"|qreg\s+\w+\s*\[|qubit\s*\[)/im.test(rawText);
+      if (isQasm) {
+        if (!project) return;
+        try {
+          const synced = await syncQasmToProject(rawText, project);
+          const targetN = synced.qubits.length;
+          const nextBackend =
+            targetN > 24 ? 'stim' : targetN > 14 ? 'trajectory' : targetN > 8 ? 'kraus' : 'qutip';
+          const importedProj: ProjectModel = {
+            ...project,
+            name: file.name.replace(/\.qasm$/i, '.qproj'),
+            qubits: synced.qubits,
+            operations: synced.operations,
+            variables: synced.variables,
+            sim_settings: { ...project.sim_settings, backend: nextBackend },
+          };
+          setProject(importedProj);
+          setPast([]);
+          setFuture([]);
+          setOptResponse(null);
+          setSweepResponse(null);
+          setSelection({ type: 'none' });
+          setQasmError(null);
+          addLog(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q)`, 'info');
+          handleRunSimulation(importedProj, false);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatusMsg(`导入 OpenQASM 失败: ${msg}`);
+          addLog(`导入 OpenQASM 失败: ${msg}`, 'error');
+        }
+        return;
+      }
       try {
-        const parsed = JSON.parse(String(reader.result)) as ProjectModel;
+        const parsed = JSON.parse(rawText) as ProjectModel;
         if (parsed && Array.isArray(parsed.qubits) && Array.isArray(parsed.operations)) {
           setProject(parsed);
           setSelection({ type: 'none' });
@@ -1019,12 +1134,26 @@ export default function App() {
           setFuture([]);
           setOptResponse(null);
           setSweepResponse(null);
-          const firstVar = Object.keys(clone.variables)[0] || 'hw:depol_2q';
+          const varKeys = Object.keys(clone.variables);
+          const firstVar = varKeys[0] || 'hw:depol_2q';
+          const secondVar = varKeys[1] || 'hw:depol_2q';
+          const isVqe = /vqe|qaoa|ising/i.test(clone.name);
+          const autoBackend =
+            clone.sim_settings.backend === 'compare'
+              ? clone.qubits.length > 24
+                ? 'stim'
+                : clone.qubits.length > 14
+                ? 'trajectory'
+                : 'kraus'
+              : clone.sim_settings.backend;
           setSweepConfig((prev) => ({
             ...prev,
             param_x: firstVar,
+            param_y: secondVar,
             target_bitstring: '0'.repeat(Math.max(1, clone.qubits.length)),
             observed_qubit: Math.min(1, Math.max(0, clone.qubits.length - 1)),
+            hamiltonian_str: isVqe ? buildPresetHamiltonian('tfim', clone) : '',
+            backend: autoBackend,
           }));
           setSelection(clone.operations[0] ? { type: 'op', opId: clone.operations[0].id } : { type: 'none' });
           handleRunSimulation(clone, false);
@@ -1041,6 +1170,7 @@ export default function App() {
           else if (mode === 'sweep') handleRunSweep();
           else handleRunSimulation(undefined, mode === 'design');
         }}
+        onStop={handleStopTask}
         isBusy={isBusy}
         isDirty={simDirty}
         canUndo={past.length > 0}
@@ -1166,7 +1296,9 @@ export default function App() {
                 qasmText={qasmText}
                 logs={logs}
                 dslError={dslError}
+                qasmError={qasmError}
                 onApplyDsl={handleApplyDsl}
+                onApplyQasm={handleApplyQasm}
                 onUpdateVariable={(name, val) =>
                   mutateProject(
                     (p) => ({ ...p, variables: { ...p.variables, [name]: val } }),

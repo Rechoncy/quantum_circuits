@@ -10,7 +10,7 @@ Seamlessly dispatches between:
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -49,6 +49,7 @@ class QuantumSolver:
         seed: Optional[int] = 42,
         initial_state: Optional[np.ndarray] = None,
         initial_state_labels: Optional[Sequence[str]] = None,
+        observable_terms: Optional[Sequence[Tuple[float, Tuple[Tuple[int, str], ...]]]] = None,
     ) -> EvolutionResult:
         """
         Execute a quantum circuit and return step-by-step state evolution and measurement results.
@@ -95,7 +96,12 @@ class QuantumSolver:
             )
         if b in ("trajectory", "statevector"):
             return self.trajectory_backend.run(
-                circuit, hardware=hw, shots=shots, seed=seed, initial_state=initial_state
+                circuit,
+                hardware=hw,
+                shots=shots,
+                seed=seed,
+                initial_state=initial_state,
+                observable_terms=observable_terms,
             )
         if b == "stim":
             return self.stim_backend.run(

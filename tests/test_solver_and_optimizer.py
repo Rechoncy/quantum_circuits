@@ -904,6 +904,124 @@ def test_stim_adjoint_fidelity_sparse_qutip_and_nested_composite_gates() -> None
     assert sim_nest["results"][sim_nest["primary_backend"]]["final_fidelity"] > 0.96
 
 
+def test_openqasm_bidirectional_hamiltonian_sweep_and_flagship_presets() -> None:
+    """
+    Verify v2.1 polish upgrades:
+      1. Bidirectional OpenQASM 3.0 export -> import round-trip (preserving RXY, SQISWAP, and symbolic variables)
+      2. OpenQASM 2.0 Qiskit-style `qreg`, register broadcast `h q;`, and custom `gate` macro expansion
+      3. Variational Pauli Hamiltonian `<H>` expectation in 1D & 2D sweeps across Kraus & Trajectory (16Q VQE)
+      4. All 7 presets (including 16Q Ising VQE, 17Q Rotated Surface Code, 32Q Log-Depth GHZ) simulate cleanly
+    """
+    from quantum_solver.studio import (
+        SweepRequest,
+        build_preset_projects,
+        dsl_to_project_ops,
+        execute_project_simulation,
+        execute_project_sweep,
+        openqasm_to_project_ops,
+        parse_sparse_pauli_terms,
+        project_to_openqasm3,
+    )
+
+    presets = build_preset_projects()
+    assert len(presets) == 7
+
+    # 1. Round-trip OpenQASM 3.0 on Preset 0 (Rydberg_GHZ with RXY(theta, 0) and SQISWAP)
+    p0 = presets[0].model_copy(deep=True)
+    qasm3 = project_to_openqasm3(p0)
+    assert "float[64] theta" in qasm3
+    rt_q, rt_ops, rt_vars = openqasm_to_project_ops(qasm3, p0)
+    assert len(rt_q) == 4
+    assert "theta" in rt_vars
+    assert any(op.name == "RXY" and op.params[0] == "theta" for op in rt_ops)
+    assert any(op.name == "SQISWAP" for op in rt_ops)
+
+    # 2. OpenQASM 2.0 with custom `gate` macro + register broadcast + auto-detection via `dsl_to_project_ops`
+    qasm2_src = """
+    OPENQASM 2.0;
+    include "qelib1.inc";
+    gate bell_pair a, b { h a; cx a, b; }
+    qreg q[3];
+    creg c[3];
+    bell_pair q[0], q[1];
+    rx(pi/2) q[2];
+    measure q -> c;
+    """
+    q2_qubits, q2_ops, _ = dsl_to_project_ops(qasm2_src, p0)
+    assert len(q2_qubits) == 3
+    gate_names = [op.name for op in q2_ops if op.kind == "gate"]
+    assert gate_names == ["H", "CNOT", "RX"]
+    assert abs(float(q2_ops[2].params[0]) - math.pi / 2.0) < 1e-5
+
+    # 3. Sparse & dense Pauli Hamiltonian expectation in 1D & 2D parameter sweeps
+    p_rabi = presets[3].model_copy(deep=True)  # 1Q: RX(theta) -> RZ(phi) -> SX -> M
+    p_rabi.operations = [
+        o for o in p_rabi.operations if o.name == "RX" or o.kind == "measure"
+    ]
+    p_rabi.sim_settings.enable_t1_t2 = False
+    p_rabi.sim_settings.enable_depol = False
+    p_rabi.sim_settings.enable_zz = False
+    p_rabi.sim_settings.enable_readout = False
+    # For state RX(theta)|0>, <Z0> = cos(theta), so H = -1.0*Z0 + 0.5*I has <H> = 0.5 - cos(theta)
+    sw_1d = execute_project_sweep(
+        SweepRequest(
+            project=p_rabi,
+            mode="1d",
+            param_x="theta",
+            x_start=0.0,
+            x_stop=math.pi,
+            x_points=5,
+            hamiltonian_str="-1.0*Z0 + 0.5*I",
+            backend="kraus",
+        )
+    )
+    assert sw_1d["energies"] is not None and len(sw_1d["energies"]) == 5
+    assert abs(sw_1d["energies"][0] - (-0.5)) < 1e-4  # theta=0 -> 0.5 - 1 = -0.5
+    assert abs(sw_1d["energies"][-1] - 1.5) < 1e-4    # theta=pi -> 0.5 - (-1) = 1.5
+
+    # 4. Execute all 3 new flagship presets (16Q VQE + 2D energy landscape, 17Q Surface Code, 32Q Log-Depth GHZ)
+    vqe_16q, surf_17q, ghz_32q = presets[4], presets[5], presets[6]
+    assert len(vqe_16q.qubits) == 16
+    assert len(surf_17q.qubits) == 17
+    assert len(ghz_32q.qubits) == 32
+
+    terms_16q = parse_sparse_pauli_terms("-1.0*Z0*Z1 - 1.0*Z1*Z2 - 0.5*X0 - 0.5*X1", 16)
+    assert len(terms_16q) == 4
+    sw_vqe_2d = execute_project_sweep(
+        SweepRequest(
+            project=vqe_16q,
+            mode="2d",
+            param_x="theta",
+            x_start=0.0,
+            x_stop=math.pi,
+            x_points=3,
+            param_y="gamma",
+            y_start=0.0,
+            y_stop=math.pi / 2.0,
+            y_points=3,
+            hamiltonian_str="-1.0*Z0*Z1 - 0.5*X0 - 0.5*X1",
+            backend="trajectory",
+        )
+    )
+    assert sw_vqe_2d["energy_grid"] is not None
+    assert len(sw_vqe_2d["energy_grid"]) == 3 and len(sw_vqe_2d["energy_grid"][0]) == 3
+
+    res_surf = execute_project_simulation(surf_17q)["results"]["stim"]
+    assert res_surf["num_qubits"] == 17 and 0.78 < res_surf["final_fidelity"] < 0.95
+
+    ghz_ideal = ghz_32q.model_copy(deep=True)
+    ghz_ideal.sim_settings.enable_t1_t2 = False
+    ghz_ideal.sim_settings.enable_depol = False
+    ghz_ideal.sim_settings.enable_zz = False
+    ghz_ideal.sim_settings.enable_readout = False
+    res_ghz32 = execute_project_simulation(ghz_ideal)["results"]["stim"]
+    assert res_ghz32["final_fidelity"] == 1.0
+    p_zero32 = res_ghz32["final_probabilities"].get("0" * 32, 0.0)
+    p_one32 = res_ghz32["final_probabilities"].get("1" * 32, 0.0)
+    assert 0.45 < p_zero32 < 0.55 and 0.45 < p_one32 < 0.55
+
+
+
 
 
 

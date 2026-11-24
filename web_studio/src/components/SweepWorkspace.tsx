@@ -36,7 +36,8 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
   isBusy,
 }) => {
   const [focused1D, setFocused1D] = useState<'none' | 'pop' | 'bloch' | 'fid' | 'table'>('none');
-  const [view2D, setView2D] = useState<'all' | 'pop' | 'fid' | 'z0'>('all');
+  const [topLeft1DMode, setTopLeft1DMode] = useState<'auto' | 'energy' | 'pop'>('auto');
+  const [view2D, setView2D] = useState<'all' | 'energy' | 'pop' | 'fid' | 'z0'>('all');
 
   const textColor = darkMode ? '#E5E5EA' : '#1D1D1F';
   const mutedColor = darkMode ? '#98989D' : '#6E6E73';
@@ -46,8 +47,10 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
   const handleExportCsv = () => {
     if (!sweepResponse || sweepResponse.mode !== '1d') return;
     const basis = Object.keys(sweepResponse.populations);
+    const hasEn = Array.isArray(sweepResponse.energies) && sweepResponse.energies.length === sweepResponse.x_values.length;
     const header = [
       sweepResponse.param_x,
+      ...(hasEn ? ['energy_H'] : []),
       'fidelity',
       'purity',
       'X0',
@@ -58,6 +61,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
     const rows = sweepResponse.x_values.map((xv, i) =>
       [
         xv,
+        ...(hasEn ? [sweepResponse.energies![i]] : []),
         sweepResponse.fidelities[i],
         sweepResponse.purities[i],
         sweepResponse.bloch_q0[i][0],
@@ -101,18 +105,51 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
   const obsName = sweepResponse.observed_qubit_name || `q${sweepResponse.observed_qubit ?? 0}`;
 
   // =========================================================================
-  // 2D SWEEP PHASE DIAGRAM VIEW (Clean 3-card side-by-side or single focus)
+  // 2D SWEEP PHASE DIAGRAM VIEW (3-card or 2x2 with Energy Landscape <H>)
   // =========================================================================
   if (sweepResponse.mode === '2d') {
+    const hasEnergy2D =
+      Array.isArray(sweepResponse.energy_grid) && sweepResponse.energy_grid.length > 0;
+
+    let minE2D: { val: number; x: number; y: number } | null = null;
+    if (hasEnergy2D && sweepResponse.energy_grid) {
+      let best = Infinity;
+      let bx = sweepResponse.x_values[0] ?? 0;
+      let by = sweepResponse.y_values[0] ?? 0;
+      sweepResponse.energy_grid.forEach((row, iy) => {
+        row.forEach((v, ix) => {
+          if (v < best) {
+            best = v;
+            bx = sweepResponse.x_values[ix] ?? bx;
+            by = sweepResponse.y_values[iy] ?? by;
+          }
+        });
+      });
+      if (Number.isFinite(best)) minE2D = { val: best, x: bx, y: by };
+    }
+
     const cards: {
-      id: 'pop' | 'fid' | 'z0';
+      id: 'energy' | 'pop' | 'fid' | 'z0';
       title: string;
       z: number[][];
       colorscale: any;
       zmin?: number;
       zmax?: number;
       unit: string;
+      minMarker?: { x: number; y: number; val: number } | null;
     }[] = [
+      ...(hasEnergy2D && sweepResponse.energy_grid
+        ? [
+            {
+              id: 'energy' as const,
+              title: '变分能量景观 ⟨H⟩(x, y)',
+              z: sweepResponse.energy_grid,
+              colorscale: 'Plasma',
+              unit: '⟨H⟩',
+              minMarker: minE2D,
+            },
+          ]
+        : []),
       {
         id: 'pop',
         title: `基态布居 P(${formatSweepKet(sweepResponse.target_bitstring)})`,
@@ -140,7 +177,17 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
       },
     ];
 
-    const visibleCards = view2D === 'all' ? cards : cards.filter((c) => c.id === view2D);
+    const effectiveView2D = view2D === 'energy' && !hasEnergy2D ? 'all' : view2D;
+    const visibleCards =
+      effectiveView2D === 'all' ? cards : cards.filter((c) => c.id === effectiveView2D);
+
+    const navTabs: [typeof view2D, string][] = [
+      ['all', hasEnergy2D ? '四图总览' : '三图并排'],
+      ...(hasEnergy2D ? ([['energy', '能量景观 ⟨H⟩']] as [typeof view2D, string][]) : []),
+      ['pop', '布居相图'],
+      ['fid', '保真度'],
+      ['z0', `⟨Z(${obsName})⟩`],
+    ];
 
     return (
       <div className="flex-1 min-h-0 flex flex-col bg-[var(--bg-app)] overflow-hidden">
@@ -154,22 +201,20 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
               {sweepResponse.param_x} × {sweepResponse.param_y} · {sweepResponse.x_values.length}×
               {sweepResponse.y_values.length} · {sweepResponse.backend}
             </span>
+            {minE2D && (
+              <span className="hidden xl:inline-flex px-2 py-0.5 rounded-md bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 font-mono-num text-[11px] font-semibold whitespace-nowrap">
+                E_min = {minE2D.val.toFixed(4)} @ ({minE2D.x.toFixed(2)}, {minE2D.y.toFixed(2)})
+              </span>
+            )}
           </div>
 
           <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex shrink-0">
-            {(
-              [
-                ['all', '三图并排'],
-                ['pop', '布居相图'],
-                ['fid', '保真度'],
-                ['z0', `⟨Z(${obsName})⟩ 相图`],
-              ] as const
-            ).map(([k, lbl]) => (
+            {navTabs.map(([k, lbl]) => (
               <button
                 key={k}
                 onClick={() => setView2D(k)}
                 className={`px-2.5 py-0.5 rounded-md text-[11px] cursor-pointer transition-colors ${
-                  view2D === k
+                  effectiveView2D === k
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
@@ -183,24 +228,28 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
         {/* Balanced Phase Diagram Grid */}
         <div
           className={`flex-1 min-h-0 p-3.5 grid gap-3 overflow-auto ${
-            view2D === 'all' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'
+            effectiveView2D === 'all'
+              ? hasEnergy2D
+                ? 'grid-cols-1 lg:grid-cols-2'
+                : 'grid-cols-1 lg:grid-cols-3'
+              : 'grid-cols-1'
           }`}
         >
           {visibleCards.map((c) => (
             <div
               key={c.id}
-              className="flex flex-col studio-card overflow-hidden min-h-[290px]"
+              className="flex flex-col studio-card overflow-hidden min-h-[260px]"
             >
               <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                 <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
                   {c.title}
                 </span>
                 <button
-                  onClick={() => setView2D(view2D === c.id ? 'all' : c.id)}
-                  title={view2D === c.id ? '返回并排视图' : '放大查看此相图'}
+                  onClick={() => setView2D(effectiveView2D === c.id ? 'all' : c.id)}
+                  title={effectiveView2D === c.id ? '返回并排视图' : '放大查看此相图'}
                   className="p-1 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
                 >
-                  {view2D === c.id ? (
+                  {effectiveView2D === c.id ? (
                     <Minimize2 className="w-3.5 h-3.5" />
                   ) : (
                     <Maximize2 className="w-3.5 h-3.5" />
@@ -221,10 +270,29 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
                       colorbar: { thickness: 11, len: 0.9, tickfont: { size: 10, color: mutedColor } },
                       hovertemplate: `${sweepResponse.param_x}=%{x:.3f}<br>${sweepResponse.param_y}=%{y:.3f}<br>${c.unit}=%{z:.4f}<extra></extra>`,
                     },
+                    ...(c.minMarker
+                      ? [
+                          {
+                            type: 'scatter' as const,
+                            mode: 'markers' as const,
+                            x: [c.minMarker.x],
+                            y: [c.minMarker.y],
+                            name: 'E_min',
+                            marker: {
+                              symbol: 'star',
+                              size: 13,
+                              color: '#10B981',
+                              line: { color: '#FFFFFF', width: 1.5 },
+                            },
+                            hovertemplate: `最优点 E_min=${c.minMarker.val.toFixed(4)}<br>(%{x:.3f}, %{y:.3f})<extra></extra>`,
+                          },
+                        ]
+                      : []),
                   ]}
                   layout={{
                     paper_bgcolor: plotBg,
                     plot_bgcolor: plotBg,
+                    showlegend: false,
                     margin: { l: 54, r: 12, t: 10, b: 44 },
                     xaxis: {
                       title: { text: sweepResponse.param_x_label, font: { size: 11, color: mutedColor } },
@@ -254,6 +322,27 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
   const maxFid = sweepResponse.fidelities.length > 0 ? Math.max(...sweepResponse.fidelities) : null;
   const minFid = sweepResponse.fidelities.length > 0 ? Math.min(...sweepResponse.fidelities) : null;
 
+  const hasEnergy1D =
+    Array.isArray(sweepResponse.energies) &&
+    sweepResponse.energies.length === sweepResponse.x_values.length;
+  const showEnergy1D =
+    hasEnergy1D && (topLeft1DMode === 'auto' || topLeft1DMode === 'energy');
+
+  let minE1D: { val: number; x: number; idx: number } | null = null;
+  if (hasEnergy1D && sweepResponse.energies) {
+    let best = Infinity;
+    let bIdx = 0;
+    sweepResponse.energies.forEach((v, idx) => {
+      if (v < best) {
+        best = v;
+        bIdx = idx;
+      }
+    });
+    if (Number.isFinite(best)) {
+      minE1D = { val: best, x: sweepResponse.x_values[bIdx] ?? 0, idx: bIdx };
+    }
+  }
+
   const isVisible = (id: 'pop' | 'bloch' | 'fid' | 'table') =>
     focused1D === 'none' || focused1D === id;
 
@@ -268,8 +357,13 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
           <span className="px-2 py-0.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] font-mono-num text-[11px] text-[var(--text-secondary)] truncate">
             {sweepResponse.param_x_label} · {sweepResponse.x_values.length} 点 · {sweepResponse.backend}
           </span>
+          {minE1D && (
+            <span className="hidden sm:inline-flex px-2 py-0.5 rounded-md bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 font-mono-num text-[11px] font-semibold whitespace-nowrap">
+              E_min = {minE1D.val.toFixed(4)} @ {sweepResponse.param_x}={minE1D.x.toFixed(3)}
+            </span>
+          )}
           {maxFid !== null && minFid !== null && (
-            <span className="hidden md:inline-flex px-2 py-0.5 rounded-md bg-[#0A84FF]/10 text-[#0A84FF] font-mono-num text-[11px] font-semibold">
+            <span className="hidden lg:inline-flex px-2 py-0.5 rounded-md bg-[#0A84FF]/10 text-[#0A84FF] font-mono-num text-[11px] font-semibold">
               F ∈ [{minFid.toFixed(4)}, {maxFid.toFixed(4)}]
             </span>
           )}
@@ -300,52 +394,133 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
           focused1D === 'none' ? 'grid-cols-2 grid-rows-2' : 'grid-cols-1 grid-rows-1'
         }`}
       >
-        {/* Top-Left: State Populations */}
+        {/* Top-Left: Variational Energy <H> OR State Populations */}
         {isVisible('pop') && (
           <div className="flex flex-col studio-card overflow-hidden min-h-0">
-            <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+            <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
               <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
-                态布居随 [{sweepResponse.param_x}] 扫描
+                {showEnergy1D
+                  ? `变分能量 ⟨H⟩ 随 [${sweepResponse.param_x}] 扫描`
+                  : `态布居随 [${sweepResponse.param_x}] 扫描`}
               </span>
-              <button
-                onClick={() => setFocused1D(focused1D === 'pop' ? 'none' : 'pop')}
-                className="p-1 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
-                title={focused1D === 'pop' ? '还原四宫格' : '放大此图'}
-              >
-                {focused1D === 'pop' ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {hasEnergy1D && (
+                  <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-md inline-flex text-[10.5px]">
+                    <button
+                      onClick={() => setTopLeft1DMode('energy')}
+                      className={`px-2 py-0.5 rounded cursor-pointer ${
+                        showEnergy1D
+                          ? 'bg-[var(--bg-panel)] text-emerald-600 dark:text-emerald-400 font-semibold shadow-2xs'
+                          : 'text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      ⟨H⟩ 能量
+                    </button>
+                    <button
+                      onClick={() => setTopLeft1DMode('pop')}
+                      className={`px-2 py-0.5 rounded cursor-pointer ${
+                        !showEnergy1D
+                          ? 'bg-[var(--bg-panel)] text-[#0A84FF] font-semibold shadow-2xs'
+                          : 'text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      态布居
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={() => setFocused1D(focused1D === 'pop' ? 'none' : 'pop')}
+                  className="p-1 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                  title={focused1D === 'pop' ? '还原四宫格' : '放大此图'}
+                >
+                  {focused1D === 'pop' ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                </button>
+              </div>
             </div>
             <div className="flex-1 min-h-0 p-1.5">
-              <PlotlyChart
-                data={activeBasis.map((b, idx) => ({
-                  x: sweepResponse.x_values,
-                  y: sweepResponse.populations[b],
-                  type: 'scatter',
-                  mode: 'lines+markers',
-                  name: formatSweepKet(b),
-                  line: { width: 2.2, color: SWEEP_PALETTE[idx % SWEEP_PALETTE.length] },
-                  marker: { size: 4.5 },
-                  hovertemplate: `${formatSweepKet(b)}: %{y:.3f}<extra></extra>`,
-                }))}
-                layout={{
-                  paper_bgcolor: plotBg,
-                  plot_bgcolor: plotBg,
-                  hovermode: 'x unified',
-                  margin: { l: 46, r: 14, t: 12, b: 38 },
-                  xaxis: {
-                    title: { text: sweepResponse.param_x_label, font: { size: 10.5, color: mutedColor } },
-                    gridcolor: gridColor,
-                    tickfont: { color: mutedColor, size: 10.5 },
-                  },
-                  yaxis: {
-                    title: { text: 'P(|x⟩)', font: { size: 10.5, color: mutedColor } },
-                    range: [-0.04, 1.06],
-                    gridcolor: gridColor,
-                    tickfont: { color: mutedColor, size: 10.5 },
-                  },
-                  legend: { orientation: 'h', y: 1.13, font: { size: 10, color: textColor } },
-                }}
-              />
+              {showEnergy1D && sweepResponse.energies ? (
+                <PlotlyChart
+                  data={[
+                    {
+                      x: sweepResponse.x_values,
+                      y: sweepResponse.energies,
+                      type: 'scatter',
+                      mode: 'lines+markers',
+                      name: '⟨H⟩',
+                      line: { width: 2.4, color: '#10B981' },
+                      marker: { size: 4.5, color: '#10B981' },
+                      hovertemplate: '⟨H⟩ = %{y:.4f}<extra></extra>',
+                    },
+                    ...(minE1D
+                      ? [
+                          {
+                            x: [minE1D.x],
+                            y: [minE1D.val],
+                            type: 'scatter' as const,
+                            mode: 'markers' as const,
+                            name: 'E_min',
+                            marker: {
+                              symbol: 'star',
+                              size: 12,
+                              color: '#F59E0B',
+                              line: { color: '#FFFFFF', width: 1.2 },
+                            },
+                            hovertemplate: `基态最优点: E_min = ${minE1D.val.toFixed(4)}<extra></extra>`,
+                          },
+                        ]
+                      : []),
+                  ]}
+                  layout={{
+                    paper_bgcolor: plotBg,
+                    plot_bgcolor: plotBg,
+                    hovermode: 'x unified',
+                    margin: { l: 50, r: 14, t: 12, b: 38 },
+                    xaxis: {
+                      title: { text: sweepResponse.param_x_label, font: { size: 10.5, color: mutedColor } },
+                      gridcolor: gridColor,
+                      tickfont: { color: mutedColor, size: 10.5 },
+                    },
+                    yaxis: {
+                      title: { text: '⟨H⟩', font: { size: 10.5, color: mutedColor } },
+                      gridcolor: gridColor,
+                      zerolinecolor: darkMode ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.16)',
+                      tickfont: { color: mutedColor, size: 10.5 },
+                    },
+                    legend: { orientation: 'h', y: 1.13, font: { size: 10, color: textColor } },
+                  }}
+                />
+              ) : (
+                <PlotlyChart
+                  data={activeBasis.map((b, idx) => ({
+                    x: sweepResponse.x_values,
+                    y: sweepResponse.populations[b],
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    name: formatSweepKet(b),
+                    line: { width: 2.2, color: SWEEP_PALETTE[idx % SWEEP_PALETTE.length] },
+                    marker: { size: 4.5 },
+                    hovertemplate: `${formatSweepKet(b)}: %{y:.3f}<extra></extra>`,
+                  }))}
+                  layout={{
+                    paper_bgcolor: plotBg,
+                    plot_bgcolor: plotBg,
+                    hovermode: 'x unified',
+                    margin: { l: 46, r: 14, t: 12, b: 38 },
+                    xaxis: {
+                      title: { text: sweepResponse.param_x_label, font: { size: 10.5, color: mutedColor } },
+                      gridcolor: gridColor,
+                      tickfont: { color: mutedColor, size: 10.5 },
+                    },
+                    yaxis: {
+                      title: { text: 'P(|x⟩)', font: { size: 10.5, color: mutedColor } },
+                      range: [-0.04, 1.06],
+                      gridcolor: gridColor,
+                      tickfont: { color: mutedColor, size: 10.5 },
+                    },
+                    legend: { orientation: 'h', y: 1.13, font: { size: 10, color: textColor } },
+                  }}
+                />
+              )}
             </div>
           </div>
         )}
@@ -509,6 +684,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
                   <tr className="border-b border-[var(--border-hairline)] text-left text-[var(--text-secondary)]">
                     <th className="py-1.5 pr-2">#</th>
                     <th className="py-1.5 pr-2">{sweepResponse.param_x}</th>
+                    {hasEnergy1D && <th className="py-1.5 pr-2 text-emerald-600 dark:text-emerald-400">⟨H⟩</th>}
                     <th className="py-1.5 pr-2">F</th>
                     <th className="py-1.5 pr-2">Tr(ρ²)</th>
                     <th className="py-1.5 pr-2">⟨Z({obsName})⟩</th>
@@ -524,6 +700,11 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
                       <tr key={i} className="hover:bg-black/[0.025] dark:hover:bg-white/[0.03]">
                         <td className="py-1.5 pr-1.5 text-[var(--text-secondary)]">{i + 1}</td>
                         <td className="py-1.5 pr-1.5 font-semibold">{xv.toFixed(3)}</td>
+                        {hasEnergy1D && sweepResponse.energies && (
+                          <td className="py-1.5 pr-1.5 text-emerald-600 dark:text-emerald-400 font-semibold">
+                            {sweepResponse.energies[i].toFixed(4)}
+                          </td>
+                        )}
                         <td className="py-1.5 pr-1.5 text-[#0A84FF] font-semibold">
                           {sweepResponse.fidelities[i].toFixed(4)}
                         </td>

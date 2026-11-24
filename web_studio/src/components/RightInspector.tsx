@@ -38,7 +38,53 @@ export interface SweepConfigState {
   y_points: number;
   target_bitstring: string;
   observed_qubit: number;
+  hamiltonian_str: string;
   backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
+}
+
+export function buildPresetHamiltonian(
+  kind: 'tfim' | 'heisenberg' | 'maxcut',
+  project: ProjectModel
+): string {
+  const n = Math.max(1, project.qubits.length);
+  if (n === 1) {
+    if (kind === 'tfim') return '-1.0*Z0 - 0.5*X0';
+    if (kind === 'heisenberg') return '0.5*X0 + 0.5*Z0';
+    return '0.5*I - 0.5*Z0';
+  }
+  const edgeSet = new Set<string>();
+  const edges: [number, number][] = [];
+  for (const op of project.operations) {
+    if (op.kind === 'gate' && op.qubits.length >= 2) {
+      const u = Math.min(op.qubits[0], op.qubits[1]);
+      const v = Math.max(op.qubits[0], op.qubits[1]);
+      const key = `${u}_${v}`;
+      if (u !== v && u >= 0 && v < n && !edgeSet.has(key)) {
+        edgeSet.add(key);
+        edges.push([u, v]);
+      }
+    }
+  }
+  if (edges.length === 0) {
+    for (let i = 0; i < Math.min(n - 1, 32); i++) edges.push([i, i + 1]);
+  }
+  const cappedEdges = edges.slice(0, 32);
+  if (kind === 'tfim') {
+    const zz = cappedEdges.map(([u, v]) => `-1.0*Z${u}*Z${v}`).join(' ');
+    const hx = Array.from({ length: Math.min(n, 24) }, (_, q) => `- 0.5*X${q}`).join(' ');
+    return `${zz} ${hx}`.trim();
+  }
+  if (kind === 'heisenberg') {
+    return cappedEdges
+      .slice(0, 16)
+      .map(([u, v], idx) =>
+        `${idx > 0 ? '+ ' : ''}0.25*X${u}*X${v} + 0.25*Y${u}*Y${v} + 0.25*Z${u}*Z${v}`
+      )
+      .join(' ');
+  }
+  const constOffset = (0.5 * cappedEdges.length).toFixed(1);
+  const zzCut = cappedEdges.map(([u, v]) => `- 0.5*Z${u}*Z${v}`).join(' ');
+  return `${constOffset}*I ${zzCut}`.trim();
 }
 
 function defaultSweepRange(paramKey: string): [number, number] {
@@ -575,6 +621,51 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </div>
           </div>
         )}
+
+        {/* Variational Pauli Hamiltonian <H> Cost Observer (VQE / QAOA) */}
+        <div className="pt-4 border-t border-[var(--border-hairline)] space-y-2">
+          <div className="flex items-center justify-between">
+            <SectionTitle>变分能量哈密顿量 ⟨H⟩ (可选)</SectionTitle>
+            {sweepConfig.hamiltonian_str.trim() && (
+              <button
+                type="button"
+                onClick={() => onSweepConfigChange({ hamiltonian_str: '' })}
+                className="text-[10.5px] text-[var(--text-secondary)] hover:text-red-500 mb-2 cursor-pointer"
+              >
+                清空
+              </button>
+            )}
+          </div>
+          <textarea
+            rows={2}
+            value={sweepConfig.hamiltonian_str}
+            onChange={(e) => onSweepConfigChange({ hamiltonian_str: e.target.value })}
+            placeholder="如 -1.0*Z0*Z1 - 0.5*X0 - 0.5*X1（支持任意比特下标或稠密泡利串）"
+            spellCheck={false}
+            className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] font-mono-num leading-snug outline-none focus:border-[#0A84FF] resize-y"
+          />
+          <div className="flex flex-wrap items-center gap-1">
+            {(
+              [
+                ['tfim', '伊辛 TFIM'],
+                ['heisenberg', '海森堡 XXX'],
+                ['maxcut', 'MaxCut 代价'],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() =>
+                  onSweepConfigChange({ hamiltonian_str: buildPresetHamiltonian(k, project) })
+                }
+                title="根据当前线路耦合拓扑一键生成泡利哈密顿量"
+                className="px-2 py-0.5 rounded-md bg-[#0A84FF]/10 hover:bg-[#0A84FF]/18 text-[#0A84FF] text-[10.5px] font-medium cursor-pointer transition-colors"
+              >
+                + {label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="flex items-center gap-2">
           <button

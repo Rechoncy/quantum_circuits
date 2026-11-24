@@ -27,6 +27,7 @@ from .models import (
     NlCircuitRequest,
     OptimizeRequest,
     ProjectModel,
+    QasmSyncRequest,
     SweepRequest,
     SynthesizeUnitaryRequest,
     ValidateCustomGateRequest,
@@ -39,6 +40,7 @@ from .project_engine import (
     execute_project_simulation,
     execute_project_sweep,
     execute_unitary_synthesis,
+    openqasm_to_project_ops,
     project_to_dsl,
     project_to_openqasm3,
 )
@@ -48,7 +50,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.0.0")
+    app = FastAPI(title="Quantum Studio API", version="2.1.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -60,7 +62,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.0.0"}
+        return {"status": "ok", "version": "2.1.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:
@@ -84,6 +86,18 @@ def create_app() -> FastAPI:
     def api_dsl_to_project(req: DslSyncRequest) -> Dict[str, Any]:
         try:
             qubits, ops, variables = dsl_to_project_ops(req.dsl, req.project)
+            return {
+                "qubits": [q.model_dump() for q in qubits],
+                "operations": [op.model_dump() for op in ops],
+                "variables": variables,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/sync/qasm-to-project")
+    def api_qasm_to_project(req: QasmSyncRequest) -> Dict[str, Any]:
+        try:
+            qubits, ops, variables = openqasm_to_project_ops(req.qasm, req.project)
             return {
                 "qubits": [q.model_dump() for q in qubits],
                 "operations": [op.model_dump() for op in ops],

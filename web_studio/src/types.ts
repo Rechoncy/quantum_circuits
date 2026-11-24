@@ -171,11 +171,13 @@ export interface Sweep1DResponse {
   backend: string;
   observed_qubit?: number;
   observed_qubit_name?: string;
+  hamiltonian_str?: string | null;
   x_values: number[];
   populations: Record<string, number[]>;
   fidelities: number[];
   purities: number[];
   bloch_q0: [number, number, number][];
+  energies?: number[] | null;
 }
 
 export interface Sweep2DResponse {
@@ -188,11 +190,13 @@ export interface Sweep2DResponse {
   observed_qubit?: number;
   observed_qubit_name?: string;
   target_bitstring: string;
+  hamiltonian_str?: string | null;
   x_values: number[];
   y_values: number[];
   population_grid: number[][];
   fidelity_grid: number[][];
   z0_grid: number[][];
+  energy_grid?: number[][] | null;
 }
 
 export type SweepResponse = Sweep1DResponse | Sweep2DResponse;

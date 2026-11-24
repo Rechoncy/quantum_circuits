@@ -15,7 +15,7 @@ import math
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.linalg import expm
@@ -27,7 +27,11 @@ from ..core.noise import NoiseChannel, ReadoutError
 from ..gui.circuit_parser import eval_math_expr, extract_symbolic_parameters
 from ..gui.sweep_engine import HARDWARE_SWEEP_PARAMS, apply_hardware_param
 from ..optimizer.compiler import QuantumCircuitOptimizer
-from ..solver.base import EvolutionResult
+from ..solver.base import (
+    EvolutionResult,
+    evaluate_pauli_sum_density_matrix,
+    evaluate_pauli_sum_statevector,
+)
 from ..solver.unified_solver import QuantumSolver
 from .custom_gates import (
     _safe_complex_eval,
@@ -277,7 +281,163 @@ def build_preset_projects() -> List[ProjectModel]:
         sim_settings=SimulationSettingsModel(backend="qutip", shots=20000),
     )
 
-    return [rydberg_proj, qft_opt_proj, bell_noise_proj, rabi_proj]
+    # ---- Flagship Preset 5: 16Q 2D Transverse-Field Ising VQE (4x4 Neutral Atom Grid) ----
+    vqe_qubits = [
+        QubitSpec(
+            id=r * 4 + c,
+            name=f"q{r * 4 + c}",
+            color=QUBIT_COLORS[(r * 4 + c) % len(QUBIT_COLORS)],
+            pos_x=round(c * 5.0, 1),
+            pos_y=round(r * 5.0, 1),
+        )
+        for r in range(4)
+        for c in range(4)
+    ]
+    vqe_ops: List[CircuitOpModel] = []
+    for q in range(16):
+        vqe_ops.append(CircuitOpModel(id=f"vqe_ry_{q}", step=0, kind="gate", name="RY", qubits=[q], params=["theta"]))
+    # Horizontal even & odd CZ layers (adjacent wires, zero crossing)
+    for r in range(4):
+        for c in (0, 2):
+            u = r * 4 + c
+            vqe_ops.append(CircuitOpModel(id=f"vqe_cz_he_{u}", step=1, kind="gate", name="CZ", qubits=[u, u + 1]))
+        u_odd = r * 4 + 1
+        vqe_ops.append(CircuitOpModel(id=f"vqe_cz_ho_{u_odd}", step=2, kind="gate", name="CZ", qubits=[u_odd, u_odd + 1]))
+    # Vertical CZ layers scheduled cleanly
+    v_col = [3] * 16
+    for r in range(3):
+        for c in range(4):
+            u, v = r * 4 + c, (r + 1) * 4 + c
+            st = max(v_col[q] for q in range(u, v + 1))
+            vqe_ops.append(CircuitOpModel(id=f"vqe_cz_v_{u}_{v}", step=st, kind="gate", name="CZ", qubits=[u, v]))
+            for q in range(u, v + 1):
+                v_col[q] = st + 1
+    rx_step = max(v_col)
+    for q in range(16):
+        vqe_ops.append(CircuitOpModel(id=f"vqe_rx_{q}", step=rx_step, kind="gate", name="RX", qubits=[q], params=["gamma"]))
+    vqe_ops.append(CircuitOpModel(id="vqe_m", step=rx_step + 1, kind="measure", name="MEASURE", qubits=list(range(16))))
+
+    vqe_16q_proj = ProjectModel(
+        name="Ising_2D_VQE_16Q.qproj",
+        qubits=vqe_qubits,
+        custom_gates=_default_custom_gates(),
+        operations=vqe_ops,
+        variables={"theta": round(math.pi / 3.0, 4), "gamma": round(math.pi / 6.0, 4)},
+        hardware_profiles=_default_hardware_profiles(),
+        active_hardware_id="hw_neutral_atom",
+        sim_settings=SimulationSettingsModel(
+            backend="trajectory",
+            shots=20000,
+            enable_t1_t2=False,
+            enable_depol=False,
+            enable_zz=False,
+            enable_readout=False,
+        ),
+    )
+
+    # ---- Flagship Preset 6: 17Q d=3 Rotated Surface Code QEC Syndrome Cycle (Stim) ----
+    sc_qubits: List[QubitSpec] = []
+    for i in range(9):
+        r, c = divmod(i, 3)
+        sc_qubits.append(
+            QubitSpec(id=i, name=f"d{i}", color=QUBIT_COLORS[1], pos_x=round(c * 6.0, 1), pos_y=round(r * 6.0, 1))
+        )
+    x_anc_coords = [(3.0, 3.0), (9.0, 9.0), (3.0, -3.0), (9.0, 15.0)]
+    z_anc_coords = [(9.0, 3.0), (3.0, 9.0), (-3.0, 9.0), (15.0, 3.0)]
+    for idx, (ax, ay) in enumerate(x_anc_coords):
+        sc_qubits.append(QubitSpec(id=9 + idx, name=f"x_anc{idx}", color=QUBIT_COLORS[3], pos_x=ax, pos_y=ay))
+    for idx, (zx, zy) in enumerate(z_anc_coords):
+        sc_qubits.append(QubitSpec(id=13 + idx, name=f"z_anc{idx}", color=QUBIT_COLORS[2], pos_x=zx, pos_y=zy))
+
+    sc_col = [0] * 17
+    sc_ops: List[CircuitOpModel] = []
+    for a in range(9, 13):
+        sc_ops.append(CircuitOpModel(id=f"sc_h_in_{a}", step=0, kind="gate", name="H", qubits=[a]))
+        sc_col[a] = 1
+    stabilizer_pairs = [
+        # X-stabilizers (control = ancilla, target = data)
+        (9, 0), (9, 1), (9, 3), (9, 4),
+        (10, 4), (10, 5), (10, 7), (10, 8),
+        (11, 0), (11, 1),
+        (12, 7), (12, 8),
+        # Z-stabilizers (control = data, target = ancilla)
+        (1, 13), (2, 13), (4, 13), (5, 13),
+        (3, 14), (4, 14), (6, 14), (7, 14),
+        (3, 15), (6, 15),
+        (2, 16), (5, 16),
+    ]
+    for p_idx, (ctrl, targ) in enumerate(stabilizer_pairs):
+        lo, hi = min(ctrl, targ), max(ctrl, targ)
+        st = max(sc_col[q] for q in range(lo, hi + 1))
+        sc_ops.append(CircuitOpModel(id=f"sc_cx_{p_idx}", step=st, kind="gate", name="CNOT", qubits=[ctrl, targ]))
+        for q in range(lo, hi + 1):
+            sc_col[q] = st + 1
+    for a in range(9, 13):
+        st = sc_col[a]
+        sc_ops.append(CircuitOpModel(id=f"sc_h_out_{a}", step=st, kind="gate", name="H", qubits=[a]))
+        sc_col[a] = st + 1
+    m_st = max(sc_col)
+    sc_ops.append(CircuitOpModel(id="sc_meas", step=m_st, kind="measure", name="MEASURE", qubits=list(range(17))))
+
+    surface_17q_proj = ProjectModel(
+        name="Rotated_Surface_Code_17Q.qproj",
+        qubits=sc_qubits,
+        custom_gates=_default_custom_gates(),
+        operations=sc_ops,
+        variables={"p_err": 0.005},
+        hardware_profiles=_default_hardware_profiles(),
+        active_hardware_id="hw_neutral_atom",
+        sim_settings=SimulationSettingsModel(backend="stim", shots=20000),
+    )
+
+    # ---- Flagship Preset 7: 32Q Log-Depth Binary-Tree Rydberg GHZ (5 Entangling Layers) ----
+    ghz32_qubits = [
+        QubitSpec(
+            id=i,
+            name=f"q{i}",
+            color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
+            pos_x=round((i % 8) * 5.0, 1),
+            pos_y=round((i // 8) * 5.0, 1),
+        )
+        for i in range(32)
+    ]
+    ghz32_ops: List[CircuitOpModel] = [
+        CircuitOpModel(id="g32_h0", step=0, kind="gate", name="H", qubits=[0])
+    ]
+    for layer_idx, stride in enumerate((16, 8, 4, 2, 1), start=1):
+        for src in range(0, 32, stride * 2):
+            dst = src + stride
+            ghz32_ops.append(
+                CircuitOpModel(
+                    id=f"g32_cx_{layer_idx}_{src}_{dst}",
+                    step=layer_idx,
+                    kind="gate",
+                    name="CNOT",
+                    qubits=[src, dst],
+                )
+            )
+    ghz32_ops.append(CircuitOpModel(id="g32_m", step=6, kind="measure", name="MEASURE", qubits=list(range(32))))
+
+    ghz_32q_proj = ProjectModel(
+        name="Rydberg_LogDepth_GHZ_32Q.qproj",
+        qubits=ghz32_qubits,
+        custom_gates=_default_custom_gates(),
+        operations=ghz32_ops,
+        variables={},
+        hardware_profiles=_default_hardware_profiles(),
+        active_hardware_id="hw_neutral_atom",
+        sim_settings=SimulationSettingsModel(backend="stim", shots=20000),
+    )
+
+    return [
+        rydberg_proj,
+        qft_opt_proj,
+        bell_noise_proj,
+        rabi_proj,
+        vqe_16q_proj,
+        surface_17q_proj,
+        ghz_32q_proj,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +848,15 @@ def dsl_to_project_ops(
     Parse user-edited DSL code back into structured QubitSpec list, CircuitOpModel list
     (with ASAP column/step scheduling), and updated symbolic variables dictionary.
     Supports both built-in gates and all custom gates in `project.custom_gates`!
+    Automatically delegates to `openqasm_to_project_ops` if OpenQASM 2.0/3.0 text is pasted.
     """
+    stripped_head = dsl.lstrip()
+    if (
+        stripped_head.upper().startswith("OPENQASM")
+        or re.search(r"^\s*(include\s+\"|qreg\s+\w+\s*\[|qubit\s*\[)", dsl, flags=re.MULTILINE)
+    ):
+        return openqasm_to_project_ops(dsl, project)
+
     raw_lines = [ln.split("#", 1)[0].strip() for ln in dsl.splitlines()]
     lines = [ln for ln in raw_lines if ln]
 
@@ -861,25 +1029,81 @@ def dsl_to_project_ops(
     return new_qubits, new_ops, new_vars
 
 
+def _build_register_qubits(n_qubits: int, project: ProjectModel) -> List[QubitSpec]:
+    """Preserve existing qubit specs up to `n_qubits` and lay out any newly added qubits cleanly."""
+    grid_cols = max(1, math.ceil(math.sqrt(n_qubits)))
+    new_qubits: List[QubitSpec] = []
+    for i in range(n_qubits):
+        if i < len(project.qubits):
+            q_copy = project.qubits[i].model_copy()
+            q_copy.id = i
+            new_qubits.append(q_copy)
+        else:
+            if n_qubits <= 8:
+                px, py = round(i * 4.5, 1), 0.0
+            else:
+                r_idx = i // grid_cols
+                c_idx = (i % grid_cols) if (r_idx % 2 == 0) else (grid_cols - 1 - (i % grid_cols))
+                px, py = round(c_idx * 4.5, 1), round(r_idx * 4.5, 1)
+            new_qubits.append(
+                QubitSpec(
+                    id=i,
+                    name=f"q{i}",
+                    color=QUBIT_COLORS[i % len(QUBIT_COLORS)],
+                    pos_x=px,
+                    pos_y=py,
+                )
+            )
+    return new_qubits
+
+
 def project_to_openqasm3(project: ProjectModel) -> str:
-    """Export the project circuit as OpenQASM 3.0 text."""
+    """Export the project circuit as standard, round-trippable OpenQASM 3.0 text."""
     n = len(project.qubits)
-    lines = [
-        "OPENQASM 3.0;",
-        'include "stdgates.inc";',
-        f"qubit[{n}] q;",
-        f"bit[{n}] c;",
-        "",
-    ]
-    vars_map = project.variables
     ordered = [
         op for _, op in sorted(enumerate(project.operations), key=lambda pair: (pair[1].step, pair[0]))
     ]
+    used_gate_names = {op.name.upper() for op in ordered if op.kind == "gate"}
+
+    lines = [
+        "OPENQASM 3.0;",
+        'include "stdgates.inc";',
+    ]
+    # Emit standard helper gate definitions so external QASM 3 tools (Qiskit/Braket) can run native gates too
+    if "RXY" in used_gate_names:
+        lines.append("gate rxy(theta, phi) a { rz(-phi) a; rx(theta) a; rz(phi) a; }")
+    if "ISWAP" in used_gate_names:
+        lines.append("gate iswap a, b { s a; s b; h a; cx a, b; cx b, a; h b; }")
+    if "SQISWAP" in used_gate_names:
+        lines.append("gate sqiswap a, b { rx(pi/2) a; cx a, b; rx(-pi/4) a; rz(pi/4) b; cx a, b; rx(-pi/4) a; }")
+
+    for vname, vval in project.variables.items():
+        if re.match(r"^[A-Za-z_]\w*$", vname):
+            lines.append(f"float[64] {vname} = {float(vval):.6g};")
+
+    lines.append(f"qubit[{n}] q;")
+    lines.append(f"bit[{n}] c;")
+    lines.append("")
+
+    vars_map = project.variables
     qasm_map = {
         "H": "h", "X": "x", "Y": "y", "Z": "z", "S": "s", "SDG": "sdg",
-        "T": "t", "TDG": "tdg", "SX": "sx", "RX": "rx", "RY": "ry", "RZ": "rz",
-        "CNOT": "cx", "CX": "cx", "CZ": "cz", "SWAP": "swap", "CCX": "ccx",
+        "T": "t", "TDG": "tdg", "SX": "sx", "SXDG": "sxdg",
+        "RX": "rx", "RY": "ry", "RZ": "rz", "P": "p", "U3": "u", "U": "u",
+        "RXY": "rxy", "RXX": "rxx", "RYY": "ryy", "RZZ": "rzz", "MS": "rxx",
+        "CNOT": "cx", "CX": "cx", "CY": "cy", "CZ": "cz",
+        "SWAP": "swap", "ISWAP": "iswap", "SQISWAP": "sqiswap",
+        "CCX": "ccx", "TOFFOLI": "ccx", "CCZ": "ccz",
     }
+
+    def _fmt_param(p: Any) -> str:
+        if isinstance(p, (int, float)):
+            return f"{float(p):.6g}"
+        s = str(p).strip()
+        if s in vars_map and re.match(r"^[A-Za-z_]\w*$", s):
+            return s
+        return f"{eval_math_expr(s, vars_map):.6g}"
+
     for op in ordered:
         if op.kind == "measure":
             for q in op.qubits:
@@ -887,14 +1111,354 @@ def project_to_openqasm3(project: ProjectModel) -> str:
         elif op.kind == "gate":
             uname = op.name.upper()
             q_args = ", ".join(f"q[{q}]" for q in op.qubits)
-            p_vals = _resolve_op_params(op.params, vars_map)
             g_id = qasm_map.get(uname, uname.lower())
-            if p_vals:
-                p_str = ", ".join(f"{p:.6g}" for p in p_vals)
+            if uname == "MS" and not op.params:
+                lines.append(f"rxx(1.570796) {q_args};")
+            elif op.params:
+                p_str = ", ".join(_fmt_param(p) for p in op.params)
                 lines.append(f"{g_id}({p_str}) {q_args};")
             else:
                 lines.append(f"{g_id} {q_args};")
     return "\n".join(lines)
+
+
+def _split_top_level_commas(s: str) -> List[str]:
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur).strip())
+    return [p for p in parts if p]
+
+
+def openqasm_to_project_ops(
+    qasm: str,
+    project: ProjectModel,
+) -> Tuple[List[QubitSpec], List[CircuitOpModel], Dict[str, float]]:
+    """
+    Parse OpenQASM 2.0 or OpenQASM 3.0 source code into Quantum Studio's visual
+    (QubitSpec list, ASAP-scheduled CircuitOpModel list, symbolic variables dict).
+    """
+    # 1. Strip /* ... */ block comments and // or # line comments
+    cleaned = re.sub(r"/\*.*?\*/", "", qasm, flags=re.DOTALL)
+    clean_lines: List[str] = []
+    for raw_ln in cleaned.splitlines():
+        ln = raw_ln.split("//", 1)[0].split("#", 1)[0].strip()
+        if ln:
+            clean_lines.append(ln)
+    src = "\n".join(clean_lines)
+
+    # 2. Extract `gate name[(params)] qargs { body }` macro blocks and remaining top-level text
+    macros: Dict[str, Tuple[List[str], List[str], List[str]]] = {}
+    top_chunks: List[str] = []
+    pos = 0
+    gate_hdr_re = re.compile(r"\bgate\s+([A-Za-z_]\w*)\s*(?:\(([^)]*)\))?\s*([^{]+)\{", re.MULTILINE)
+    while pos < len(src):
+        m = gate_hdr_re.search(src, pos)
+        if not m:
+            top_chunks.append(src[pos:])
+            break
+        top_chunks.append(src[pos : m.start()])
+        g_name = m.group(1).strip()
+        p_names = [x.strip() for x in (m.group(2) or "").split(",") if x.strip()]
+        q_names = [x.strip() for x in m.group(3).split(",") if x.strip()]
+        brace_depth = 1
+        cur_idx = m.end()
+        while cur_idx < len(src) and brace_depth > 0:
+            if src[cur_idx] == "{":
+                brace_depth += 1
+            elif src[cur_idx] == "}":
+                brace_depth -= 1
+            cur_idx += 1
+        body_str = src[m.end() : max(m.end(), cur_idx - 1)]
+        body_stmts = [st.strip() for st in body_str.split(";") if st.strip()]
+        macros[g_name.lower()] = (p_names, q_names, body_stmts)
+        pos = cur_idx
+
+    statements = [st.strip() for st in " ".join(top_chunks).split(";") if st.strip()]
+
+    reg_map: Dict[str, List[int]] = {}
+    next_q = 0
+    new_vars: Dict[str, float] = dict(project.variables)
+    custom_gate_names = {cg.name.upper(): cg.name for cg in project.custom_gates}
+
+    native_qasm_map: Dict[str, str] = {
+        "h": "H", "x": "X", "y": "Y", "z": "Z",
+        "s": "S", "sdg": "SDG", "t": "T", "tdg": "TDG",
+        "sx": "SX", "sxdg": "SXDG",
+        "rx": "RX", "ry": "RY", "rz": "RZ", "p": "RZ", "u1": "RZ",
+        "rxy": "RXY", "rxx": "RXX", "ryy": "RYY", "rzz": "RZZ", "ms": "MS",
+        "u": "U3", "u3": "U3",
+        "cx": "CNOT", "cnot": "CNOT", "CX": "CNOT",
+        "cy": "CY", "cz": "CZ", "swap": "SWAP", "iswap": "ISWAP", "sqiswap": "SQISWAP",
+        "ecr": "ECR", "ccx": "CCX", "toffoli": "CCX", "ccz": "CCZ",
+    }
+    single_q_gates = {
+        "H", "X", "Y", "Z", "S", "SDG", "T", "TDG", "SX", "SXDG", "RX", "RY", "RZ", "RXY", "U3",
+    }
+    math_reserved = {
+        "pi", "e", "tau", "sin", "cos", "tan", "sqrt", "asin", "acos", "atan", "exp",
+    }
+
+    # Pass 1: Process register and variable declarations
+    exec_stmts: List[str] = []
+    for st in statements:
+        low = st.lower()
+        if low.startswith("openqasm") or low.startswith("include ") or low.startswith("barrier"):
+            continue
+        if low.startswith("creg ") or low.startswith("bit[") or re.match(r"^bit\s+\w+$", low):
+            continue
+        # OpenQASM 3: qubit[4] q; or qubit q0;
+        m_q3 = re.match(r"^qubit\s*(?:\[\s*(\d+)\s*\])?\s+([A-Za-z_]\w*)$", st)
+        if m_q3:
+            sz = int(m_q3.group(1)) if m_q3.group(1) else 1
+            rname = m_q3.group(2)
+            reg_map[rname] = list(range(next_q, next_q + sz))
+            next_q += sz
+            continue
+        # OpenQASM 2: qreg q[4];
+        m_q2 = re.match(r"^qreg\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]$", st)
+        if m_q2:
+            rname = m_q2.group(1)
+            sz = int(m_q2.group(2))
+            reg_map[rname] = list(range(next_q, next_q + sz))
+            next_q += sz
+            continue
+        # OpenQASM 3 scalar variable: [input] float[64] theta [= 1.57]; or angle phi = pi/2;
+        m_var = re.match(
+            r"^(?:input\s+)?(?:float|angle)(?:\s*\[\s*\d+\s*\])?\s+([A-Za-z_]\w*)(?:\s*=\s*(.+))?$",
+            st,
+        )
+        if m_var:
+            vname = m_var.group(1)
+            vexpr = m_var.group(2)
+            if vexpr is not None:
+                new_vars[vname] = round(eval_math_expr(vexpr.strip(), new_vars), 6)
+            elif vname not in new_vars:
+                new_vars[vname] = round(math.pi / 4.0, 4)
+            continue
+        exec_stmts.append(st)
+
+    def _resolve_qarg(tok: str, local_qmap: Optional[Dict[str, List[int]]] = None) -> List[int]:
+        nonlocal next_q
+        t = tok.strip()
+        if local_qmap and t in local_qmap:
+            return local_qmap[t]
+        if t.startswith("$") and t[1:].isdigit():
+            q_id = int(t[1:])
+            next_q = max(next_q, q_id + 1)
+            return [q_id]
+        m_idx = re.match(r"^([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]$", t)
+        if m_idx:
+            rname, idx = m_idx.group(1), int(m_idx.group(2))
+            if rname not in reg_map:
+                reg_map[rname] = list(range(next_q, next_q + idx + 1))
+                next_q += idx + 1
+            elif idx >= len(reg_map[rname]):
+                extra = idx + 1 - len(reg_map[rname])
+                reg_map[rname].extend(range(next_q, next_q + extra))
+                next_q += extra
+            return [reg_map[rname][idx]]
+        if t in reg_map:
+            return list(reg_map[t])
+        raise ValueError(f"OpenQASM 未知量子比特参数: '{t}'")
+
+    def _parse_param_expr(expr: str, local_pmap: Optional[Dict[str, Any]] = None) -> Union[float, str]:
+        s = expr.strip()
+        if local_pmap:
+            for pk, pv in local_pmap.items():
+                s = re.sub(rf"\b{re.escape(pk)}\b", f"({pv})", s)
+        # Simplify trivial `(theta)` -> `theta`
+        m_sym = re.match(r"^\(?\s*([A-Za-z_]\w*)\s*\)?$", s)
+        if m_sym and m_sym.group(1).lower() not in math_reserved:
+            vname = m_sym.group(1)
+            if vname not in new_vars:
+                new_vars[vname] = round(math.pi / 4.0, 4)
+            return vname
+        idents = [tok for tok in re.findall(r"[A-Za-z_]\w*", s) if tok.lower() not in math_reserved]
+        if not idents:
+            return round(eval_math_expr(s, {}), 6)
+        for vname in idents:
+            if vname not in new_vars:
+                new_vars[vname] = round(math.pi / 4.0, 4)
+        return s
+
+    raw_emitted: List[Tuple[str, str, List[int], List[Any]]] = []  # (kind, name, qubits, params)
+
+    def _process_stmt(
+        st: str,
+        local_pmap: Optional[Dict[str, Any]] = None,
+        local_qmap: Optional[Dict[str, List[int]]] = None,
+        depth: int = 0,
+    ) -> None:
+        if depth > 8:
+            raise ValueError("OpenQASM 自定义 gate 嵌套过深或存在递归")
+        s = st.strip()
+        if not s or s.lower().startswith("barrier") or s.lower().startswith("reset"):
+            return
+
+        # Measurements:
+        # 1) c[0] = measure q[0]; or c = measure q;
+        m_m3 = re.match(r"^[A-Za-z_]\w*(?:\s*\[\s*\d+\s*\])?\s*=\s*measure\s+(.+)$", s, flags=re.IGNORECASE)
+        if m_m3:
+            qs = _resolve_qarg(m_m3.group(1), local_qmap)
+            raw_emitted.append(("measure", "MEASURE", qs, []))
+            return
+        # 2) measure q[0] -> c[0]; or measure q -> c; or measure q[0];
+        m_m2 = re.match(r"^measure\s+([^\-;]+?)(?:\s*->\s*.+)?$", s, flags=re.IGNORECASE)
+        if m_m2:
+            qs = _resolve_qarg(m_m2.group(1), local_qmap)
+            raw_emitted.append(("measure", "MEASURE", qs, []))
+            return
+
+        # Gate call: gname[(params)] qarg1, qarg2...
+        m_g = re.match(r"^([A-Za-z_]\w*)\s*(?:\((.*)\))?\s+(.+)$", s)
+        if not m_g:
+            raise ValueError(f"OpenQASM 语法无法解析: '{s}'")
+        g_raw = m_g.group(1).strip()
+        g_low = g_raw.lower()
+        p_raw = m_g.group(2)
+        q_raw = m_g.group(3)
+
+        p_list = [_parse_param_expr(tok, local_pmap) for tok in _split_top_level_commas(p_raw)] if p_raw else []
+        q_groups = [_resolve_qarg(qt, local_qmap) for qt in _split_top_level_commas(q_raw)]
+        if not q_groups:
+            raise ValueError(f"OpenQASM 门调用缺少量子比特: '{s}'")
+
+        if g_low in ("id", "i", "nop"):
+            return
+
+        # Broadcast across register arguments if needed (e.g. `h q;` or `cx a, b;`)
+        bcast_len = max(len(qg) for qg in q_groups)
+        for qg in q_groups:
+            if len(qg) not in (1, bcast_len):
+                raise ValueError(f"OpenQASM 寄存器维度不匹配: '{s}'")
+
+        for b_idx in range(bcast_len):
+            qs = [qg[b_idx] if len(qg) > 1 else qg[0] for qg in q_groups]
+
+            # Built-in / standard QASM gates take priority over exported compatibility stubs
+            if g_low == "u2" and len(p_list) == 2:
+                raw_emitted.append(("gate", "U3", qs, [round(math.pi / 2.0, 6), p_list[0], p_list[1]]))
+            elif g_low in ("cp", "cu1", "crz") and len(qs) == 2 and len(p_list) == 1:
+                lam = p_list[0]
+                half = round(lam / 2.0, 6) if isinstance(lam, (int, float)) else f"({lam})/2"
+                neg_half = round(-lam / 2.0, 6) if isinstance(lam, (int, float)) else f"-({lam})/2"
+                if g_low in ("cp", "cu1"):
+                    raw_emitted.append(("gate", "RZ", [qs[0]], [half]))
+                raw_emitted.append(("gate", "RZ", [qs[1]], [half]))
+                raw_emitted.append(("gate", "CNOT", [qs[0], qs[1]], []))
+                raw_emitted.append(("gate", "RZ", [qs[1]], [neg_half]))
+                raw_emitted.append(("gate", "CNOT", [qs[0], qs[1]], []))
+            elif g_low == "ch" and len(qs) == 2:
+                raw_emitted.append(("gate", "RY", [qs[1]], [round(math.pi / 4.0, 6)]))
+                raw_emitted.append(("gate", "CNOT", [qs[0], qs[1]], []))
+                raw_emitted.append(("gate", "RY", [qs[1]], [round(-math.pi / 4.0, 6)]))
+            elif g_low in native_qasm_map:
+                mapped = native_qasm_map[g_low]
+                raw_emitted.append(("gate", mapped, qs, list(p_list)))
+            elif g_raw.upper() in custom_gate_names:
+                raw_emitted.append(("gate", custom_gate_names[g_raw.upper()], qs, list(p_list)))
+            elif g_low in macros:
+                m_pnames, m_qnames, m_body = macros[g_low]
+                if len(m_qnames) != len(qs):
+                    raise ValueError(f"自定义门 '{g_raw}' 需要 {len(m_qnames)} 个比特，实际传入 {len(qs)} 个")
+                sub_pmap = {pn: pv for pn, pv in zip(m_pnames, p_list)}
+                sub_qmap = {qn: [qv] for qn, qv in zip(m_qnames, qs)}
+                for body_st in m_body:
+                    _process_stmt(body_st, sub_pmap, sub_qmap, depth + 1)
+            else:
+                raise ValueError(f"不支持的 OpenQASM 量子门: '{g_raw}'")
+
+    for st in exec_stmts:
+        _process_stmt(st)
+
+    n_qubits = max(next_q, len(project.qubits) if next_q == 0 else next_q, 1)
+    new_qubits = _build_register_qubits(n_qubits, project)
+
+    # Schedule onto visual columns (merging simultaneous single-qubit measurements cleanly)
+    qubit_col = [0] * n_qubits
+    new_ops: List[CircuitOpModel] = []
+    pending_meas_step: Optional[int] = None
+    pending_meas_op: Optional[CircuitOpModel] = None
+
+    for idx, (kind, name, qs, params) in enumerate(raw_emitted):
+        if kind == "measure":
+            col = max(qubit_col[q] for q in qs)
+            if (
+                pending_meas_op is not None
+                and pending_meas_step == col
+                and set(qs).isdisjoint(pending_meas_op.qubits)
+            ):
+                pending_meas_op.qubits.extend(qs)
+            else:
+                # If all previously unmeasured qubits can align at the final measurement barrier, align them
+                col = max(qubit_col) if len(qs) == 1 and idx >= len(raw_emitted) - n_qubits else col
+                if (
+                    pending_meas_op is not None
+                    and pending_meas_step == col
+                    and set(qs).isdisjoint(pending_meas_op.qubits)
+                ):
+                    pending_meas_op.qubits.extend(qs)
+                else:
+                    pending_meas_op = CircuitOpModel(
+                        id=f"qasm_m_{idx}_{uuid.uuid4().hex[:5]}",
+                        step=col,
+                        kind="measure",
+                        name="MEASURE",
+                        qubits=list(qs),
+                    )
+                    pending_meas_step = col
+                    new_ops.append(pending_meas_op)
+            for q in qs:
+                qubit_col[q] = col + 1
+            continue
+
+        pending_meas_op = None
+        pending_meas_step = None
+        if len(qs) == 1 and name in single_q_gates:
+            q0 = qs[0]
+            col = qubit_col[q0]
+            new_ops.append(
+                CircuitOpModel(
+                    id=f"qasm_{idx}_{uuid.uuid4().hex[:5]}",
+                    step=col,
+                    kind="gate",
+                    name=name,
+                    qubits=[q0],
+                    params=params,
+                )
+            )
+            qubit_col[q0] = col + 1
+        else:
+            span = range(min(qs), max(qs) + 1)
+            col = max(qubit_col[q] for q in span)
+            new_ops.append(
+                CircuitOpModel(
+                    id=f"qasm_{idx}_{uuid.uuid4().hex[:5]}",
+                    step=col,
+                    kind="gate",
+                    name=name,
+                    qubits=list(qs),
+                    params=params,
+                )
+            )
+            for q in span:
+                qubit_col[q] = col + 1
+
+    return new_qubits, new_ops, new_vars
 
 
 # ---------------------------------------------------------------------------
@@ -1235,6 +1799,158 @@ def execute_unitary_synthesis(req: SynthesizeUnitaryRequest) -> Dict[str, Any]:
     }
 
 
+def parse_sparse_pauli_terms(
+    expr: str,
+    num_qubits: int,
+) -> List[Tuple[float, Tuple[Tuple[int, str], ...]]]:
+    """
+    Parse a Hermitian Pauli Hamiltonian string into sparse `(coeff, ((q_idx, 'X'|'Y'|'Z'), ...))` terms.
+    Supports both:
+      - Indexed sparse form (for arbitrary N): `-1.0 * Z0 Z1 - 0.5 * X0 - 0.5 * X1`, `0.5*X0*X1 + 0.5*Y0*Y1 + 1.5*I`
+      - Dense N-qubit Pauli strings: `-1.0*ZZ - 0.5*XI - 0.5*IX`
+    """
+    s = expr.strip()
+    if not s:
+        return []
+
+    # Split top-level additive terms while respecting parentheses (e.g. `(1/2)*Z0*Z1`)
+    chunks: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for idx, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch in "+-" and depth == 0 and idx > 0:
+            prev_non_space = next((s[j] for j in range(idx - 1, -1, -1) if not s[j].isspace()), "")
+            if prev_non_space not in ("*", "/", "(", "e", "E", "+", "-"):
+                part = "".join(cur).strip()
+                if part:
+                    chunks.append(part)
+                cur = [ch]
+                continue
+            cur.append(ch)
+        else:
+            cur.append(ch)
+    if cur:
+        part = "".join(cur).strip()
+        if part:
+            chunks.append(part)
+
+    merged: Dict[Tuple[Tuple[int, str], ...], float] = {}
+    indexed_re = re.compile(r"\b([IXYZixyz])_?(\d+)\b")
+
+    for raw_term in chunks:
+        t = raw_term.strip()
+        if not t:
+            continue
+        sign = 1.0
+        while t and t[0] in "+-":
+            if t[0] == "-":
+                sign *= -1.0
+            t = t[1:].strip()
+        if not t:
+            continue
+
+        # Check if term uses indexed Pauli tokens like Z0, X_1, Y12
+        idx_matches = list(indexed_re.finditer(t))
+        if idx_matches:
+            first_pos = idx_matches[0].start()
+            coeff_part = t[:first_pos].strip().rstrip("*").strip()
+            coeff = sign * (eval_math_expr(coeff_part, {}) if coeff_part else 1.0)
+            # Verify remainder contains only indexed Paulis, whitespace, and '*'
+            rem = indexed_re.sub("", t[first_pos:])
+            if rem.replace("*", "").strip():
+                raise ValueError(f"无法解析泡利项 '{raw_term}' 中的多余符号 '{rem.strip()}'")
+            q_paulis: Dict[int, str] = {}
+            phase_sign = 1.0
+            for m in idx_matches:
+                p_ch = m.group(1).upper()
+                q_id = int(m.group(2))
+                if q_id < 0 or q_id >= num_qubits:
+                    raise ValueError(f"泡利算符 '{m.group(0)}' 超出当前比特范围 (0 ~ {num_qubits - 1})")
+                if p_ch == "I":
+                    continue
+                if q_id not in q_paulis:
+                    q_paulis[q_id] = p_ch
+                elif q_paulis[q_id] == p_ch:
+                    del q_paulis[q_id]  # P * P = I
+                else:
+                    raise ValueError(f"同一项中比特 q{q_id} 重复出现非对易泡利算符 '{q_paulis[q_id]}' 与 '{p_ch}'")
+            key = tuple(sorted(q_paulis.items()))
+            merged[key] = merged.get(key, 0.0) + phase_sign * coeff
+            continue
+
+        # Check dense Pauli word (e.g. `0.5 * XX`, `-ZZ`, `I`, or pure constant `1.25`)
+        m_dense = re.match(r"^(?:(.+?)\s*\*\s*)?([IXYZixyz]+)$", t)
+        if m_dense:
+            coeff_part = (m_dense.group(1) or "").strip()
+            word = m_dense.group(2).upper()
+            coeff = sign * (eval_math_expr(coeff_part, {}) if coeff_part else 1.0)
+            if set(word) == {"I"} and (len(word) == 1 or len(word) == num_qubits):
+                merged[()] = merged.get((), 0.0) + coeff
+                continue
+            if len(word) != num_qubits:
+                raise ValueError(
+                    f"稠密泡利串 '{word}' 长度为 {len(word)}，需等于寄存器比特数 {num_qubits}，或改用下标写法如 'Z0 Z1'"
+                )
+            key = tuple((q_idx, ch) for q_idx, ch in enumerate(word) if ch != "I")
+            merged[key] = merged.get(key, 0.0) + coeff
+            continue
+
+        # Pure scalar constant offset (e.g. `+ 1.5`)
+        coeff = sign * eval_math_expr(t, {})
+        merged[()] = merged.get((), 0.0) + coeff
+
+    return [(float(c), ops) for ops, c in merged.items() if abs(c) > 1e-15]
+
+
+def evaluate_result_hamiltonian(
+    res: EvolutionResult,
+    pauli_terms: Sequence[Tuple[float, Tuple[Tuple[int, str], ...]]],
+    num_qubits: int,
+) -> float:
+    """Evaluate <H> across QuTiP, Kraus, Trajectory (exact/MC), and Stim backends."""
+    if not pauli_terms:
+        return 0.0
+    if "observable_expectation" in res.metadata:
+        return float(res.metadata["observable_expectation"])  # type: ignore[arg-type]
+
+    last_step = res.steps[-1]
+    if last_step.density_matrix is not None:
+        return evaluate_pauli_sum_density_matrix(last_step.density_matrix, pauli_terms, num_qubits)
+    if last_step.ideal_statevector is not None and (res.final_purity or 0.0) > 0.999999:
+        return evaluate_pauli_sum_statevector(last_step.ideal_statevector, pauli_terms, num_qubits)
+
+    # Fallback for large-N Stim stabilizer / sampling results:
+    # 1-body terms use exact reduced Bloch vectors; multi-qubit Z terms use empirical/final bitstrings.
+    emp_probs = res.empirical_probabilities()
+    total = 0.0
+    for coeff, ops in pauli_terms:
+        if not ops:
+            total += coeff
+        elif len(ops) == 1:
+            q_id, p_ch = ops[0]
+            bx, by, bz = last_step.bloch_vectors.get(q_id, (0.0, 0.0, 0.0))
+            val = bx if p_ch == "X" else (by if p_ch == "Y" else bz)
+            total += coeff * float(val)
+        elif all(p_ch == "Z" for _, p_ch in ops) and emp_probs:
+            z_exp = 0.0
+            q_indices = [q_id for q_id, _ in ops]
+            for bstr, prob in emp_probs.items():
+                if len(bstr) > max(q_indices):
+                    parity = 1.0
+                    for qi in q_indices:
+                        if bstr[qi] == "1":
+                            parity = -parity
+                    z_exp += prob * parity
+            total += coeff * z_exp
+    return float(total)
+
+
 def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
     project = req.project
     base_hw = build_hardware_model(project)
@@ -1247,6 +1963,9 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         eff_backend = "trajectory" if n_q <= 24 else "stim"
     elif eff_backend == "trajectory" and n_q > 24:
         eff_backend = "stim"
+
+    ham_clean = (req.hamiltonian_str or "").strip()
+    parsed_ham = parse_sparse_pauli_terms(ham_clean, n_q) if ham_clean else []
 
     init_psi = (
         build_initial_statevector(project.qubits)
@@ -1262,7 +1981,9 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         n_pts = max(2, min(150, int(req.x_points)))
         x_vals = np.linspace(float(req.x_start), float(req.x_stop), n_pts)
 
-        def _eval_1d_point(args: Tuple[int, float]) -> Tuple[Dict[str, float], float, float, List[float]]:
+        def _eval_1d_point(
+            args: Tuple[int, float],
+        ) -> Tuple[Dict[str, float], float, float, List[float], Optional[float]]:
             idx, xv = args
             curr_vars = dict(project.variables)
             curr_hw = base_hw
@@ -1280,11 +2001,19 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
                 seed=42 + idx,
                 initial_state=init_psi,
                 initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
+                observable_terms=parsed_ham if parsed_ham else None,
             )
             fid = round(float(res.final_fidelity if res.final_fidelity is not None else 1.0), 6)
             pur = round(float(res.final_purity if res.final_purity is not None else 1.0), 6)
             bv = res.steps[-1].bloch_vectors.get(obs_q, (0.0, 0.0, 0.0))
-            return res.final_probabilities, fid, pur, [round(float(bv[0]), 5), round(float(bv[1]), 5), round(float(bv[2]), 5)]
+            en = round(evaluate_result_hamiltonian(res, parsed_ham, n_q), 6) if parsed_ham else None
+            return (
+                res.final_probabilities,
+                fid,
+                pur,
+                [round(float(bv[0]), 5), round(float(bv[1]), 5), round(float(bv[2]), 5)],
+                en,
+            )
 
         tasks_1d = [(idx, float(xv)) for idx, xv in enumerate(x_vals)]
         if max_workers > 1 and n_pts >= 6 and n_q <= 16:
@@ -1297,7 +2026,7 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             tracked_bstrs = [format(i, f"0{n_q}b") for i in range(1 << n_q)]
         else:
             max_by_bstr: Dict[str, float] = {"0" * n_q: 0.0, "1" * n_q: 0.0}
-            for raw_pmap, _, _, _ in rows_1d:
+            for raw_pmap, _, _, _, _ in rows_1d:
                 for k, v in raw_pmap.items():
                     if v > max_by_bstr.get(k, 0.0):
                         max_by_bstr[k] = float(v)
@@ -1308,12 +2037,15 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         fids: List[float] = []
         purs: List[float] = []
         bloch_obs: List[List[float]] = []
-        for raw_pmap, fid, pur, bv_list in rows_1d:
+        energies: List[float] = []
+        for raw_pmap, fid, pur, bv_list, en in rows_1d:
             for b in tracked_bstrs:
                 pops[b].append(round(float(raw_pmap.get(b, 0.0)), 6))
             fids.append(fid)
             purs.append(pur)
             bloch_obs.append(bv_list)
+            if en is not None:
+                energies.append(en)
 
         return {
             "mode": "1d",
@@ -1322,11 +2054,13 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             "backend": eff_backend,
             "observed_qubit": obs_q,
             "observed_qubit_name": obs_q_name,
+            "hamiltonian_str": ham_clean if parsed_ham else None,
             "x_values": np.round(x_vals, 5).tolist(),
             "populations": pops,
             "fidelities": fids,
             "purities": purs,
             "bloch_q0": bloch_obs,
+            "energies": energies if parsed_ham else None,
         }
 
     # 2D Sweep (Parallelized across grid points)
@@ -1341,7 +2075,9 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         else ("0" * n_q)
     )
 
-    def _eval_2d_point(args: Tuple[int, int, float, float]) -> Tuple[int, int, float, float, float]:
+    def _eval_2d_point(
+        args: Tuple[int, int, float, float],
+    ) -> Tuple[int, int, float, float, float, float]:
         iy, ix, xv, yv = args
         curr_vars = dict(project.variables)
         curr_hw = base_hw
@@ -1360,11 +2096,13 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             seed=100 + iy * nx + ix,
             initial_state=init_psi,
             initial_state_labels=init_labels if eff_backend in ("stim", "stim_qutip") else None,
+            observable_terms=parsed_ham if parsed_ham else None,
         )
         p_val = float(res.final_probabilities.get(target_bstr, 0.0))
         f_val = float(res.final_fidelity if res.final_fidelity is not None else 1.0)
         z_val = float(res.steps[-1].bloch_vectors.get(obs_q, (0.0, 0.0, 0.0))[2])
-        return iy, ix, p_val, f_val, z_val
+        e_val = evaluate_result_hamiltonian(res, parsed_ham, n_q) if parsed_ham else 0.0
+        return iy, ix, p_val, f_val, z_val, e_val
 
     tasks_2d = [
         (iy, ix, float(xv), float(yv))
@@ -1380,10 +2118,12 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
     pop_grid = np.zeros((ny, nx), dtype=np.float64)
     fid_grid = np.zeros((ny, nx), dtype=np.float64)
     z_grid = np.zeros((ny, nx), dtype=np.float64)
-    for iy, ix, p_val, f_val, z_val in rows_2d:
+    en_grid = np.zeros((ny, nx), dtype=np.float64)
+    for iy, ix, p_val, f_val, z_val, e_val in rows_2d:
         pop_grid[iy, ix] = p_val
         fid_grid[iy, ix] = f_val
         z_grid[iy, ix] = z_val
+        en_grid[iy, ix] = e_val
 
     return {
         "mode": "2d",
@@ -1395,9 +2135,11 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
         "observed_qubit": obs_q,
         "observed_qubit_name": obs_q_name,
         "target_bitstring": target_bstr,
+        "hamiltonian_str": ham_clean if parsed_ham else None,
         "x_values": np.round(x_vals, 5).tolist(),
         "y_values": np.round(y_vals, 5).tolist(),
         "population_grid": np.round(pop_grid, 5).tolist(),
         "fidelity_grid": np.round(fid_grid, 5).tolist(),
         "z0_grid": np.round(z_grid, 5).tolist(),
+        "energy_grid": np.round(en_grid, 5).tolist() if parsed_ham else None,
     }

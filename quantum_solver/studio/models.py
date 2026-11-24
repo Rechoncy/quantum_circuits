@@ -144,6 +144,11 @@ class DslSyncRequest(BaseModel):
     project: ProjectModel
 
 
+class QasmSyncRequest(BaseModel):
+    qasm: str
+    project: ProjectModel
+
+
 class OptimizeRequest(BaseModel):
     project: ProjectModel
     evaluate_noisy_fidelity: bool = True
@@ -176,6 +181,7 @@ class SweepRequest(BaseModel):
     y_points: int = 10
     target_bitstring: Optional[str] = None
     observed_qubit: int = 0
+    hamiltonian_str: Optional[str] = None
     backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "qutip"
 
 

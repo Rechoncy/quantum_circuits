@@ -7,12 +7,13 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
-[assembly: AssemblyTitle("Quantum Studio v2.0.0 Setup")]
-[assembly: AssemblyDescription("Quantum Studio v2.0.0 Self-Contained Desktop Installer (with Embedded Python 3.13 + QuTiP + Stim)")]
+[assembly: AssemblyTitle("Quantum Studio v2.1.0 Setup")]
+[assembly: AssemblyDescription("Quantum Studio v2.1.0 Self-Contained Desktop Installer & Uninstaller (Embedded Python 3.13 + QuTiP + Trajectory + Stim)")]
 [assembly: AssemblyProduct("Quantum Studio v2")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 
 namespace QuantumStudioSetup
 {
@@ -92,7 +93,7 @@ namespace QuantumStudioSetup
 
         public SetupForm(string defaultDir)
         {
-            Text = "Quantum Studio v2.0.0 安装程序";
+            Text = "Quantum Studio v2.1.0 安装程序";
             Size = new Size(560, 395);
             MinimumSize = new Size(560, 395);
             MaximumSize = new Size(560, 395);
@@ -131,7 +132,7 @@ namespace QuantumStudioSetup
 
             Label titleLbl = new Label
             {
-                Text = "Quantum Studio v2.0.0",
+                Text = "Quantum Studio v2.1.0",
                 ForeColor = Color.White,
                 Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold),
                 Location = new Point(80, 14),
@@ -141,7 +142,7 @@ namespace QuantumStudioSetup
 
             Label subLbl = new Label
             {
-                Text = "多后端量子线路演化求解、硬件感知最优门综合与 AI 线路设计工作台（内置 Python 3.13 环境）",
+                Text = "500+Q 多后端量子演化求解、OpenQASM 3 双向编译、变分能量景观与 AI 线路工作台",
                 ForeColor = Color.FromArgb(186, 230, 253),
                 Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular),
                 Location = new Point(82, 43),
@@ -315,7 +316,7 @@ namespace QuantumStudioSetup
                         bool launchNow = _chkLaunch.Checked;
                         MessageBox.Show(
                             this,
-                            "Quantum Studio v2.0.0 已成功安装至:\n" + targetDir,
+                            "Quantum Studio v2.1.0 已成功安装至:\n" + targetDir + "\n\n（如需卸载，可在 Windows「设置 → 已安装的应用」或安装目录运行 Uninstall.exe）",
                             "安装成功",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information
@@ -367,6 +368,7 @@ namespace QuantumStudioSetup
     internal static class InstallerEngine
     {
         private const string MAGIC = "QSTUDIO2";
+        internal const string UNINSTALL_REG_KEY = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\QuantumStudio";
 
         public static bool FindAppendedPayload(FileStream fs, out long offset, out long length)
         {
@@ -393,12 +395,28 @@ namespace QuantumStudioSetup
             Action<int, string> onProgress)
         {
             string selfExe = Application.ExecutablePath;
+            long totalExtractedBytes = 0;
+            byte[] stubBytes = null;
             using (FileStream fs = new FileStream(selfExe, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 long offset, length;
                 if (!FindAppendedPayload(fs, out offset, out length))
                 {
                     throw new InvalidOperationException("安装包未包含内嵌数据负载 (QSTUDIO2 footer missing)。");
+                }
+
+                // Read pure WinForms stub [0..offset) to emit standalone Uninstall.exe (~28 KB)
+                if (offset > 0 && offset < 2 * 1024 * 1024)
+                {
+                    fs.Seek(0, SeekOrigin.Begin);
+                    stubBytes = new byte[(int)offset];
+                    int got = 0;
+                    while (got < stubBytes.Length)
+                    {
+                        int n = fs.Read(stubBytes, got, stubBytes.Length - got);
+                        if (n <= 0) break;
+                        got += n;
+                    }
                 }
 
                 Directory.CreateDirectory(targetDir);
@@ -426,10 +444,11 @@ namespace QuantumStudioSetup
                         }
 
                         entry.ExtractToFile(destPath, true);
+                        totalExtractedBytes += entry.Length;
 
                         if (onProgress != null && (current % 25 == 0 || current == total))
                         {
-                            int permille = (int)((long)current * 980 / total);
+                            int permille = (int)((long)current * 975 / total);
                             onProgress(permille, string.Format("正在安装 ({0}/{1}): {2}", current, total, entry.Name));
                         }
                     }
@@ -437,7 +456,22 @@ namespace QuantumStudioSetup
             }
 
             string appExe = Path.Combine(targetDir, "QuantumStudio.exe");
+            string uninstallExe = Path.Combine(targetDir, "Uninstall.exe");
             string iconPath = Path.Combine(targetDir, "assets", "quantum_studio.ico");
+
+            if (stubBytes != null && stubBytes.Length > 0)
+            {
+                try
+                {
+                    File.WriteAllBytes(uninstallExe, stubBytes);
+                }
+                catch { }
+            }
+
+            if (createDesktopShortcut || createStartMenuShortcut)
+            {
+                RegisterUninstaller(targetDir, appExe, uninstallExe, iconPath, totalExtractedBytes);
+            }
 
             if (createDesktopShortcut)
             {
@@ -454,6 +488,160 @@ namespace QuantumStudioSetup
             }
 
             if (onProgress != null) onProgress(1000, "安装完成！");
+        }
+
+        private static void RegisterUninstaller(
+            string targetDir,
+            string appExe,
+            string uninstallExe,
+            string iconPath,
+            long sizeBytes)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UNINSTALL_REG_KEY))
+                {
+                    if (key == null) return;
+                    key.SetValue("DisplayName", "Quantum Studio v2.1.0");
+                    key.SetValue("DisplayVersion", "2.1.0");
+                    key.SetValue("Publisher", "Quantum Studio Project");
+                    key.SetValue("InstallLocation", targetDir);
+                    key.SetValue("DisplayIcon", File.Exists(iconPath) ? iconPath : appExe);
+                    key.SetValue("UninstallString", "\"" + uninstallExe + "\" --uninstall");
+                    key.SetValue("QuietUninstallString", "\"" + uninstallExe + "\" --uninstall /S");
+                    key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+                    key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+                    int estKb = (int)Math.Max(1024L, sizeBytes / 1024L);
+                    key.SetValue("EstimatedSize", estKb, RegistryValueKind.DWord);
+                }
+            }
+            catch { }
+        }
+
+        public static int RunUninstall(string explicitDir, bool silent)
+        {
+            string selfExe = Application.ExecutablePath;
+            string targetDir = explicitDir;
+            if (string.IsNullOrEmpty(targetDir))
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(UNINSTALL_REG_KEY, false))
+                    {
+                        if (key != null)
+                        {
+                            targetDir = key.GetValue("InstallLocation") as string;
+                        }
+                    }
+                }
+                catch { }
+            }
+            if (string.IsNullOrEmpty(targetDir))
+            {
+                targetDir = Path.GetDirectoryName(selfExe);
+            }
+            if (string.IsNullOrEmpty(targetDir) || !Directory.Exists(targetDir))
+            {
+                return 0;
+            }
+
+            // Safety guard: only wipe a directory that actually looks like a Quantum Studio install
+            bool hasMarker =
+                File.Exists(Path.Combine(targetDir, "QuantumStudio.exe")) ||
+                File.Exists(Path.Combine(targetDir, "run_studio.py")) ||
+                File.Exists(Path.Combine(targetDir, "Uninstall.exe"));
+            if (!hasMarker)
+            {
+                if (!silent)
+                {
+                    MessageBox.Show("未在目标目录检测到 Quantum Studio 安装文件，已取消卸载。", "卸载提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                return 1;
+            }
+
+            if (!silent)
+            {
+                DialogResult dr = MessageBox.Show(
+                    "确定要卸载 Quantum Studio v2.1.0 并移除快捷方式与安装目录吗？\n\n目录: " + targetDir,
+                    "卸载 Quantum Studio",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question
+                );
+                if (dr != DialogResult.Yes) return 0;
+            }
+
+            // Remove shortcuts & HKCU registry entry
+            try
+            {
+                string dLnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Quantum Studio.lnk");
+                if (File.Exists(dLnk)) File.Delete(dLnk);
+            }
+            catch { }
+            try
+            {
+                string sLnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Quantum Studio.lnk");
+                if (File.Exists(sLnk)) File.Delete(sLnk);
+            }
+            catch { }
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(UNINSTALL_REG_KEY, false))
+                {
+                    string regLoc = key != null ? (key.GetValue("InstallLocation") as string) : null;
+                    if (string.IsNullOrEmpty(explicitDir) ||
+                        string.Equals(regLoc, targetDir, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Registry.CurrentUser.DeleteSubKeyTree(UNINSTALL_REG_KEY, false);
+                    }
+                }
+            }
+            catch { }
+
+            // Delete subdirectories and all files except running selfExe
+            string fullSelf = Path.GetFullPath(selfExe);
+            foreach (string subDir in Directory.GetDirectories(targetDir))
+            {
+                try { Directory.Delete(subDir, true); } catch { }
+            }
+            foreach (string file in Directory.GetFiles(targetDir))
+            {
+                if (!string.Equals(Path.GetFullPath(file), fullSelf, StringComparison.OrdinalIgnoreCase))
+                {
+                    try { File.Delete(file); } catch { }
+                }
+            }
+
+            // Schedule deferred self-deletion if running from inside targetDir
+            if (fullSelf.StartsWith(Path.GetFullPath(targetDir), StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    string cmdArgs = string.Format(
+                        "/C ping 127.0.0.1 -n 2 > nul & del /f /q \"{0}\" & rmdir \"{1}\"",
+                        fullSelf,
+                        Path.GetFullPath(targetDir)
+                    );
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "cmd.exe",
+                        Arguments = cmdArgs,
+                        WindowStyle = ProcessWindowStyle.Hidden,
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    });
+                }
+                catch { }
+            }
+            else
+            {
+                try { Directory.Delete(targetDir, true); } catch { }
+            }
+
+            if (!silent)
+            {
+                MessageBox.Show("Quantum Studio 已成功卸载。", "卸载完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return 0;
         }
 
         private static void CreateShortcut(string lnkPath, string targetExe, string workDir, string iconPath)
@@ -493,6 +681,8 @@ namespace QuantumStudioSetup
             );
 
             bool silent = false;
+            bool uninstall = Path.GetFileName(Application.ExecutablePath)
+                .Equals("Uninstall.exe", StringComparison.OrdinalIgnoreCase);
             string customDir = null;
             bool noShortcuts = false;
 
@@ -503,6 +693,11 @@ namespace QuantumStudioSetup
                 {
                     silent = true;
                 }
+                else if (a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase) ||
+                         a.Equals("/U", StringComparison.OrdinalIgnoreCase))
+                {
+                    uninstall = true;
+                }
                 else if (a.Equals("--no-shortcuts", StringComparison.OrdinalIgnoreCase))
                 {
                     noShortcuts = true;
@@ -511,6 +706,16 @@ namespace QuantumStudioSetup
                 {
                     customDir = a.Substring(3).Trim('"');
                 }
+            }
+
+            if (uninstall)
+            {
+                if (!silent)
+                {
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                }
+                return InstallerEngine.RunUninstall(customDir, silent);
             }
 
             if (silent)

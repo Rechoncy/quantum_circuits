@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..core.gates import PAULI_X, PAULI_Y, PAULI_Z
+from ..core.gates import PAULI_X, PAULI_Y, PAULI_Z, PAULIS_1Q
 from ..core.noise import ReadoutError
 
 
@@ -101,6 +101,93 @@ def compute_statevector_bloch(psi: np.ndarray, num_qubits: int) -> Dict[int, Tup
         rz = float(p0 - p1)
         bloch[q] = (rx, ry, rz)
     return bloch
+
+
+def _kron_pauli_ops(pauli_chars: Sequence[str]) -> np.ndarray:
+    """Build small 2^k x 2^k Kronecker product of 1-qubit Pauli matrices."""
+    mat = PAULIS_1Q[pauli_chars[0]]
+    for ch in pauli_chars[1:]:
+        mat = np.kron(mat, PAULIS_1Q[ch])
+    return mat
+
+
+def evaluate_pauli_sum_statevector(
+    psi: np.ndarray,
+    pauli_terms: Sequence[Tuple[float, Tuple[Tuple[int, str], ...]]],
+    num_qubits: int,
+) -> float:
+    """
+    Compute exact expectation value <psi | H | psi> for H = sum_k c_k P_k on an N-qubit
+    statevector `psi` in O(num_terms * 2^N) without allocating any 2^N x 2^N matrix.
+    """
+    if not pauli_terms:
+        return 0.0
+    total = 0.0
+    probs_nd: Optional[np.ndarray] = None
+    all_axes = tuple(range(num_qubits))
+
+    for coeff, ops in pauli_terms:
+        if abs(coeff) < 1e-15:
+            continue
+        if not ops:
+            total += coeff
+            continue
+        qubits = tuple(q for q, _ in ops)
+        p_chars = tuple(p for _, p in ops)
+        if all(p == "Z" for p in p_chars):
+            if probs_nd is None:
+                probs_nd = np.real(psi * psi.conj()).reshape([2] * num_qubits)
+            sum_axes = tuple(ax for ax in all_axes if ax not in qubits)
+            marg = np.sum(probs_nd, axis=sum_axes) if sum_axes else probs_nd
+            # Align marginal axes with `qubits` order (already sorted if canonical, but safe for any order)
+            kept_order = [ax for ax in all_axes if ax in qubits]
+            if tuple(kept_order) != qubits:
+                perm = [kept_order.index(q) for q in qubits]
+                marg = np.transpose(marg, perm)
+            signs = np.array([1.0, -1.0], dtype=np.float64)
+            parity_vec = signs
+            for _ in range(1, len(qubits)):
+                parity_vec = np.kron(parity_vec, signs)
+            total += coeff * float(np.dot(marg.reshape(-1), parity_vec))
+        else:
+            op_mat = _kron_pauli_ops(p_chars)
+            psi_op = apply_operator_to_statevector(psi, op_mat, qubits, num_qubits)
+            total += coeff * float(np.real(np.vdot(psi, psi_op)))
+    return float(total)
+
+
+def evaluate_pauli_sum_density_matrix(
+    rho: np.ndarray,
+    pauli_terms: Sequence[Tuple[float, Tuple[Tuple[int, str], ...]]],
+    num_qubits: int,
+) -> float:
+    """
+    Compute exact expectation value Tr(rho H) for H = sum_k c_k P_k on an N-qubit
+    density matrix `rho` via k-qubit reduced density matrix partial trace.
+    """
+    if not pauli_terms:
+        return 0.0
+    total = 0.0
+    rho_nd = rho.reshape([2] * (2 * num_qubits))
+
+    for coeff, ops in pauli_terms:
+        if abs(coeff) < 1e-15:
+            continue
+        if not ops:
+            total += coeff
+            continue
+        qubits = [q for q, _ in ops]
+        p_chars = [p for _, p in ops]
+        k = len(qubits)
+        rest = [q for q in range(num_qubits) if q not in qubits]
+        perm = qubits + rest + [num_qubits + q for q in qubits] + [num_qubits + q for q in rest]
+        d_sub = 1 << k
+        d_rest = 1 << (num_qubits - k)
+        view = np.transpose(rho_nd, perm).reshape((d_sub, d_rest, d_sub, d_rest))
+        rho_sub = np.einsum("aibi->ab", view)
+        op_mat = _kron_pauli_ops(p_chars)
+        total += coeff * float(np.real(np.trace(rho_sub @ op_mat)))
+    return float(total)
 
 
 def probabilities_array_to_dict(

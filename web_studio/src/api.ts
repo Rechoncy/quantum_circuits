@@ -56,6 +56,17 @@ export async function syncDslToProject(
   return postJson('/api/sync/dsl-to-project', { dsl, project });
 }
 
+export async function syncQasmToProject(
+  qasm: string,
+  project: ProjectModel
+): Promise<{
+  qubits: QubitSpec[];
+  operations: CircuitOpModel[];
+  variables: Record<string, number>;
+}> {
+  return postJson('/api/sync/qasm-to-project', { qasm, project });
+}
+
 export async function validateCustomGate(
   gate: CustomGateDef,
   sample_params?: number[],
@@ -75,33 +86,44 @@ export async function validateCustomGate(
   });
 }
 
-export async function runSimulation(project: ProjectModel): Promise<SimulationResponse> {
-  return postJson('/api/simulate', project);
+export async function runSimulation(
+  project: ProjectModel,
+  signal?: AbortSignal
+): Promise<SimulationResponse> {
+  return postJson('/api/simulate', project, signal);
 }
 
 export async function runOptimization(
   project: ProjectModel,
   evaluate_noisy_fidelity = true,
-  preferred_native_2q?: string | null
+  preferred_native_2q?: string | null,
+  signal?: AbortSignal
 ): Promise<OptimizeResponse> {
-  return postJson('/api/optimize', {
-    project,
-    evaluate_noisy_fidelity,
-    preferred_native_2q: preferred_native_2q || null,
-  });
+  return postJson(
+    '/api/optimize',
+    {
+      project,
+      evaluate_noisy_fidelity,
+      preferred_native_2q: preferred_native_2q || null,
+    },
+    signal
+  );
 }
 
-export async function runUnitarySynthesis(payload: {
-  project: ProjectModel;
-  mode: 'matrix' | 'hamiltonian';
-  num_qubits: number;
-  matrix_exprs?: string[][];
-  hamiltonian_str?: string;
-  hamiltonian_scale?: number;
-  evaluate_noisy_fidelity?: boolean;
-  preferred_native_2q?: string | null;
-}): Promise<OptimizeResponse> {
-  return postJson('/api/optimize/synthesize', payload);
+export async function runUnitarySynthesis(
+  payload: {
+    project: ProjectModel;
+    mode: 'matrix' | 'hamiltonian';
+    num_qubits: number;
+    matrix_exprs?: string[][];
+    hamiltonian_str?: string;
+    hamiltonian_scale?: number;
+    evaluate_noisy_fidelity?: boolean;
+    preferred_native_2q?: string | null;
+  },
+  signal?: AbortSignal
+): Promise<OptimizeResponse> {
+  return postJson('/api/optimize/synthesize', payload, signal);
 }
 
 export async function runSweep(
@@ -118,6 +140,7 @@ export async function runSweep(
     y_points?: number;
     target_bitstring?: string;
     observed_qubit?: number;
+    hamiltonian_str?: string;
     backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
   },
   signal?: AbortSignal

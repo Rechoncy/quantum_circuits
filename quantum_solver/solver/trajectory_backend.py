@@ -38,6 +38,7 @@ from .base import (
     apply_operator_to_statevector,
     apply_readout_confusion_array,
     compute_statevector_bloch,
+    evaluate_pauli_sum_statevector,
     probabilities_array_to_dict,
     sample_bitstrings_from_prob_array,
 )
@@ -408,6 +409,7 @@ class TrajectoryBackend:
         seed: Optional[int] = 42,
         initial_state: Optional[np.ndarray] = None,
         num_trajectories: Optional[int] = None,
+        observable_terms: Optional[Sequence[Tuple[float, Tuple[Tuple[int, str], ...]]]] = None,
     ) -> EvolutionResult:
         n = circuit.num_qubits
         if n > self.MAX_STATEVECTOR_QUBITS:
@@ -522,6 +524,12 @@ class TrajectoryBackend:
             else:
                 final_probs = probabilities_array_to_dict(final_p_raw, n)
 
+            meta_exact: Dict[str, object] = {"trajectories": 1, "mode": "exact_statevector"}
+            if observable_terms:
+                meta_exact["observable_expectation"] = evaluate_pauli_sum_statevector(
+                    psi, observable_terms, n
+                )
+
             return EvolutionResult(
                 backend_name="Statevector-Exact",
                 num_qubits=n,
@@ -532,7 +540,7 @@ class TrajectoryBackend:
                 total_duration_ns=elapsed_ns,
                 final_fidelity=1.0,
                 final_purity=1.0,
-                metadata={"trajectories": 1, "mode": "exact_statevector"},
+                metadata=meta_exact,
             )
 
         # ---- Noisy Path: Lockstep Paired Monte-Carlo Quantum Trajectories (Multi-Threaded) ----
@@ -578,6 +586,7 @@ class TrajectoryBackend:
             np.ndarray,
             Optional[np.ndarray],
             Dict[int, Dict[str, float]],
+            float,
         ]:
             pair_idx, seed_a, seed_b = args
             rng_a = np.random.default_rng(seed_a)
@@ -651,7 +660,12 @@ class TrajectoryBackend:
                     )
 
             loc_final_prob = np.real(psi_a * psi_a.conj()) + np.real(psi_b * psi_b.conj())
-            return loc_bloch, loc_fid, loc_pur, loc_final_prob, loc_step_prob, loc_rep_pops
+            loc_obs = 0.0
+            if observable_terms:
+                loc_obs = evaluate_pauli_sum_statevector(
+                    psi_a, observable_terms, n
+                ) + evaluate_pauli_sum_statevector(psi_b, observable_terms, n)
+            return loc_bloch, loc_fid, loc_pur, loc_final_prob, loc_step_prob, loc_rep_pops, loc_obs
 
         # Dispatch across CPU threads when workload benefits from parallelism and memory fits easily
         max_workers = min(num_pairs, max(1, min(4, os.cpu_count() or 4)))
@@ -669,12 +683,14 @@ class TrajectoryBackend:
             np.zeros((num_steps, dim), dtype=np.float64) if accum_step_probs else None
         )
         rep_step_pops: Dict[int, Dict[str, float]] = {}
+        obs_accum = 0.0
 
-        for loc_bloch, loc_fid, loc_pur, loc_fprob, loc_sprob, loc_rep in pair_outputs:
+        for loc_bloch, loc_fid, loc_pur, loc_fprob, loc_sprob, loc_rep, loc_obs in pair_outputs:
             bloch_accum += loc_bloch
             fidelity_accum += loc_fid
             purity_accum += loc_pur
             final_prob_accum += loc_fprob
+            obs_accum += loc_obs
             if step_prob_accum is not None and loc_sprob is not None:
                 step_prob_accum += loc_sprob
             if loc_rep:
@@ -728,6 +744,10 @@ class TrajectoryBackend:
         else:
             final_probs = probabilities_array_to_dict(final_prob_accum, n)
 
+        meta_noisy: Dict[str, object] = {"trajectories": total_trajs, "mode": "monte_carlo_kraus"}
+        if observable_terms:
+            meta_noisy["observable_expectation"] = float(obs_accum / float(total_trajs))
+
         return EvolutionResult(
             backend_name=f"Trajectory-MC ({total_trajs} trajs)",
             num_qubits=n,
@@ -738,5 +758,5 @@ class TrajectoryBackend:
             total_duration_ns=elapsed_ns,
             final_fidelity=steps_noisy[-1].state_fidelity,
             final_purity=steps_noisy[-1].purity,
-            metadata={"trajectories": total_trajs, "mode": "monte_carlo_kraus"},
+            metadata=meta_noisy,
         )

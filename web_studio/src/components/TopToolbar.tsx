@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   Atom,
   Play,
+  Square,
   ChevronDown,
   Undo2,
   Redo2,
@@ -14,6 +15,7 @@ import {
   PanelLeft,
   PanelRight,
   Sparkles,
+  Keyboard,
 } from 'lucide-react';
 import type { ProjectModel, SolverBackendType, WorkMode } from '../types';
 import { BACKEND_LABELS } from '../constants';
@@ -28,6 +30,7 @@ interface TopToolbarProps {
   onBackendChange: (b: SolverBackendType) => void;
   onShotsChange: (shots: number) => void;
   onRun: () => void;
+  onStop?: () => void;
   isBusy: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -64,6 +67,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onBackendChange,
   onShotsChange,
   onRun,
+  onStop,
   isBusy,
   canUndo,
   canRedo,
@@ -83,9 +87,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   isDirty = false,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(project.name);
   const menuRef = useRef<HTMLDivElement>(null);
+  const shortcutsRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -96,6 +102,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
     const onDocClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
+      }
+      if (shortcutsRef.current && !shortcutsRef.current.contains(e.target as Node)) {
+        setShortcutsOpen(false);
       }
     };
     document.addEventListener('mousedown', onDocClick);
@@ -172,9 +181,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
           {/* Preset / File Dropdown */}
           {menuOpen && (
-            <div className="absolute left-0 top-11 w-68 studio-card shadow-xl py-1.5 z-50">
+            <div className="absolute left-0 top-11 w-80 studio-card shadow-xl py-1.5 z-50">
               <div className="px-3 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
-                预设项目模板
+                预设项目模板 ({presets.length})
               </div>
               {presets.map((p) => (
                 <button
@@ -183,11 +192,14 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                     onSelectPreset(p);
                     setMenuOpen(false);
                   }}
-                  className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-[#0A84FF]/10 hover:text-[#0A84FF] flex items-center justify-between"
+                  className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-[#0A84FF]/10 hover:text-[#0A84FF] flex items-center justify-between gap-2 cursor-pointer"
                 >
                   <span className="truncate">{p.name}</span>
-                  <span className="text-[11px] text-[var(--text-secondary)] font-mono-num">
-                    {p.qubits.length}Q
+                  <span className="shrink-0 flex items-center gap-1 text-[10.5px] font-mono-num text-[var(--text-secondary)]">
+                    <span className="px-1.5 py-0.25 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
+                      {p.qubits.length}Q
+                    </span>
+                    <span className="uppercase opacity-75">{p.sim_settings.backend}</span>
                   </span>
                 </button>
               ))}
@@ -197,7 +209,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   setMenuOpen(false);
                   onNewBlankProject();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-[#0A84FF]/10 hover:text-[#0A84FF] flex items-center gap-2 font-medium"
+                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-[#0A84FF]/10 hover:text-[#0A84FF] flex items-center gap-2 font-medium cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5" />
                 新建空白项目 (2 Qubits)
@@ -207,7 +219,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   setMenuOpen(false);
                   setEditingName(true);
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2 cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                 重命名当前项目
@@ -217,7 +229,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   setMenuOpen(false);
                   onExportJson();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                 导出项目 (.qproj.json)
@@ -227,7 +239,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   setMenuOpen(false);
                   onExportSvg();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-[#0A84FF]" />
                 导出线路矢量图 (.svg)
@@ -237,17 +249,17 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   setMenuOpen(false);
                   fileInputRef.current?.click();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-2 cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                导入项目文件
+                导入项目或 QASM (.json, .qasm)
               </button>
             </div>
           )}
           <input
             ref={fileInputRef}
             type="file"
-            accept=".json,.qproj"
+            accept=".json,.qproj,.qasm,.txt"
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -352,25 +364,81 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </select>
         </div>
 
-        <button
-          onClick={onRun}
-          disabled={isBusy}
-          title={isDirty ? '线路或参数已修改，点击或按 Ctrl+Enter 更新求解结果' : '运行当前模式 (Ctrl+Enter)'}
-          className="relative h-8 px-4 rounded-lg studio-btn-primary text-[12.5px] font-semibold flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
-        >
-          {isBusy ? (
+        {isBusy && onStop ? (
+          <button
+            onClick={onStop}
+            title="点击中止当前正在执行的求解 / 优化 / 扫描任务"
+            className="relative h-8 px-3.5 rounded-lg bg-red-500 hover:bg-red-600 text-white shadow-xs text-[12.5px] font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          ) : (
-            <Play className="w-3.5 h-3.5 fill-current" />
+            <Square className="w-2.5 h-2.5 fill-current" />
+            <span>停止</span>
+          </button>
+        ) : (
+          <button
+            onClick={onRun}
+            disabled={isBusy}
+            title={isDirty ? '线路或参数已修改，点击或按 Ctrl+Enter 更新求解结果' : '运行当前模式 (Ctrl+Enter)'}
+            className="relative h-8 px-4 rounded-lg studio-btn-primary text-[12.5px] font-semibold flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+          >
+            {isBusy ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Play className="w-3.5 h-3.5 fill-current" />
+            )}
+            <span>{mode === 'optimize' ? '运行优化' : mode === 'sweep' ? '运行扫描' : '运行'}</span>
+            {isDirty && !isBusy && (
+              <span
+                className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[var(--bg-panel)]"
+                title="线路或参数已变更，待更新"
+              />
+            )}
+          </button>
+        )}
+
+        <div className="relative" ref={shortcutsRef}>
+          <button
+            onClick={() => setShortcutsOpen((o) => !o)}
+            title="快捷键速查表"
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+              shortcutsOpen
+                ? 'text-[#0A84FF] bg-[#0A84FF]/10'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.05] dark:hover:bg-white/[0.09]'
+            }`}
+          >
+            <Keyboard className="w-4 h-4" />
+          </button>
+
+          {shortcutsOpen && (
+            <div className="absolute right-0 top-10 w-72 studio-card shadow-xl p-3 z-50 space-y-2">
+              <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-1.5">
+                <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                  工作台快捷键速查
+                </span>
+                <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">v2.1</span>
+              </div>
+              <div className="space-y-1.5 text-[11.5px]">
+                {[
+                  ['Ctrl + K', '唤起 / 关闭 AI 量子线路助手'],
+                  ['Ctrl + Enter', '运行当前模式 / 同步底部代码'],
+                  ['Space', '播放 / 暂停演化时间轴 (Simulate)'],
+                  ['Ctrl + Z / Y', '撤销 / 重做线路与参数编辑'],
+                  ['Ctrl + D', '复制当前选中的量子门'],
+                  ['Delete', '删除当前选中的量子门'],
+                  ['Shift + 拖拽', '框选多个门并封装为复合门'],
+                  ['Esc', '取消工具选择 / 清除选中态'],
+                ].map(([keyStr, desc]) => (
+                  <div key={keyStr} className="flex items-center justify-between gap-2">
+                    <span className="text-[var(--text-secondary)] truncate">{desc}</span>
+                    <kbd className="shrink-0 px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] font-mono-num text-[10.5px] font-semibold text-[var(--text-primary)]">
+                      {keyStr}
+                    </kbd>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
-          <span>{mode === 'optimize' ? '运行优化' : mode === 'sweep' ? '运行扫描' : '运行'}</span>
-          {isDirty && !isBusy && (
-            <span
-              className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[var(--bg-panel)]"
-              title="线路或参数已变更，待更新"
-            />
-          )}
-        </button>
+        </div>
 
         <button
           onClick={onToggleDark}
