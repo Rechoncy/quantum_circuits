@@ -209,11 +209,15 @@ def validate_unitary_matrix(U: np.ndarray, tol: float = 1e-6) -> Tuple[bool, flo
 def evaluate_custom_gate_unitary(
     gate_def: CustomGateDef,
     param_values: Optional[Sequence[float]] = None,
+    custom_gate_map: Optional[Dict[str, CustomGateDef]] = None,
+    _depth: int = 0,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Compute (unitary_matrix, optional_hamiltonian_generator) for any of the 4 CustomGateDef modes.
-    For 'hamiltonian' mode, returns (expm(-i * scale * H), 2 * scale * H) so QuTiP integrates H directly!
+    Supports nested composite gates referencing other custom gates (up to depth 6).
     """
+    if _depth > 6:
+        raise ValueError(f"复合门 '{gate_def.name}' 存在循环引用或嵌套层级超过上限 (6 层)")
     n_q = gate_def.num_qubits
     dim = 1 << n_q
     p_vals = list(param_values) if param_values is not None else list(gate_def.default_params)
@@ -262,7 +266,17 @@ def evaluate_custom_gate_unitary(
                 float(np.real(_safe_complex_eval(str(p), p_dict)))
                 for p in sub.params
             ]
-            u_sub = gate_unitary(sub.name, sub_params)
+            sub_uname = sub.name.upper()
+            if custom_gate_map and sub_uname in custom_gate_map and sub_uname != gate_def.name.upper():
+                nested_cg = custom_gate_map[sub_uname]
+                u_sub, _ = evaluate_custom_gate_unitary(
+                    nested_cg,
+                    sub_params if sub_params else None,
+                    custom_gate_map=custom_gate_map,
+                    _depth=_depth + 1,
+                )
+            else:
+                u_sub = gate_unitary(sub.name, sub_params)
             U = embed_gate_unitary(u_sub, sub.qubits, n_q) @ U
         return U, None
 

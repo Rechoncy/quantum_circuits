@@ -1440,6 +1440,7 @@ export default function App() {
       <CustomGateModal
         open={gateModalOpen}
         editingGate={editingCustomGate}
+        existingCustomGates={project.custom_gates}
         macroSeedOps={macroSeedOps}
         macroSeedQubits={macroSeedQubits}
         onClose={() => setGateModalOpen(false)}

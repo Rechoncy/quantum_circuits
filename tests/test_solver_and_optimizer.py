@@ -811,6 +811,100 @@ def test_large_scale_optimizer_parallel_trajectory_and_log_depth_ghz() -> None:
     assert coh_tree > coh_chain
 
 
+def test_stim_adjoint_fidelity_sparse_qutip_and_nested_composite_gates() -> None:
+    """
+    Verify second-pass physics & studio enhancements:
+      1. StimBackend adjoint-uncomputation exact state fidelity on 25Q 2D Cluster state (F=1.0)
+         and phase-flip error sensitivity on GHZ state (F ~ 0.85 under 15% Z error)
+      2. Sparse CSR QuTiPBackend on 6Q noisy circuit matching KrausBackend closely
+      3. Nested composite custom gate containing another custom gate (SQISWAP) validates & simulates cleanly
+    """
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        CustomGateDef,
+        NlCircuitRequest,
+        QubitSpec,
+        build_preset_projects,
+        execute_project_simulation,
+        generate_circuit_from_nl,
+    )
+    from quantum_solver.studio.custom_gates import (
+        evaluate_custom_gate_unitary,
+        validate_unitary_matrix,
+    )
+
+    solver = QuantumSolver()
+    base = build_preset_projects()[0]
+
+    # 1a. 25-qubit 2D Cluster state (exponentially flat computational basis -> adjoint uncompute yields exact F=1.0!)
+    nl_c25 = generate_circuit_from_nl(
+        NlCircuitRequest(prompt="生成 25 比特二维网格 Cluster 簇态线路", project=base)
+    )
+    p_c25 = base.model_copy(deep=True)
+    p_c25.qubits = [QubitSpec(**q) for q in nl_c25["qubits"]]
+    p_c25.operations = [CircuitOpModel(**o) for o in nl_c25["operations"]]
+    p_c25.sim_settings.backend = "stim"
+    p_c25.sim_settings.enable_t1_t2 = False
+    p_c25.sim_settings.enable_depol = False
+    p_c25.sim_settings.enable_zz = False
+    p_c25.sim_settings.enable_readout = False
+    sim_c25 = execute_project_simulation(p_c25)["results"]["stim"]
+    assert sim_c25["final_fidelity"] == 1.0
+
+    # 1b. 4Q GHZ with 15% pure Z phase-flip error on q0 -> exact quantum fidelity is 0.85 (classical basis is blind!)
+    c_z = QuantumCircuit(4, name="GHZ_PhaseFlip")
+    c_z.h(0).cnot(0, 1).cnot(1, 2).cnot(2, 3)
+    c_z.add_noise(NoiseChannel.phase_flip(0, 0.15))
+    c_z.measure_all()
+    res_stim_z = solver.solve(c_z, backend="stim", hardware=None, shots=4096, seed=77)
+    res_kraus_z = solver.solve(c_z, backend="kraus", hardware=None, shots=4096, seed=77)
+    assert abs((res_stim_z.final_fidelity or 0.0) - (res_kraus_z.final_fidelity or 0.0)) < 0.03
+    assert 0.82 < (res_stim_z.final_fidelity or 0.0) < 0.88
+    # Intermediate step fidelities interpolate smoothly from 1.0 down to final_fidelity
+    assert res_stim_z.steps[0].state_fidelity == 1.0
+    assert (res_stim_z.steps[2].state_fidelity or 0.0) < 1.0
+
+    # 2. Sparse CSR QuTiPBackend on 6-qubit noisy circuit vs KrausBackend
+    hw_6 = HardwareModel.neutral_atom_processor(num_qubits=6, depol_1q=0.001, depol_2q=0.004)
+    c6 = QuantumCircuit(6, name="SparseQuTiP_6Q")
+    for q in range(6):
+        c6.add_gate("RXY", (q,), (math.pi / 2.0, -math.pi / 2.0), layer=0)
+    for q in range(0, 6, 2):
+        c6.add_gate("CZ", (q, q + 1), layer=1)
+    c6.rz(0, 0.4)
+    c6.measure_all()
+    r_qt6 = solver.solve(c6, backend="qutip", hardware=hw_6, shots=2048, seed=5)
+    r_kr6 = solver.solve(c6, backend="kraus", hardware=hw_6, shots=2048, seed=5)
+    assert abs((r_qt6.final_fidelity or 0.0) - (r_kr6.final_fidelity or 0.0)) < 0.015
+
+    # 3. Nested composite custom gate referencing existing custom gate 'SQISWAP'
+    p_nested = build_preset_projects()[1].model_copy(deep=True)  # contains SQISWAP custom gate
+    cg_map = {cg.name.upper(): cg for cg in p_nested.custom_gates}
+    nested_macro = CustomGateDef(
+        id="cg_nested_macro",
+        name="NESTED_MACRO",
+        display_label="NestM",
+        num_qubits=2,
+        definition_type="composite",
+        sub_operations=[
+            CircuitOpModel(id="m_sub1", step=0, kind="gate", name="H", qubits=[0], params=[]),
+            CircuitOpModel(id="m_sub2", step=1, kind="gate", name="SQISWAP", qubits=[0, 1], params=[]),
+        ],
+    )
+    U_nest, _ = evaluate_custom_gate_unitary(nested_macro, custom_gate_map=cg_map)
+    ok_u, err_u, _ = validate_unitary_matrix(U_nest)
+    assert ok_u and err_u < 1e-10
+
+    p_nested.custom_gates.append(nested_macro)
+    p_nested.operations = [
+        CircuitOpModel(id="op_nm", step=0, kind="gate", name="NESTED_MACRO", qubits=[0, 1], params=[]),
+        CircuitOpModel(id="op_m", step=1, kind="measure", name="MEASURE", qubits=[0, 1], params=[]),
+    ]
+    sim_nest = execute_project_simulation(p_nested)
+    assert sim_nest["results"][sim_nest["primary_backend"]]["final_fidelity"] > 0.96
+
+
+
 
 
 

@@ -95,7 +95,8 @@ def create_app() -> FastAPI:
     @app.post("/api/custom-gate/validate")
     def api_validate_custom_gate(req: ValidateCustomGateRequest) -> Dict[str, Any]:
         try:
-            U, H = evaluate_custom_gate_unitary(req.gate, req.sample_params)
+            cg_map = {cg.name.upper(): cg for cg in req.existing_custom_gates}
+            U, H = evaluate_custom_gate_unitary(req.gate, req.sample_params, custom_gate_map=cg_map)
             is_unitary, err, is_cliff = validate_unitary_matrix(U)
             return {
                 "valid": is_unitary,

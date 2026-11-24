@@ -51,7 +51,7 @@ const CHART_PALETTE = [
 ];
 
 function formatOpLabelClean(raw: string): string {
-  return raw
+  const cleaned = raw
     .replace(/@\((\d+),\s*\)/g, '@ q$1')
     .replace(/@\((\d+(?:,\s*\d+)+)\)/g, (_, list: string) =>
       `@ ${list
@@ -59,6 +59,11 @@ function formatOpLabelClean(raw: string): string {
         .map((s) => `q${s.trim()}`)
         .join(',')}`
     );
+  const parts = cleaned.split(/\s*∥\s*/);
+  if (parts.length > 3) {
+    return `${parts.slice(0, 2).join(' ∥ ')} … (${parts.length} 门并行)`;
+  }
+  return cleaned;
 }
 
 function shortGateToken(raw: string): string {
@@ -107,6 +112,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   const [measUnit, setMeasUnit] = useState<'prob' | 'counts'>('prob');
   const [filterSmallBars, setFilterSmallBars] = useState(true);
   const [focusedEvoPanel, setFocusedEvoPanel] = useState<'none' | 'curve' | 'sphere'>('none');
+  const [tomoFilter, setTomoFilter] = useState('');
 
   const textColor = darkMode ? '#E5E5EA' : '#1D1D1F';
   const mutedColor = darkMode ? '#98989D' : '#6E6E73';
@@ -455,7 +461,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               { id: 'evolution', label: '演化' },
               { id: 'populations', label: '布居' },
               { id: 'measurement', label: '测量' },
-              { id: 'density', label: '密度矩阵 ρ' },
+              { id: 'density', label: rhoMatrix ? '密度矩阵 ρ' : '局域层析 & 激发' },
               { id: 'steps', label: '指标 & 明细' },
             ] as const
           ).map((t) => (
@@ -1149,29 +1155,37 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
             <div className="col-span-7 flex flex-col studio-card overflow-hidden">
               <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                 <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
-                  Step {activeSnap.step_index} 密度矩阵 ρ
+                  {rhoMatrix
+                    ? `Step ${activeSnap.step_index} 密度矩阵 ρ`
+                    : `Step ${activeSnap.step_index} 全寄存器单比特激发概率 P(|1⟩) 与局域纯度 |r|`}
                 </span>
-                <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex">
-                  {(
-                    [
-                      ['abs', '|ρ| 模'],
-                      ['real', 'Re(ρ)'],
-                      ['imag', 'Im(ρ)'],
-                    ] as const
-                  ).map(([k, lbl]) => (
-                    <button
-                      key={k}
-                      onClick={() => setRhoPart(k)}
-                      className={`px-2 py-0.5 rounded-md text-[11px] cursor-pointer ${
-                        rhoPart === k
-                          ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[var(--text-primary)]'
-                          : 'text-[var(--text-secondary)]'
-                      }`}
-                    >
-                      {lbl}
-                    </button>
-                  ))}
-                </div>
+                {rhoMatrix ? (
+                  <div className="bg-black/[0.05] dark:bg-white/[0.08] p-0.5 rounded-lg inline-flex">
+                    {(
+                      [
+                        ['abs', '|ρ| 模'],
+                        ['real', 'Re(ρ)'],
+                        ['imag', 'Im(ρ)'],
+                      ] as const
+                    ).map(([k, lbl]) => (
+                      <button
+                        key={k}
+                        onClick={() => setRhoPart(k)}
+                        className={`px-2 py-0.5 rounded-md text-[11px] cursor-pointer ${
+                          rhoPart === k
+                            ? 'bg-[var(--bg-panel)] font-semibold shadow-2xs text-[var(--text-primary)]'
+                            : 'text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
+                    {project.qubits.length} Qubits
+                  </span>
+                )}
               </div>
               {rhoMatrix ? (
                 <div className="flex-1 min-h-0 p-2">
@@ -1180,8 +1194,8 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       {
                         type: 'heatmap',
                         z: rhoMatrix,
-                        x: allBasis.map((b) => `|${b}⟩`),
-                        y: allBasis.map((b) => `|${b}⟩`),
+                        x: allBasis.map((b) => formatBasisKet(b)),
+                        y: allBasis.map((b) => formatBasisKet(b)),
                         colorscale:
                           rhoPart === 'abs'
                             ? [
@@ -1216,21 +1230,86 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                   />
                 </div>
               ) : (
-                <div className="flex-1 flex items-center justify-center text-[12px] text-[var(--text-secondary)]">
-                  当前为高比特或稳定子模式，密度矩阵已省略
+                <div className="flex-1 min-h-0 p-2">
+                  {(() => {
+                    const qIndices = project.qubits.map((_, idx) => idx);
+                    const qLabels = project.qubits.map((q) => q.name);
+                    const p1Vals = qIndices.map((idx) => {
+                      const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
+                      return Math.max(0, Math.min(1, 0.5 * (1 - bv[2])));
+                    });
+                    const rVals = qIndices.map((idx) => {
+                      const bv = activeSnap.bloch_vectors[String(idx)] || [0, 0, 1];
+                      return Math.min(1, Math.hypot(bv[0], bv[1], bv[2]));
+                    });
+                    return (
+                      <PlotlyChart
+                        data={[
+                          {
+                            type: 'bar',
+                            name: '激发率 P(|1⟩)',
+                            x: qLabels,
+                            y: p1Vals,
+                            marker: { color: '#0A84FF', opacity: 0.88 },
+                            hovertemplate: '%{x}: P(|1⟩) = %{y:.3f}<extra></extra>',
+                          },
+                          {
+                            type: 'scatter',
+                            mode: project.qubits.length <= 64 ? 'lines+markers' : 'lines',
+                            name: 'Bloch 模长 |r| (纯度指标)',
+                            x: qLabels,
+                            y: rVals,
+                            line: { color: '#10B981', width: 2 },
+                            marker: { size: 5 },
+                            hovertemplate: '%{x}: |r| = %{y:.3f}<extra></extra>',
+                          },
+                        ]}
+                        layout={{
+                          paper_bgcolor: plotBg,
+                          plot_bgcolor: plotBg,
+                          hovermode: 'x unified',
+                          margin: { l: 46, r: 16, t: 22, b: 40 },
+                          xaxis: { tickfont: { size: 10, color: mutedColor } },
+                          yaxis: {
+                            range: [-0.02, 1.08],
+                            gridcolor: gridColor,
+                            tickfont: { size: 10, color: mutedColor },
+                          },
+                          legend: { orientation: 'h', y: 1.12, font: { size: 10.5, color: textColor } },
+                        }}
+                      />
+                    );
+                  })()}
                 </div>
               )}
             </div>
 
             <div className="col-span-5 flex flex-col studio-card overflow-hidden">
-              <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
-                <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+              <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
+                <span className="text-[12.5px] font-semibold text-[var(--text-primary)] whitespace-nowrap">
                   各比特约化 Bloch 态层析
                 </span>
-                <span className="text-[10.5px] text-[var(--text-secondary)]">点击切换观测比特</span>
+                {project.qubits.length > 8 ? (
+                  <input
+                    value={tomoFilter}
+                    onChange={(e) => setTomoFilter(e.target.value)}
+                    placeholder={`搜索比特 (${project.qubits.length}Q)...`}
+                    className="w-32 px-2 py-0.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[10.5px] font-mono-num outline-none focus:border-[#0A84FF]"
+                  />
+                ) : (
+                  <span className="text-[10.5px] text-[var(--text-secondary)]">点击切换观测比特</span>
+                )}
               </div>
               <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-                {Object.entries(activeSnap.bloch_vectors).map(([qIdxStr, bv]) => {
+                {Object.entries(activeSnap.bloch_vectors)
+                  .filter(([qIdxStr]) => {
+                    const kw = tomoFilter.trim().toLowerCase();
+                    if (!kw) return true;
+                    const qName = (project.qubits[Number(qIdxStr)]?.name || `q${qIdxStr}`).toLowerCase();
+                    return qName.includes(kw) || qIdxStr === kw;
+                  })
+                  .slice(0, 60)
+                  .map(([qIdxStr, bv]) => {
                   const qIdx = Number(qIdxStr);
                   const qSpec = project.qubits[qIdx];
                   const isObs = qIdx === observedQubit;
@@ -1432,8 +1511,14 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       .sort((a, b) => b[1] - a[1])
                       .slice(0, 3)
                       .filter(([, p]) => p > 0.01)
-                      .map(([b, p]) => `|${b}⟩:${(p * 100).toFixed(1)}%`)
+                      .map(([b, p]) => `${formatBasisKet(b)}:${(p * 100).toFixed(1)}%`)
                       .join('  ');
+                    const stabSummary = s.stabilizers
+                      ? s.stabilizers
+                          .slice(0, 3)
+                          .map((st) => (st.length > 18 ? `${st.slice(0, 16)}…` : st))
+                          .join(', ') + (s.stabilizers.length > 3 ? ` (+${s.stabilizers.length - 3})` : '')
+                      : topP;
                     return (
                       <tr
                         key={s.step_index}
@@ -1462,7 +1547,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                           {bv[2].toFixed(3)})
                         </td>
                         <td className="py-1.5 px-3 text-[11px] text-[var(--text-secondary)]">
-                          {s.stabilizers ? s.stabilizers.join(', ') : topP}
+                          {stabSummary}
                         </td>
                       </tr>
                     );

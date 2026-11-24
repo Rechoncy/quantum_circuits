@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronUp,
   ChevronDown,
@@ -6,8 +6,10 @@ import {
   Copy,
   Check,
   AlertCircle,
+  Download,
 } from 'lucide-react';
 import type { ProjectModel } from '../types';
+import { downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface BottomDockProps {
   project: ProjectModel;
@@ -31,12 +33,14 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   onAddVariable,
 }) => {
   const [collapsed, setCollapsed] = useState(false);
+  const [dockHeight, setDockHeight] = useState(210);
   const [tab, setTab] = useState<'code' | 'params' | 'qasm' | 'logs'>('code');
   const [draft, setDraft] = useState(dslText);
   const [dirty, setDirty] = useState(false);
   const [copied, setCopied] = useState(false);
   const [newVarName, setNewVarName] = useState('');
   const [newVarVal, setNewVarVal] = useState('1.5708');
+  const gutterRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setDraft(dslText);
@@ -52,12 +56,40 @@ export const BottomDock: React.FC<BottomDockProps> = ({
     setTimeout(() => setCopied(false), 1200);
   };
 
+  const handleDownloadQasm = () => {
+    const base = (project.name || 'circuit').replace(/\.[^.]+$/, '');
+    downloadTextFile(`${base}.qasm`, qasmText || '// OPENQASM 3.0;', 'text/plain;charset=utf-8');
+  };
+
+  const handleStartResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = dockHeight;
+    const onMove = (ev: MouseEvent) => {
+      const nextH = Math.max(130, Math.min(460, startH + (startY - ev.clientY)));
+      setDockHeight(nextH);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   return (
     <div
-      className={`shrink-0 bg-[var(--bg-panel)] border-t border-[var(--border-hairline)] flex flex-col transition-all ${
-        collapsed ? 'h-9' : 'h-[210px]'
-      }`}
+      style={{ height: collapsed ? 36 : dockHeight }}
+      className="relative shrink-0 bg-[var(--bg-panel)] border-t border-[var(--border-hairline)] flex flex-col"
     >
+      {/* Top Drag-Resize Handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={handleStartResize}
+          title="上下拖动调整代码栏高度"
+          className="absolute -top-1 left-0 right-0 h-2 cursor-ns-resize hover:bg-[var(--accent)]/25 z-20"
+        />
+      )}
       {/* Tab Header */}
       <div className="h-9 px-4 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-5 h-full">
@@ -100,6 +132,16 @@ export const BottomDock: React.FC<BottomDockProps> = ({
               同步至画布 (Ctrl+Enter)
             </button>
           )}
+          {tab === 'qasm' && !collapsed && (
+            <button
+              onClick={handleDownloadQasm}
+              className="px-2 py-0.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[11px] text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
+              title="下载 OpenQASM 3.0 (.qasm) 文件"
+            >
+              <Download className="w-3 h-3" />
+              <span>.qasm</span>
+            </button>
+          )}
           {(tab === 'code' || tab === 'qasm') && !collapsed && (
             <button
               onClick={() => handleCopy(tab === 'code' ? draft : qasmText)}
@@ -130,8 +172,11 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                   <span>{dslError}</span>
                 </div>
               )}
-              <div className="flex flex-1 min-h-0">
-                <div className="w-10 py-2.5 pr-2.5 text-right select-none text-[12px] leading-[1.55] font-mono-num text-[var(--text-secondary)]/60 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]">
+              <div className="flex flex-1 min-h-0 overflow-hidden">
+                <div
+                  ref={gutterRef}
+                  className="w-11 py-2.5 pr-2.5 text-right select-none text-[12px] leading-[1.55] font-mono-num text-[var(--text-secondary)]/60 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)] overflow-hidden shrink-0"
+                >
                   {lines.map((_, i) => (
                     <div key={i}>{i + 1}</div>
                   ))}
@@ -139,6 +184,11 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                 <textarea
                   value={draft}
                   spellCheck={false}
+                  onScroll={(e) => {
+                    if (gutterRef.current) {
+                      gutterRef.current.scrollTop = e.currentTarget.scrollTop;
+                    }
+                  }}
                   onChange={(e) => {
                     setDraft(e.target.value);
                     setDirty(true);

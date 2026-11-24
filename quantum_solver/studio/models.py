@@ -136,6 +136,7 @@ class ProjectModel(BaseModel):
 class ValidateCustomGateRequest(BaseModel):
     gate: CustomGateDef
     sample_params: Optional[List[float]] = None
+    existing_custom_gates: List[CustomGateDef] = Field(default_factory=list)
 
 
 class DslSyncRequest(BaseModel):

@@ -466,12 +466,13 @@ def build_hardware_model(
             qp.readout_error = ReadoutError(qspec.readout_err, qspec.readout_err * 1.1)
 
     # Promote custom gates marked `is_native=True` into NativeGateSet!
+    cg_lookup = {cg.name.upper(): cg for cg in project.custom_gates}
     custom_native_2q_names: List[str] = []
     for cg in project.custom_gates:
         if not cg.is_native:
             continue
         try:
-            u_cg, _ = evaluate_custom_gate_unitary(cg)
+            u_cg, _ = evaluate_custom_gate_unitary(cg, custom_gate_map=cg_lookup)
             u_copy = u_cg.copy()
             spec = NativeGateSpec(
                 name=cg.name,
@@ -581,51 +582,74 @@ def compile_project_circuit(
 
         skip_hw = op.noise_mode == "none"
 
-        if uname in custom_by_name:
-            cg = custom_by_name[uname]
-            if len(valid_q) != cg.num_qubits:
-                continue
-            if cg.definition_type == "composite" and cg.sub_operations:
-                # Expand composite macro directly onto mapped qubits
-                for sub in sorted(cg.sub_operations, key=lambda s: s.step):
-                    mapped_q = tuple(valid_q[lq] for lq in sub.qubits if 0 <= lq < len(valid_q))
-                    sub_p = _resolve_op_params(sub.params, vars_map)
-                    if sub.kind == "gate" and mapped_q:
-                        circ.add_gate(
-                            sub.name,
-                            mapped_q,
-                            params=sub_p,
-                            skip_hw_noise=skip_hw,
-                        )
+        def _emit_gate(
+            g_name: str,
+            g_qubits: Tuple[int, ...],
+            g_params: Tuple[float, ...],
+            g_dur: Optional[float],
+            g_noise: List[NoiseChannel],
+            g_layer: Optional[int],
+            g_skip_hw: bool,
+            depth: int = 0,
+        ) -> None:
+            if depth > 6:
+                raise ValueError(f"复合门 '{g_name}' 存在循环引用或嵌套层级超过 6 层")
+            g_uname = g_name.upper()
+            if g_uname in custom_by_name:
+                cg = custom_by_name[g_uname]
+                if len(g_qubits) != cg.num_qubits:
+                    return
+                if cg.definition_type == "composite" and cg.sub_operations:
+                    for sub in sorted(cg.sub_operations, key=lambda s: s.step):
+                        mapped_q = tuple(g_qubits[lq] for lq in sub.qubits if 0 <= lq < len(g_qubits))
+                        sub_p = _resolve_op_params(sub.params, vars_map)
+                        if sub.kind == "gate" and mapped_q:
+                            _emit_gate(
+                                sub.name,
+                                mapped_q,
+                                sub_p,
+                                sub.duration_ns,
+                                [],
+                                None,
+                                g_skip_hw,
+                                depth=depth + 1,
+                            )
+                    if g_noise:
+                        for ch in g_noise:
+                            circ.add_noise(ch)
+                else:
+                    u_mat, h_mat = evaluate_custom_gate_unitary(
+                        cg, g_params if g_params else None, custom_gate_map=custom_by_name
+                    )
+                    dur = g_dur if g_dur is not None else cg.duration_ns
+                    direct_h = None
+                    if h_mat is not None:
+                        scale = float(g_params[0]) if (cg.param_names and g_params) else float(cg.hamiltonian_scale)
+                        direct_h = scale * h_mat
+                    circ.add_gate(
+                        name=cg.name,
+                        qubits=g_qubits,
+                        params=g_params,
+                        duration_ns=dur,
+                        label=cg.display_label or cg.name,
+                        custom_matrix=u_mat,
+                        noise_after=g_noise,
+                        layer=g_layer,
+                        skip_hw_noise=g_skip_hw,
+                        custom_hamiltonian=direct_h,
+                    )
             else:
-                u_mat, h_mat = evaluate_custom_gate_unitary(cg, p_vals if p_vals else None)
-                dur = op.duration_ns if op.duration_ns is not None else cg.duration_ns
-                direct_h = None
-                if h_mat is not None:
-                    scale = float(p_vals[0]) if (cg.param_names and p_vals) else float(cg.hamiltonian_scale)
-                    direct_h = scale * h_mat
                 circ.add_gate(
-                    name=cg.name,
-                    qubits=valid_q,
-                    params=p_vals,
-                    duration_ns=dur,
-                    label=cg.display_label or cg.name,
-                    custom_matrix=u_mat,
-                    noise_after=noise_after,
-                    layer=op.step,
-                    skip_hw_noise=skip_hw,
-                    custom_hamiltonian=direct_h,
+                    name=g_uname,
+                    qubits=g_qubits,
+                    params=g_params,
+                    duration_ns=g_dur,
+                    noise_after=g_noise,
+                    layer=g_layer,
+                    skip_hw_noise=g_skip_hw,
                 )
-        else:
-            circ.add_gate(
-                name=uname,
-                qubits=valid_q,
-                params=p_vals,
-                duration_ns=op.duration_ns,
-                noise_after=noise_after,
-                layer=op.step,
-                skip_hw_noise=skip_hw,
-            )
+
+        _emit_gate(uname, valid_q, p_vals, op.duration_ns, noise_after, op.step, skip_hw)
 
     return circ
 

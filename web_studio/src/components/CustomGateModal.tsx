@@ -6,6 +6,7 @@ import { validateCustomGate } from '../api';
 interface CustomGateModalProps {
   open: boolean;
   editingGate: CustomGateDef | null;
+  existingCustomGates?: CustomGateDef[];
   macroSeedOps?: CircuitOpModel[] | null;
   macroSeedQubits?: number;
   onClose: () => void;
@@ -27,6 +28,7 @@ const DEFAULT_MAT_2Q = [
 export const CustomGateModal: React.FC<CustomGateModalProps> = ({
   open,
   editingGate,
+  existingCustomGates = [],
   macroSeedOps,
   macroSeedQubits,
   onClose,
@@ -166,7 +168,7 @@ export const CustomGateModal: React.FC<CustomGateModalProps> = ({
     setChecking(true);
     try {
       const gate = buildCandidateGate();
-      const res = await validateCustomGate(gate);
+      const res = await validateCustomGate(gate, undefined, existingCustomGates);
       setValidation(res);
     } catch (err) {
       setValidation({
@@ -183,7 +185,7 @@ export const CustomGateModal: React.FC<CustomGateModalProps> = ({
 
   const handleSave = async () => {
     const gate = buildCandidateGate();
-    const res = await validateCustomGate(gate);
+    const res = await validateCustomGate(gate, undefined, existingCustomGates);
     setValidation(res);
     if (res.valid) {
       onSave(gate);

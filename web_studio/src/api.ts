@@ -58,7 +58,8 @@ export async function syncDslToProject(
 
 export async function validateCustomGate(
   gate: CustomGateDef,
-  sample_params?: number[]
+  sample_params?: number[],
+  existing_custom_gates?: CustomGateDef[]
 ): Promise<{
   valid: boolean;
   error?: string;
@@ -67,7 +68,11 @@ export async function validateCustomGate(
   has_hamiltonian?: boolean;
   matrix_preview: string[][];
 }> {
-  return postJson('/api/custom-gate/validate', { gate, sample_params });
+  return postJson('/api/custom-gate/validate', {
+    gate,
+    sample_params,
+    existing_custom_gates: existing_custom_gates || [],
+  });
 }
 
 export async function runSimulation(project: ProjectModel): Promise<SimulationResponse> {

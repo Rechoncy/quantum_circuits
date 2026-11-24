@@ -32,13 +32,82 @@ from ..core.noise import NoiseChannel, PAULI_LABELS_1Q, PAULI_LABELS_2Q, Readout
 from .base import (
     EvolutionResult,
     StepSnapshot,
+    apply_operator_to_density_matrix,
+    apply_operator_to_statevector,
     apply_readout_confusion,
     compute_bloch_vectors,
     compute_populations,
     sample_from_probabilities,
     state_fidelity_with_pure,
 )
-from .kraus_backend import apply_kraus_channel
+from .kraus_backend import _fast_purity, apply_kraus_channel
+
+
+_QT_I2 = qt.qeye(2)
+_QT_PAULIS = {
+    "I": _QT_I2,
+    "X": qt.sigmax(),
+    "Y": qt.sigmay(),
+    "Z": qt.sigmaz(),
+}
+
+
+def _embed_sparse_qobj(
+    local_mat: np.ndarray,
+    qubits: Sequence[int],
+    num_qubits: int,
+) -> qt.Qobj:
+    """
+    Embed a 1Q, 2Q, or 3Q local operator into an N-qubit Hilbert space as a native
+    CSR sparse `qt.Qobj` via `qt.tensor`, avoiding any dense 2^N x 2^N allocation!
+    Follows big-endian ordering |q_0, q_1, ..., q_{N-1}>.
+    """
+    k = len(qubits)
+    dims_zero = qt.tensor([_QT_I2] * num_qubits) * 0.0
+    if k == 1:
+        q0 = qubits[0]
+        q_op = qt.Qobj(np.asarray(local_mat, dtype=np.complex128))
+        return qt.tensor([q_op if i == q0 else _QT_I2 for i in range(num_qubits)])
+
+    if k == 2:
+        qa, qb = qubits[0], qubits[1]
+        acc: Optional[qt.Qobj] = None
+        for la in PAULI_LABELS_1Q:
+            pa = PAULIS_1Q[la]
+            for lb in PAULI_LABELS_1Q:
+                p2 = np.kron(pa, PAULIS_1Q[lb])
+                coeff = 0.25 * complex(np.trace(p2 @ local_mat))
+                if abs(coeff) > 1e-13:
+                    factors = [
+                        _QT_PAULIS[la] if i == qa else (_QT_PAULIS[lb] if i == qb else _QT_I2)
+                        for i in range(num_qubits)
+                    ]
+                    term = coeff * qt.tensor(factors)
+                    acc = term if acc is None else (acc + term)
+        return acc if acc is not None else dims_zero
+
+    if k == 3:
+        qa, qb, qc = qubits[0], qubits[1], qubits[2]
+        acc3: Optional[qt.Qobj] = None
+        for la in PAULI_LABELS_1Q:
+            pa = PAULIS_1Q[la]
+            for lb in PAULI_LABELS_1Q:
+                pab = np.kron(pa, PAULIS_1Q[lb])
+                for lc in PAULI_LABELS_1Q:
+                    p3 = np.kron(pab, PAULIS_1Q[lc])
+                    coeff = 0.125 * complex(np.trace(p3 @ local_mat))
+                    if abs(coeff) > 1e-13:
+                        factors = [
+                            _QT_PAULIS[la]
+                            if i == qa
+                            else (_QT_PAULIS[lb] if i == qb else (_QT_PAULIS[lc] if i == qc else _QT_I2))
+                            for i in range(num_qubits)
+                        ]
+                        term = coeff * qt.tensor(factors)
+                        acc3 = term if acc3 is None else (acc3 + term)
+        return acc3 if acc3 is not None else dims_zero
+
+    return qt.Qobj(embed_gate_unitary(local_mat, qubits, num_qubits), dims=[[2] * num_qubits, [2] * num_qubits])
 
 
 def _build_qutip_collapse_operators(
@@ -46,30 +115,26 @@ def _build_qutip_collapse_operators(
     num_qubits: int,
 ) -> List[qt.Qobj]:
     """
-    Construct physical Lindblad collapse operators {L_k} in units of (ns)^{-1/2}:
+    Construct physical Lindblad collapse operators {L_k} in units of (ns)^{-1/2} as sparse Qobjs:
       - Amplitude damping (T1): L_{1,q} = (1 / sqrt(T1_ns)) * sigma_minus_q
       - Pure dephasing (T_phi): L_{phi,q} = (1 / sqrt(2 * T_phi_ns)) * sigma_z_q
-        (since D[sigma_z](rho) = sigma_z rho sigma_z - rho decays off-diagonal elements at rate 2 * gamma_phi)
     """
     if hardware is None:
         return []
 
     c_ops: List[qt.Qobj] = []
-    dims = [[2] * num_qubits, [2] * num_qubits]
-    sm_1q = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128)  # |0><1|
+    sm_1q = qt.Qobj(np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128))  # |0><1|
 
     for q in range(num_qubits):
         qp = hardware.qubit_params[q]
         if qp.t1_ns > 0 and math.isfinite(qp.t1_ns):
             rate_1 = 1.0 / math.sqrt(qp.t1_ns)
-            op_full = embed_gate_unitary(rate_1 * sm_1q, (q,), num_qubits)
-            c_ops.append(qt.Qobj(op_full, dims=dims))
+            c_ops.append(rate_1 * qt.tensor([sm_1q if i == q else _QT_I2 for i in range(num_qubits)]))
 
         t_phi = qp.t_phi_ns
         if t_phi > 0 and math.isfinite(t_phi):
             rate_phi = 1.0 / math.sqrt(2.0 * t_phi)
-            op_full = embed_gate_unitary(rate_phi * PAULI_Z, (q,), num_qubits)
-            c_ops.append(qt.Qobj(op_full, dims=dims))
+            c_ops.append(rate_phi * qt.tensor([_QT_PAULIS["Z"] if i == q else _QT_I2 for i in range(num_qubits)]))
 
     return c_ops
 
@@ -79,23 +144,21 @@ def _build_drift_hamiltonian(
     num_qubits: int,
 ) -> qt.Qobj:
     """
-    Construct static drift Hamiltonian H_drift (in rad/ns, i.e., GHz * 2pi):
+    Construct static drift Hamiltonian H_drift (in rad/ns, i.e., GHz * 2pi) as a sparse Qobj:
       H_drift = sum_{(i,j)} 2*pi * (J_zz_MHz * 1e-3) * (Z_i ⊗ Z_j) / 4
-    representing residual ZZ crosstalk between coupled physical qubits.
     """
-    dim = 1 << num_qubits
-    dims = [[2] * num_qubits, [2] * num_qubits]
-    H_mat = np.zeros((dim, dim), dtype=np.complex128)
+    H_qobj = qt.tensor([_QT_I2] * num_qubits) * 0.0
 
     if hardware is not None:
-        zz_2q = np.kron(PAULI_Z, PAULI_Z)
-        for pair, cp in hardware.coupler_params.items():
-            if abs(cp.zz_crosstalk_mhz) > 1e-12 and pair[0] < num_qubits and pair[1] < num_qubits:
-                # 1 MHz = 1e-3 GHz = 1e-3 cycles/ns => angular frequency = 2*pi * 1e-3 rad/ns
+        for (qa, qb), cp in hardware.coupler_params.items():
+            if abs(cp.zz_crosstalk_mhz) > 1e-12 and qa < num_qubits and qb < num_qubits:
                 omega_zz = 2.0 * math.pi * (cp.zz_crosstalk_mhz * 1e-3)
-                H_mat += 0.25 * omega_zz * embed_gate_unitary(zz_2q, pair, num_qubits)
+                zz_qobj = qt.tensor(
+                    [_QT_PAULIS["Z"] if (i == qa or i == qb) else _QT_I2 for i in range(num_qubits)]
+                )
+                H_qobj = H_qobj + (0.25 * omega_zz) * zz_qobj
 
-    return qt.Qobj(H_mat, dims=dims)
+    return H_qobj
 
 
 def _make_pulse_envelope(pulse_shape: str, gate_dt: float):
@@ -144,6 +207,8 @@ class QuTiPBackend:
     experimental decoherence (T1, T2*), static ZZ crosstalk, and control errors.
     """
 
+    MAX_QUTIP_QUBITS = 9
+
     def __init__(self, intra_gate_steps: int = 15) -> None:
         self.intra_gate_steps = max(3, int(intra_gate_steps))
 
@@ -156,8 +221,14 @@ class QuTiPBackend:
         initial_state: Optional[np.ndarray] = None,
     ) -> EvolutionResult:
         n = circuit.num_qubits
+        if n > self.MAX_QUTIP_QUBITS:
+            raise ValueError(
+                f"QuTiP 连续脉冲主方程最高支持 {self.MAX_QUTIP_QUBITS} 比特（当前 {n}Q）。"
+                "请切换至 Kraus (≤14Q)、Trajectory (≤24Q) 或 Stim (500+Q) 引擎。"
+            )
         dim = 1 << n
         dims = [[2] * n, [2] * n]
+        store_step_rho = n <= 7
 
         if initial_state is None:
             psi_ideal = np.zeros(dim, dtype=np.complex128)
@@ -182,15 +253,17 @@ class QuTiPBackend:
         elapsed_ns = 0.0
         step_idx = 0
 
+        zero_qobj = qt.tensor([_QT_I2] * n) * 0.0
+
         steps.append(
             StepSnapshot(
                 step_index=0,
                 operation_label="INIT |0...0>",
                 elapsed_time_ns=0.0,
-                density_matrix=rho.copy(),
-                ideal_statevector=psi_ideal.copy(),
+                density_matrix=rho.copy() if store_step_rho else None,
+                ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                 state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                purity=float(np.real(np.trace(rho @ rho))),
+                purity=_fast_purity(rho),
                 bloch_vectors=compute_bloch_vectors(rho, n),
                 populations=compute_populations(rho, n),
             )
@@ -230,19 +303,17 @@ class QuTiPBackend:
                 step_idx += 1
                 gate_dts: List[float] = []
                 for g in layer_gates:
-                    U_g_full = embed_gate_unitary(g.unitary(), g.qubits, n)
-                    psi_ideal = U_g_full @ psi_ideal
+                    psi_ideal = apply_operator_to_statevector(psi_ideal, g.unitary(), g.qubits, n)
                     dt_g = g.duration_ns
                     if dt_g is None:
                         dt_g = hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0
                     gate_dts.append(float(dt_g))
 
-                # Apply zero-duration Virtual-Z / instantaneous gates first
+                # Apply zero-duration Virtual-Z / instantaneous gates first via O(4^N) tensor contraction
                 finite_entries: List[Tuple[GateInstruction, float]] = []
                 for g, dt_g in zip(layer_gates, gate_dts):
                     if dt_g <= 1e-9:
-                        U_g_full = embed_gate_unitary(g.unitary(), g.qubits, n)
-                        rho = U_g_full @ rho @ U_g_full.conj().T
+                        rho = apply_operator_to_density_matrix(rho, g.unitary(), g.qubits, n)
                     else:
                         finite_entries.append((g, dt_g))
 
@@ -255,28 +326,29 @@ class QuTiPBackend:
                 else:
                     all_ideal_layer = all(g.skip_hw_noise for g, _ in finite_entries)
                     layer_c_ops = [] if all_ideal_layer else c_ops
-                    layer_drift = qt.Qobj(np.zeros((dim, dim), dtype=np.complex128), dims=dims) if all_ideal_layer else H_drift
+                    layer_drift = zero_qobj if all_ideal_layer else H_drift
 
-                    # Build combined parallel Hamiltonian H(t) = H_drift + sum_g H_ctrl_g * env_g(t)
+                    # Build combined sparse parallel Hamiltonian H(t) = H_drift + sum_g H_ctrl_g * env_g(t)
                     H_td_list: List = [layer_drift]
-                    static_ctrl = np.zeros((dim, dim), dtype=np.complex128)
+                    static_ctrl_qobj: Optional[qt.Qobj] = None
                     has_td = False
 
                     for g, dt_g in finite_entries:
                         if g.custom_hamiltonian is not None:
-                            H_gen_full = embed_gate_unitary(g.custom_hamiltonian, g.qubits, n)
+                            H_gen_qobj = _embed_sparse_qobj(g.custom_hamiltonian, g.qubits, n)
                         else:
                             H_gen_local, theta = gate_hamiltonian_generator(g.name, g.params, g.custom_matrix)
-                            H_gen_full = embed_gate_unitary(0.5 * theta * H_gen_local, g.qubits, n)
+                            H_gen_qobj = _embed_sparse_qobj(0.5 * theta * H_gen_local, g.qubits, n)
 
                         if pulse_shape == "rectangular" and abs(dt_g - dt_layer) <= 1e-9:
-                            static_ctrl += (1.0 / dt_g) * H_gen_full
+                            term = (1.0 / dt_g) * H_gen_qobj
+                            static_ctrl_qobj = term if static_ctrl_qobj is None else (static_ctrl_qobj + term)
                         else:
                             has_td = True
-                            H_td_list.append([qt.Qobj(H_gen_full, dims=dims), _make_pulse_envelope(pulse_shape, dt_g)])
+                            H_td_list.append([H_gen_qobj, _make_pulse_envelope(pulse_shape, dt_g)])
 
-                    if np.any(np.abs(static_ctrl) > 1e-15):
-                        H_td_list[0] = layer_drift + qt.Qobj(static_ctrl, dims=dims)
+                    if static_ctrl_qobj is not None:
+                        H_td_list[0] = layer_drift + static_ctrl_qobj
 
                     H_td = H_td_list if has_td else H_td_list[0]
                     t_local = np.linspace(0.0, dt_layer, self.intra_gate_steps)
@@ -327,10 +399,10 @@ class QuTiPBackend:
                         step_index=step_idx,
                         operation_label=layer_label,
                         elapsed_time_ns=elapsed_ns,
-                        density_matrix=rho.copy(),
-                        ideal_statevector=psi_ideal.copy(),
+                        density_matrix=rho.copy() if store_step_rho else None,
+                        ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                         state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                        purity=float(np.real(np.trace(rho @ rho))),
+                        purity=_fast_purity(rho),
                         bloch_vectors=compute_bloch_vectors(rho, n),
                         populations=compute_populations(rho, n),
                         pulse_times_ns=t_grid,
@@ -347,10 +419,10 @@ class QuTiPBackend:
                         step_index=step_idx,
                         operation_label=f"NOISE[{op.channel.kind}] @{op.channel.qubits}",
                         elapsed_time_ns=elapsed_ns,
-                        density_matrix=rho.copy(),
-                        ideal_statevector=psi_ideal.copy(),
+                        density_matrix=rho.copy() if store_step_rho else None,
+                        ideal_statevector=psi_ideal.copy() if store_step_rho else None,
                         state_fidelity=state_fidelity_with_pure(rho, psi_ideal),
-                        purity=float(np.real(np.trace(rho @ rho))),
+                        purity=_fast_purity(rho),
                         bloch_vectors=compute_bloch_vectors(rho, n),
                         populations=compute_populations(rho, n),
                     )
