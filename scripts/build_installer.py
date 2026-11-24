@@ -1,9 +1,9 @@
 """
-Build self-contained Windows Setup executable: `release/QuantumStudio_v2.3.0_Setup.exe`.
+Build self-contained Windows Setup executable: `release/QuantumStudio_v2.4.0_Setup.exe`.
 
 Combines:
   1. Compiled C# WinForms Setup & Uninstall stub (`InstallerStub.exe`, with custom icon & HKCU registry support)
-  2. Compressed ZIP archive of Quantum Studio v2.3 (including embedded `python_env/`, `web_studio/dist/`,
+  2. Compressed ZIP archive of Quantum Studio v2.4 (including embedded `python_env/`, `web_studio/dist/`,
      `quantum_solver/`, `assets/`, `examples/`, and `QuantumStudio.exe`)
   3. 24-byte QSTUDIO2 trailer (`<QQ8s`: payload_offset, payload_length, b"QSTUDIO2")
 """
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RELEASE_DIR = ROOT / "release"
 STUB_EXE = RELEASE_DIR / "InstallerStub.exe"
 PAYLOAD_ZIP = RELEASE_DIR / "payload_temp.zip"
-FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.3.0_Setup.exe"
+FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.4.0_Setup.exe"
 
 CSC_EXE = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
@@ -157,6 +157,7 @@ def build_installer() -> None:
     (RELEASE_DIR / "QuantumStudio_v2.0.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.1.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.2.0_Setup.exe").unlink(missing_ok=True)
+    (RELEASE_DIR / "QuantumStudio_v2.3.0_Setup.exe").unlink(missing_ok=True)
 
     size_mb = FINAL_INSTALLER.stat().st_size / (1024 * 1024)
     elapsed = time.time() - t0

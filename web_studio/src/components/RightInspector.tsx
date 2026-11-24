@@ -142,12 +142,14 @@ const IOSSwitch: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> 
     role="switch"
     aria-checked={checked}
     onClick={() => onChange(!checked)}
-    className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-      checked ? 'bg-[#0A84FF]' : 'bg-[#D1D1D6] dark:bg-[#48484A]'
+    className={`w-9 h-[18px] rounded-[2px] border p-0.5 transition-colors cursor-pointer shrink-0 flex items-center ${
+      checked
+        ? 'bg-[var(--accent)] border-[var(--accent)]'
+        : 'bg-[var(--bg-subtle)] border-[var(--border-input)]'
     }`}
   >
     <div
-      className={`w-4 h-4 rounded-full bg-white shadow-xs transition-transform ${
+      className={`w-3.5 h-3 rounded-[1px] bg-white transition-transform ${
         checked ? 'translate-x-4' : 'translate-x-0'
       }`}
     />
@@ -155,8 +157,9 @@ const IOSSwitch: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> 
 );
 
 const SectionTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-secondary)] mb-2">
-    {children}
+  <div className="text-[10.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] mb-1.5 flex items-center gap-1.5">
+    <span className="w-1 h-2.5 bg-[var(--accent)] rounded-[1px]" />
+    <span>{children}</span>
   </div>
 );
 
@@ -203,7 +206,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const sim = project.sim_settings;
 
     return (
-      <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
+      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">模拟设置</div>
 
         {/* Solver Segmented Control */}
@@ -223,7 +226,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     ? 'Trajectory 纯态矢量蒙特卡洛轨迹 (≤24Q)'
                     : 'Stim 稳定子与泡利帧采样 (500+Q)'
                 }
-                className={`py-1.5 rounded-[7px] text-[11.5px] font-medium transition-all cursor-pointer ${
+                className={`py-1.5 rounded-[3px] text-[11.5px] font-medium transition-all cursor-pointer ${
                   sim.backend === b
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold shadow-2xs'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -382,7 +385,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     ];
 
     return (
-      <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
+      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">最优门综合配置</div>
 
         <div className="space-y-2.5">
@@ -465,7 +468,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     ];
 
     return (
-      <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
+      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">
           参数扫描与变分寻优
         </div>
@@ -492,7 +495,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     onSweepConfigChange({ mode: m });
                   }
                 }}
-                className={`py-1.5 rounded-[7px] text-[11.5px] font-medium cursor-pointer ${
+                className={`py-1.5 rounded-[3px] text-[11.5px] font-medium cursor-pointer ${
                   sweepConfig.mode === m
                     ? 'bg-[var(--bg-panel)] text-[#0A84FF] font-semibold shadow-2xs'
                     : 'text-[var(--text-secondary)]'
@@ -799,7 +802,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         customG?.duration_ns ?? (op.qubits.length >= 2 ? activeHw.t_2q_ns : activeHw.t_1q_ns);
 
       return (
-        <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
+        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
           <div className="flex items-center justify-between">
             <div className="text-[14px] font-semibold text-[var(--text-primary)] font-mono-num truncate">
               选中: {customG?.display_label || op.name} · {qNames}
@@ -1041,7 +1044,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const q = project.qubits.find((item) => item.id === selection.qubitId);
     if (q) {
       return (
-        <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-5">
+        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: q.color }} />
@@ -1189,7 +1192,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const cg = project.custom_gates.find((g) => g.id === selection.gateId);
     if (cg) {
       return (
-        <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-4">
+        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
           <div className="flex items-center justify-between">
             <div className="text-[14px] font-semibold font-mono-num">
               自定义门 · {cg.display_label || cg.name}
@@ -1252,7 +1255,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     activeHw;
 
   return (
-    <aside className="w-[296px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border-hairline)] overflow-y-auto p-4 space-y-4">
+    <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
       <div>
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">{hw.name}</div>
         <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">

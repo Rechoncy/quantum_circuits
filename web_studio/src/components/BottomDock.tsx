@@ -114,8 +114,8 @@ export const BottomDock: React.FC<BottomDockProps> = ({
         />
       )}
       {/* Tab Header */}
-      <div className="h-9 px-4 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0 select-none">
-        <div className="flex items-center gap-5 h-full">
+      <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0 select-none">
+        <div className="flex items-center gap-3.5 h-full overflow-x-auto min-w-0">
           {[
             { id: 'code', label: '代码' },
             { id: 'params', label: `参数 (${varEntries.length})` },
@@ -131,9 +131,9 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                   setTab(t.id as typeof tab);
                   if (collapsed) setCollapsed(false);
                 }}
-                className={`h-full text-[12.5px] font-medium border-b-2 transition-colors cursor-pointer ${
+                className={`h-full text-[12px] font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   active
-                    ? 'border-[#0A84FF] text-[var(--text-primary)] font-semibold'
+                    ? 'border-[var(--accent)] text-[var(--text-primary)] font-semibold'
                     : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
               >

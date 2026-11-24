@@ -196,7 +196,7 @@ export const CustomGateModal: React.FC<CustomGateModalProps> = ({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[3px] studio-modal-backdrop flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 bg-black/55 studio-modal-backdrop flex items-center justify-center p-4">
       <div className="w-full max-w-[680px] max-h-[88vh] studio-modal-surface flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between">
@@ -232,9 +232,9 @@ export const CustomGateModal: React.FC<CustomGateModalProps> = ({
                   setDefType(item.id as CustomGateDefinitionType);
                   setValidation(null);
                 }}
-                className={`py-1.5 rounded-[7px] text-[12px] font-medium transition-all cursor-pointer ${
+                className={`py-1.5 rounded-[3px] text-[12px] font-medium transition-all cursor-pointer ${
                   defType === item.id
-                    ? 'bg-[var(--bg-panel)] text-[#0A84FF] font-semibold shadow-2xs'
+                    ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold border border-[var(--border-hairline)]'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
               >

@@ -31,6 +31,7 @@ import {
   syncQasmToProject,
 } from './api';
 import { TopToolbar } from './components/TopToolbar';
+import { ActivityBar } from './components/ActivityBar';
 import { LeftNavigator } from './components/LeftNavigator';
 import { CircuitCanvas } from './components/CircuitCanvas';
 import {
@@ -57,9 +58,9 @@ export default function App() {
   const [past, setPast] = useState<ProjectModel[]>([]);
   const [future, setFuture] = useState<ProjectModel[]>([]);
 
-  // Workspace UI state
+  // Workspace UI state (Default to Industrial Dark Mode)
   const [mode, setMode] = useState<WorkMode>('design');
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
   const [selection, setSelection] = useState<SelectionTarget>({ type: 'none' });
@@ -1331,8 +1332,23 @@ export default function App() {
         onOpenNlModal={() => setNlModalOpen(true)}
       />
 
-      {/* Main Three-Pane IDE Workspace */}
+      {/* Main IDE Workbench: ActivityBar + Left Explorer + Stage + Right Inspector */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
+        <ActivityBar
+          mode={mode}
+          onModeChange={(m) => {
+            setMode(m);
+            if (m === 'optimize' && !optResponse) handleRunOptimize();
+            if (m === 'sweep' && !sweepResponse) handleRunSweep();
+          }}
+          showLeft={showLeft}
+          showRight={showRight}
+          onToggleLeft={() => setShowLeft((v) => !v)}
+          onToggleRight={() => setShowRight((v) => !v)}
+          darkMode={darkMode}
+          onToggleDark={() => setDarkMode((d) => !d)}
+          onOpenNlModal={() => setNlModalOpen(true)}
+        />
         {/* Left Navigator Sidebar */}
         {showLeft && (
           <LeftNavigator
@@ -1722,22 +1738,37 @@ export default function App() {
         )}
       </div>
 
-      {/* Bottom Thin Status Bar */}
-      <footer className="h-7 shrink-0 bg-[var(--bg-panel)] border-t border-[var(--border-hairline)] px-3 flex items-center justify-between text-[11.5px] text-[var(--text-secondary)] select-none">
-        <div className="flex items-center gap-1.5 truncate">
+      {/* Bottom Industrial EDA Segmented Status Bar */}
+      <footer className="h-[24px] shrink-0 bg-[var(--bg-activity)] border-t border-[var(--border-hairline)] px-2.5 flex items-center justify-between text-[11px] font-mono-num text-[var(--text-secondary)] select-none">
+        <div className="flex items-center gap-2 truncate min-w-0">
           {isBusy ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0A84FF] shrink-0" />
+            <span className="px-1.5 py-0 rounded-[2px] bg-[var(--accent)] text-white text-[9.5px] font-bold flex items-center gap-1 shrink-0">
+              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              BUSY
+            </span>
           ) : statusMsg.includes('失败') ? (
-            <AlertCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+            <span className="px-1.5 py-0 rounded-[2px] bg-red-600 text-white text-[9.5px] font-bold flex items-center gap-1 shrink-0">
+              <AlertCircle className="w-2.5 h-2.5" />
+              ERR
+            </span>
           ) : (
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span className="px-1.5 py-0 rounded-[2px] bg-emerald-600/90 text-white text-[9.5px] font-bold flex items-center gap-1 shrink-0">
+              <CheckCircle2 className="w-2.5 h-2.5" />
+              READY
+            </span>
           )}
-          <span className="truncate font-mono-num">{statusMsg}</span>
+          <span className="truncate text-[var(--text-primary)]/90">{statusMsg}</span>
         </div>
-        <div className="flex items-center gap-3 font-mono-num shrink-0">
-          <span>{project.qubits.length} Qubits</span>
-          <span>{project.operations.filter((o) => o.kind === 'gate').length} Gates</span>
-          <span>{project.custom_gates.length} Custom</span>
+        <div className="flex items-center h-full shrink-0 divide-x divide-[var(--border-hairline)]">
+          <span className="px-2.5 hidden md:inline">
+            HW:{' '}
+            {project.hardware_profiles.find((h) => h.id === project.active_hardware_id)?.name ||
+              project.active_hardware_id}
+          </span>
+          <span className="px-2.5 uppercase">ENG: {project.sim_settings.backend}</span>
+          <span className="px-2.5">{project.qubits.length}Q</span>
+          <span className="px-2.5">{project.operations.filter((o) => o.kind === 'gate').length} GATES</span>
+          <span className="pl-2.5">{project.custom_gates.length} MACRO</span>
         </div>
       </footer>
 

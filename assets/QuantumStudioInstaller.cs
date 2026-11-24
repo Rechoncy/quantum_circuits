@@ -9,11 +9,11 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("Quantum Studio v2.3.0 Setup")]
-[assembly: AssemblyDescription("Quantum Studio v2.3.0 Self-Contained Desktop Installer & Uninstaller (Embedded Python 3.13 + QuTiP + Trajectory + Stim)")]
+[assembly: AssemblyTitle("Quantum Studio v2.4.0 Setup")]
+[assembly: AssemblyDescription("Quantum Studio v2.4.0 Self-Contained Desktop Installer & Uninstaller (Embedded Python 3.13 + QuTiP + Trajectory + Stim)")]
 [assembly: AssemblyProduct("Quantum Studio v2")]
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion("2.4.0.0")]
+[assembly: AssemblyFileVersion("2.4.0.0")]
 
 namespace QuantumStudioSetup
 {
@@ -93,15 +93,15 @@ namespace QuantumStudioSetup
 
         public SetupForm(string defaultDir)
         {
-            Text = "Quantum Studio v2.3.0 安装程序";
+            Text = "Quantum Studio v2.4.0 安装程序";
             Size = new Size(560, 395);
             MinimumSize = new Size(560, 395);
             MaximumSize = new Size(560, 395);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(245, 245, 247);
-            Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Regular);
+            BackColor = Color.FromArgb(238, 241, 246);
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
 
             try
             {
@@ -114,7 +114,7 @@ namespace QuantumStudioSetup
             {
                 Dock = DockStyle.Top,
                 Height = 76,
-                BackColor = Color.FromArgb(15, 34, 68)
+                BackColor = Color.FromArgb(15, 20, 27)
             };
 
             PictureBox logoBox = new PictureBox
@@ -132,7 +132,7 @@ namespace QuantumStudioSetup
 
             Label titleLbl = new Label
             {
-                Text = "Quantum Studio v2.3.0",
+                Text = "Quantum Studio v2.4.0",
                 ForeColor = Color.White,
                 Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold),
                 Location = new Point(80, 14),
@@ -234,7 +234,7 @@ namespace QuantumStudioSetup
                 Text = "立即安装",
                 Location = new Point(332, 316),
                 Size = new Size(100, 32),
-                BackColor = Color.FromArgb(0, 113, 227),
+                BackColor = Color.FromArgb(15, 98, 254),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
             };
@@ -316,7 +316,7 @@ namespace QuantumStudioSetup
                         bool launchNow = _chkLaunch.Checked;
                         MessageBox.Show(
                             this,
-                            "Quantum Studio v2.3.0 已成功安装至:\n" + targetDir + "\n\n（如需卸载，可在 Windows「设置 → 已安装的应用」或安装目录运行 Uninstall.exe）",
+                            "Quantum Studio v2.4.0 已成功安装至:\n" + targetDir + "\n\n（如需卸载，可在 Windows「设置 → 已安装的应用」或安装目录运行 Uninstall.exe）",
                             "安装成功",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information
@@ -502,8 +502,8 @@ namespace QuantumStudioSetup
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UNINSTALL_REG_KEY))
                 {
                     if (key == null) return;
-                    key.SetValue("DisplayName", "Quantum Studio v2.3.0");
-                    key.SetValue("DisplayVersion", "2.3.0");
+                    key.SetValue("DisplayName", "Quantum Studio v2.4.0");
+                    key.SetValue("DisplayVersion", "2.4.0");
                     key.SetValue("Publisher", "Quantum Studio Project");
                     key.SetValue("InstallLocation", targetDir);
                     key.SetValue("DisplayIcon", File.Exists(iconPath) ? iconPath : appExe);
@@ -562,7 +562,7 @@ namespace QuantumStudioSetup
             if (!silent)
             {
                 DialogResult dr = MessageBox.Show(
-                    "确定要卸载 Quantum Studio v2.3.0 并移除快捷方式与安装目录吗？\n\n目录: " + targetDir,
+                    "确定要卸载 Quantum Studio v2.4.0 并移除快捷方式与安装目录吗？\n\n目录: " + targetDir,
                     "卸载 Quantum Studio",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question

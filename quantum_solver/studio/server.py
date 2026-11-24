@@ -56,7 +56,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.3.0")
+    app = FastAPI(title="Quantum Studio API", version="2.4.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -68,7 +68,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.3.0"}
+        return {"status": "ok", "version": "2.4.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:

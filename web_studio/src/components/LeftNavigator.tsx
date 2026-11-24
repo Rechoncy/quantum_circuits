@@ -88,8 +88,12 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
   };
 
   return (
-    <aside className="w-[244px] shrink-0 bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)] flex flex-col select-none">
-      <div className="flex-1 min-h-0 overflow-y-auto py-2.5 px-2.5 space-y-1.5">
+    <aside className="w-[236px] shrink-0 bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)] flex flex-col select-none">
+      <div className="h-7 px-3 border-b border-[var(--border-hairline)] bg-[var(--bg-subtle)] flex items-center justify-between text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] shrink-0">
+        <span>EXPLORER · 工程结构</span>
+        <span>{project.qubits.length}Q</span>
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto py-2 px-2 space-y-1.5">
       {/* Section 1: Quantum Register */}
       <div>
         <div className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-[var(--text-secondary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors">
@@ -573,10 +577,10 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
       </div>
 
       {/* Subtle Bottom Shortcut Hint Strip */}
-      <div className="px-3 py-2 border-t border-[var(--border-hairline)] flex items-center justify-between text-[10px] font-mono-num text-[var(--text-tertiary)] shrink-0">
-        <span>⌘K AI助手</span>
-        <span>⌘↵ 运行</span>
-        <span>Space 播放</span>
+      <div className="px-2.5 py-1.5 border-t border-[var(--border-hairline)] bg-[var(--bg-subtle)] flex items-center justify-between text-[9.5px] font-mono-num text-[var(--text-tertiary)] shrink-0">
+        <span>Ctrl+K AI</span>
+        <span>Ctrl+↵ RUN</span>
+        <span>Space PLAY</span>
       </div>
     </aside>
   );

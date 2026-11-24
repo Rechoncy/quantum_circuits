@@ -255,27 +255,27 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     const cg = customGateMap.get(u);
     if (cg) {
       return {
-        bg: 'bg-purple-50 dark:bg-purple-500/15',
-        border: 'border-purple-300 dark:border-purple-400/50',
-        text: 'text-purple-800 dark:text-purple-200',
+        bg: 'bg-[#f5f3ff] dark:bg-[#251d3a]',
+        border: 'border-violet-400 dark:border-violet-400/70',
+        text: 'text-violet-900 dark:text-violet-200',
         label: cg.display_label || cg.name,
         isCustom: true,
       };
     }
     if (op.kind === 'measure') {
       return {
-        bg: 'bg-[#F2F2F7] dark:bg-white/10',
-        border: 'border-[#C7C7CC] dark:border-white/25',
-        text: 'text-[#3A3A3C] dark:text-gray-200',
+        bg: 'bg-[#e2e8f0] dark:bg-[#242e3d]',
+        border: 'border-slate-400 dark:border-slate-500/80',
+        text: 'text-slate-800 dark:text-slate-200',
         label: 'M',
         isCustom: false,
       };
     }
     if (op.kind === 'noise') {
       return {
-        bg: 'bg-amber-50 dark:bg-amber-500/15',
-        border: 'border-amber-300 border-dashed dark:border-amber-400/60',
-        text: 'text-amber-800 dark:text-amber-200',
+        bg: 'bg-[#fffbeb] dark:bg-[#332613]',
+        border: 'border-amber-400 border-dashed dark:border-amber-400/75',
+        text: 'text-amber-900 dark:text-amber-200',
         label: op.name.slice(0, 5),
         isCustom: false,
       };
@@ -283,26 +283,26 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     const bgInfo = builtinMap.get(u);
     if (bgInfo?.tint === 'teal') {
       return {
-        bg: 'bg-emerald-50/90 dark:bg-emerald-500/15',
-        border: u === 'RZ' ? 'border-emerald-400 border-dashed' : 'border-emerald-300 dark:border-emerald-400/50',
-        text: 'text-emerald-800 dark:text-emerald-200',
+        bg: 'bg-[#ecfdf5] dark:bg-[#122b26]',
+        border: u === 'RZ' ? 'border-emerald-500 border-dashed dark:border-emerald-400/80' : 'border-emerald-400 dark:border-emerald-400/70',
+        text: 'text-emerald-900 dark:text-emerald-200',
         label: bgInfo.label,
         isCustom: false,
       };
     }
     if (bgInfo?.tint === 'indigo') {
       return {
-        bg: 'bg-indigo-50 dark:bg-indigo-500/15',
-        border: 'border-indigo-300 dark:border-indigo-400/50',
-        text: 'text-indigo-800 dark:text-indigo-200',
+        bg: 'bg-[#eef2ff] dark:bg-[#1c2340]',
+        border: 'border-indigo-400 dark:border-indigo-400/75',
+        text: 'text-indigo-900 dark:text-indigo-200',
         label: bgInfo.label,
         isCustom: false,
       };
     }
     return {
-      bg: 'bg-sky-50 dark:bg-sky-500/15',
-      border: 'border-sky-300 dark:border-sky-400/50',
-      text: 'text-sky-900 dark:text-sky-200',
+      bg: 'bg-[#eff6ff] dark:bg-[#15263d]',
+      border: 'border-sky-400 dark:border-sky-400/75',
+      text: 'text-sky-950 dark:text-sky-200',
       label: bgInfo?.label || op.name,
       isCustom: false,
     };
@@ -395,14 +395,14 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     const active = activeToolGate === gName;
     const tintCls =
       gName === 'MEASURE'
-        ? 'bg-[#F2F2F7] dark:bg-white/10 border-[#C7C7CC] dark:border-white/20 text-[#3A3A3C] dark:text-gray-200'
+        ? 'bg-[#e2e8f0] dark:bg-[#242e3d] border-slate-400 dark:border-slate-500/80 text-slate-800 dark:text-slate-200'
         : gName === 'DEPOLARIZE'
-        ? 'bg-amber-50 dark:bg-amber-500/15 border-amber-300 border-dashed text-amber-800 dark:text-amber-200'
+        ? 'bg-[#fffbeb] dark:bg-[#332613] border-amber-400 border-dashed text-amber-900 dark:text-amber-200'
         : info?.tint === 'teal'
-        ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-300 dark:border-emerald-400/40 text-emerald-800 dark:text-emerald-200'
+        ? 'bg-[#ecfdf5] dark:bg-[#122b26] border-emerald-400 dark:border-emerald-400/70 text-emerald-900 dark:text-emerald-200'
         : info?.tint === 'indigo'
-        ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-300 dark:border-indigo-400/40 text-indigo-800 dark:text-indigo-200'
-        : 'bg-sky-50 dark:bg-sky-500/15 border-sky-300 dark:border-sky-400/40 text-sky-900 dark:text-sky-200';
+        ? 'bg-[#eef2ff] dark:bg-[#1c2340] border-indigo-400 dark:border-indigo-400/70 text-indigo-900 dark:text-indigo-200'
+        : 'bg-[#eff6ff] dark:bg-[#15263d] border-sky-400 dark:border-sky-400/70 text-sky-950 dark:text-sky-200';
     return (
       <button
         key={gName}
@@ -412,9 +412,11 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
           onPickGateTool(gName);
         }}
         onClick={() => onPickGateTool(active ? null : gName)}
-        title={`${info?.description || gName}（拖放到画布格点，或点击选中后点格点放置）`}
-        className={`h-7 min-w-[32px] px-2 rounded-lg border text-[11.5px] font-semibold font-mono-num transition-all cursor-grab active:cursor-grabbing ${tintCls} ${
-          active ? 'ring-2 ring-[#0A84FF] ring-offset-1 scale-105' : 'hover:scale-105'
+        title={`${info?.description || gName}（拖放到原理图格点，或点击选中后放置）`}
+        className={`h-[26px] min-w-[30px] px-2 rounded-[3px] border text-[11px] font-bold font-mono-num transition-colors cursor-grab active:cursor-grabbing ${tintCls} ${
+          active
+            ? 'ring-2 ring-[var(--accent)] border-[var(--accent)]'
+            : 'hover:border-[var(--accent)]'
         }`}
       >
         {info?.label || gName}
@@ -424,16 +426,22 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
 
   return (
     <div className="relative flex-1 flex flex-col dot-grid-canvas overflow-hidden">
-      {/* Floating Gate Palette in Design Mode */}
+      {/* Docked Industrial EDA Schematic Component Toolbar */}
       {!readOnly && (
-        <div className="pt-2.5 pb-1 px-4 flex items-center justify-center gap-2 z-10 pointer-events-none">
-          <div className="pointer-events-auto studio-vibrancy border border-[var(--border-hairline)] rounded-2xl shadow-[var(--shadow-card)] px-2.5 py-1.5 flex items-center gap-1.5 flex-wrap justify-center">
+        <div className="min-h-[38px] px-3 py-1 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 z-10 shrink-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
+              1Q
+            </span>
             {PALETTE_1Q.map(renderPaletteButton)}
-            <div className="w-[1px] h-5 bg-[var(--border-hairline)] mx-0.5" />
+            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
+            <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
+              2Q
+            </span>
             {PALETTE_2Q.map(renderPaletteButton)}
             {project.custom_gates.length > 0 && (
               <>
-                <div className="w-[1px] h-5 bg-[var(--border-hairline)] mx-0.5" />
+                <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
                 {project.custom_gates.slice(0, 2).map((cg) => {
                   const active = activeToolGate === cg.name;
                   return (
@@ -446,8 +454,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                       }}
                       onClick={() => onPickGateTool(active ? null : cg.name)}
                       title={`自定义门: ${cg.display_label || cg.name}`}
-                      className={`h-7 px-2 rounded-lg border bg-purple-50 dark:bg-purple-500/15 border-purple-300 dark:border-purple-400/50 text-purple-800 dark:text-purple-200 text-[11px] font-semibold font-mono-num transition-all cursor-grab ${
-                        active ? 'ring-2 ring-[#0A84FF] ring-offset-1 scale-105' : 'hover:scale-105'
+                      className={`h-[26px] px-2 rounded-[3px] border bg-[#f5f3ff] dark:bg-[#251d3a] border-violet-400 dark:border-violet-400/70 text-violet-900 dark:text-violet-200 text-[11px] font-bold font-mono-num transition-colors cursor-grab ${
+                        active ? 'ring-2 ring-[var(--accent)]' : 'hover:border-[var(--accent)]'
                       }`}
                     >
                       {cg.display_label || cg.name}
@@ -456,14 +464,31 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                 })}
               </>
             )}
-            <div className="w-[1px] h-5 bg-[var(--border-hairline)] mx-0.5" />
+            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
+            <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
+              UTIL
+            </span>
             {PALETTE_UTIL.map(renderPaletteButton)}
-            <div className="w-[1px] h-5 bg-[var(--border-hairline)] mx-0.5" />
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {multiSelectedIds.length >= 2 && onPackageMacro && (
+              <button
+                onClick={() => {
+                  onPackageMacro(multiSelectedIds);
+                  setMultiSelectedIds([]);
+                }}
+                className="h-[26px] px-2.5 rounded-[3px] bg-[var(--accent)] text-white text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                <Layers className="w-3 h-3" />
+                封装宏门 ({multiSelectedIds.length})
+              </button>
+            )}
             {onOpenNlModal && (
               <button
                 onClick={onOpenNlModal}
-                title="用自然语言对话生成与精调量子线路 (Ctrl+K)"
-                className="h-7 px-2.5 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-soft)] hover:bg-[var(--accent)]/16 text-[var(--accent)] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                title="用自然语言对话综合量子线路 (Ctrl+K)"
+                className="h-[26px] px-2 rounded-[3px] border border-[var(--accent)]/40 bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Sparkles className="w-3 h-3" />
                 <span>AI</span>
@@ -471,48 +496,35 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             )}
             <button
               onClick={handleExportSvg}
-              title="导出当前量子线路矢量图 (SVG)"
-              className="h-7 px-2 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[var(--text-secondary)] text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors"
+              title="导出当前量子原理图矢量文件 (SVG)"
+              className="h-[26px] px-2 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[var(--text-secondary)] text-[11px] font-mono-num font-medium flex items-center gap-1 cursor-pointer transition-colors"
             >
               <Download className="w-3 h-3" />
               <span>SVG</span>
             </button>
-
-            {multiSelectedIds.length >= 2 && onPackageMacro && (
-              <button
-                onClick={() => {
-                  onPackageMacro(multiSelectedIds);
-                  setMultiSelectedIds([]);
-                }}
-                className="ml-1 h-7 px-2.5 rounded-lg bg-[#0A84FF] text-white text-[11px] font-medium flex items-center gap-1 cursor-pointer"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                封装为复合门 ({multiSelectedIds.length})
-              </button>
-            )}
           </div>
         </div>
       )}
 
-      {/* Multi-qubit placement status toast */}
+      {/* Multi-qubit placement status banner */}
       {pendingFirstQubit && (
-        <div className="mx-auto mt-1 px-3 py-1 rounded-full bg-[#0A84FF] text-white text-[11.5px] font-medium shadow-sm flex items-center gap-2 z-20">
+        <div className="px-3 py-1 bg-[var(--accent)] text-white text-[11.5px] font-mono-num font-medium flex items-center justify-between gap-2 z-20 shrink-0">
           <span>
-            正在放置 {pendingFirstQubit.gateName}（已选{' '}
-            {pendingFirstQubit.qubits.map((q) => project.qubits[q]?.name || `q${q}`).join(', ')}）— 请点击下一个目标比特
+            [放置多比特门 {pendingFirstQubit.gateName}] 已锚定:{' '}
+            {pendingFirstQubit.qubits.map((q) => project.qubits[q]?.name || `q${q}`).join(', ')} → 请点击目标比特连线
           </span>
           <button
             onClick={() => setPendingFirstQubit(null)}
-            className="underline opacity-90 hover:opacity-100 cursor-pointer"
+            className="px-1.5 py-0.25 rounded-[2px] bg-black/20 hover:bg-black/35 text-[11px] cursor-pointer"
           >
-            取消
+            ESC 取消
           </button>
         </div>
       )}
 
       {/* Simulate Mode Timeline Scrubber Bar */}
       {readOnly && timeCursorStep !== undefined && maxCursorStep !== undefined && onTimeCursorChange && (
-        <div className="py-1.5 px-4 border-b border-[var(--border-hairline)]/70 bg-[var(--bg-panel)]/90 backdrop-blur-sm flex items-center justify-center z-10 shrink-0">
+        <div className="py-1 px-3 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] flex items-center justify-center z-10 shrink-0">
           <div className="w-full max-w-3xl flex items-center gap-2.5">
             <div className="flex items-center gap-1 shrink-0">
               <button
@@ -587,9 +599,9 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
       )}
 
       {titleBadge && (
-        <div className="px-4 py-1.5 border-b border-[var(--border-hairline)]/70 bg-[var(--bg-panel)]/85 backdrop-blur-sm text-[11.5px] font-semibold text-[var(--text-primary)] flex items-center justify-between gap-2 shrink-0">
+        <div className="px-3 py-1 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[11px] font-mono-num font-semibold text-[var(--text-primary)] flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#0A84FF] shrink-0" />
+            <span className="w-1.5 h-3 rounded-[1px] bg-[var(--accent)] shrink-0" />
             <span className="truncate">{titleBadge}</span>
           </div>
           <button

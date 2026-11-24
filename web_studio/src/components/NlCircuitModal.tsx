@@ -270,7 +270,7 @@ export const NlCircuitModal: React.FC<NlCircuitModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/45 backdrop-blur-[4px] studio-modal-backdrop flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/60 studio-modal-backdrop flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div

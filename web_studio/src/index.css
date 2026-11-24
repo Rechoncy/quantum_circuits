@@ -2,55 +2,67 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ==========================================================================
-   Quantum Studio v2 Design System
-   Synthesized from LuckyMaomi UI:
-   - Light surface & elevation: apple-style
-   - Dark layered vibrancy:     macos-vibrancy
-   - Analytics KPI cards:       shadcn-analytics & kokonutui-dashboard
-   - Inspector grouped forms:   settings-page
-   - AI Composer thread:        chat-messaging
+   Quantum Studio EDA / IDE Industrial Design System
+   Inspired by VS Code / Xilinx Vivado / IBM Quantum Composer:
+   - Zero macOS window chrome, zero frosted glass blur, zero pill bubbles
+   - Sharp 2px–4px CAD/IDE micro-radius across all controls, cards & gates
+   - High-contrast slate dark mode (default) & crisp schematic light mode
    ========================================================================== */
 
+@theme {
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 5px;
+  --radius-3xl: 6px;
+}
+
 :root {
-  --bg-app: #f5f5f7;
-  --bg-sidebar: #fafafc;
+  --bg-activity: #dfe4ec;
+  --bg-header: #e8ecf2;
+  --bg-app: #eef1f6;
+  --bg-sidebar: #f4f6f9;
   --bg-panel: #ffffff;
   --bg-elevated: #ffffff;
-  --bg-subtle: #f2f3f6;
-  --bg-vibrancy: rgba(255, 255, 255, 0.84);
-  --border-hairline: rgba(15, 23, 42, 0.085);
-  --border-input: rgba(15, 23, 42, 0.16);
-  --text-primary: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --text-tertiary: #8e8e93;
-  --accent: #0071e3;
-  --accent-hover: #0062c4;
-  --accent-soft: rgba(0, 113, 227, 0.1);
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.035), 0 4px 12px rgba(15, 23, 42, 0.025);
-  --shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.06), 0 10px 24px rgba(15, 23, 42, 0.05);
-  --shadow-btn-primary: 0 1px 2px rgba(0, 113, 227, 0.25), 0 4px 10px rgba(0, 113, 227, 0.18);
-  --shadow-modal: 0 24px 64px -12px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(15, 23, 42, 0.06);
+  --bg-subtle: #e9edf4;
+  --bg-vibrancy: #ffffff;
+  --border-hairline: #cbd3df;
+  --border-input: #9aa6b8;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #64748b;
+  --accent: #0f62fe;
+  --accent-hover: #0043ce;
+  --accent-soft: rgba(15, 98, 254, 0.11);
+  --shadow-card: none;
+  --shadow-card-hover: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --shadow-btn-primary: none;
+  --shadow-modal: 0 16px 40px rgba(15, 23, 42, 0.24), 0 0 0 1px #9aa6b8;
 }
 
 .dark {
-  --bg-app: #141416;
-  --bg-sidebar: #1b1b1e;
-  --bg-panel: #222226;
-  --bg-elevated: #2a2a2f;
-  --bg-subtle: #2b2b30;
-  --bg-vibrancy: rgba(28, 28, 32, 0.82);
-  --border-hairline: rgba(255, 255, 255, 0.085);
-  --border-input: rgba(255, 255, 255, 0.15);
-  --text-primary: #f5f5f7;
-  --text-secondary: #a1a1a6;
-  --text-tertiary: #7c7c82;
-  --accent: #0a84ff;
-  --accent-hover: #3b9bff;
-  --accent-soft: rgba(10, 132, 255, 0.16);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  --shadow-card-hover: 0 4px 16px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  --shadow-btn-primary: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 12px rgba(10, 132, 255, 0.28);
-  --shadow-modal: 0 28px 72px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --bg-activity: #0b0f14;
+  --bg-header: #0f141b;
+  --bg-app: #121720;
+  --bg-sidebar: #151b24;
+  --bg-panel: #1a222d;
+  --bg-elevated: #202a37;
+  --bg-subtle: #10151d;
+  --bg-vibrancy: #1a222d;
+  --border-hairline: #283241;
+  --border-input: #38465a;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b96a5;
+  --text-tertiary: #606c7c;
+  --accent: #2f81f7;
+  --accent-hover: #1f6feb;
+  --accent-soft: rgba(47, 129, 247, 0.16);
+  --shadow-card: none;
+  --shadow-card-hover: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-btn-primary: none;
+  --shadow-modal: 0 20px 48px rgba(0, 0, 0, 0.72), 0 0 0 1px #38465a;
 }
 
 html,
@@ -60,7 +72,7 @@ body,
   margin: 0;
   padding: 0;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "Inter", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: var(--bg-app);
@@ -68,82 +80,76 @@ body,
 }
 
 .font-mono-num {
-  font-family: "SF Mono", "JetBrains Mono", "Consolas", ui-monospace, monospace;
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
 }
 
-/* Crisp elevated surface cards (apple-style / macos-vibrancy) */
+/* Crisp flat CAD/IDE panels with 1px structural borders */
 .studio-card {
   background-color: var(--bg-panel);
   border: 1px solid var(--border-hairline);
-  border-radius: 16px;
-  box-shadow: var(--shadow-card);
+  border-radius: 4px;
+  box-shadow: none;
 }
 
 .studio-kpi {
   background-color: var(--bg-panel);
   border: 1px solid var(--border-hairline);
-  border-radius: 12px;
-  box-shadow: var(--shadow-card);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  border-radius: 4px;
+  box-shadow: none;
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
 
 .studio-kpi:hover {
   border-color: var(--border-input);
-  box-shadow: var(--shadow-card-hover);
 }
 
 .studio-vibrancy {
-  background-color: var(--bg-vibrancy);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  background-color: var(--bg-panel);
 }
 
 .studio-inset-group {
   background-color: var(--bg-subtle);
   border: 1px solid var(--border-hairline);
-  border-radius: 12px;
+  border-radius: 3px;
 }
 
 .studio-btn-primary {
   background-color: var(--accent);
   color: #ffffff;
-  box-shadow: var(--shadow-btn-primary);
-  transition: background-color 150ms ease, transform 120ms ease, box-shadow 150ms ease;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  transition: background-color 120ms ease;
 }
 
 .studio-btn-primary:hover:not(:disabled) {
   background-color: var(--accent-hover);
 }
 
-.studio-btn-primary:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
 .studio-modal-surface {
   background-color: var(--bg-panel);
-  border: 1px solid var(--border-hairline);
-  border-radius: 20px;
+  border: 1px solid var(--border-input);
+  border-radius: 5px;
   box-shadow: var(--shadow-modal);
-  animation: studioModalIn 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: studioModalIn 140ms ease-out both;
 }
 
 .studio-modal-backdrop {
-  animation: studioBackdropIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: studioBackdropIn 120ms ease-out both;
 }
 
 .studio-stage-enter {
-  animation: studioFadeSlideIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: studioFadeSlideIn 120ms ease-out both;
 }
 
 @keyframes studioModalIn {
   from {
     opacity: 0;
-    transform: scale(0.96) translateY(8px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -159,26 +165,23 @@ body,
 @keyframes studioFadeSlideIn {
   from {
     opacity: 0;
-    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
-/* Smooth gate card transitions on CircuitCanvas */
+/* Crisp schematic gate blocks on CircuitCanvas */
 .studio-gate-node {
   transition:
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 180ms ease,
-    border-color 150ms ease;
+    transform 120ms ease-out,
+    box-shadow 120ms ease-out,
+    opacity 120ms ease,
+    border-color 120ms ease;
 }
 
 .studio-gate-active {
-  transform: scale(1.05);
-  box-shadow: 0 0 0 2px var(--accent), 0 0 16px rgba(10, 132, 255, 0.38);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 12px rgba(47, 129, 247, 0.45);
   z-index: 25 !important;
 }
 
@@ -187,66 +190,67 @@ button:focus-visible,
 select:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 1.5px solid var(--accent);
+  outline-offset: 0px;
 }
 
-/* Subtle dot-grid circuit canvas */
+/* Precision CAD / Oscilloscope Engineering Grid Canvas */
 .dot-grid-canvas {
-  background-color: var(--bg-subtle);
-  background-image: radial-gradient(circle, rgba(142, 142, 147, 0.25) 1px, transparent 1px);
-  background-size: 16px 16px;
+  background-color: #f3f5f8;
+  background-image:
+    linear-gradient(to right, rgba(15, 23, 42, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.045) 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
 .dark .dot-grid-canvas {
-  background-color: #18181b;
-  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+  background-color: #0e131a;
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.055) 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
-/* Clean custom thin scrollbars */
+/* Industrial square-edged thin scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--bg-subtle);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(142, 142, 147, 0.32);
-  border-radius: 999px;
+  background: rgba(139, 150, 165, 0.32);
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(142, 142, 147, 0.55);
+  background: rgba(139, 150, 165, 0.55);
 }
 
-/* macOS Range Slider */
+/* EDA Precision Rectangular Fader Slider */
 input[type="range"].mac-slider {
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
-  background: rgba(15, 23, 42, 0.12);
-  border-radius: 999px;
+  background: var(--border-hairline);
+  border-radius: 1px;
   outline: none;
-}
-.dark input[type="range"].mac-slider {
-  background: rgba(255, 255, 255, 0.16);
 }
 input[type="range"].mac-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #ffffff;
-  border: 2px solid var(--accent);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  width: 9px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--accent);
+  border: 1px solid #ffffff;
   cursor: pointer;
 }
 
 /* Keep Plotly modebar clean & unobtrusive: reveal smoothly on hover */
 .js-plotly-plot .modebar {
   opacity: 0;
-  transition: opacity 150ms ease;
+  transition: opacity 120ms ease;
   top: 2px !important;
   right: 4px !important;
 }
@@ -254,12 +258,9 @@ input[type="range"].mac-slider::-webkit-slider-thumb {
   opacity: 0.92;
 }
 .js-plotly-plot .modebar-group {
-  background: rgba(255, 255, 255, 0.88) !important;
-  backdrop-filter: blur(8px);
-  border-radius: 6px;
-}
-.dark .js-plotly-plot .modebar-group {
-  background: rgba(34, 34, 38, 0.88) !important;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
 }
 
 /* Honor reduced-motion system preference */

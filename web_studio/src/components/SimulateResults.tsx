@@ -473,8 +473,8 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   return (
     <div className="flex-1 min-h-0 bg-[var(--bg-app)] flex flex-col overflow-hidden">
       {/* Sub-Tabs Bar (Always clean, never overflows!) */}
-      <div className="h-10 px-4 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-4 lg:gap-5 h-full shrink-0">
+      <div className="h-9 px-3 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-3.5 h-full overflow-x-auto min-w-0">
           {(
             [
               { id: 'evolution', label: '演化' },
@@ -482,18 +482,18 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               { id: 'measurement', label: '测量' },
               {
                 id: 'density',
-                label: rhoMatrix ? '密度矩阵 & 互信息' : '纠缠互信息 & 激发',
+                label: rhoMatrix ? '层析 & 互信息' : '纠缠互信息',
               },
-              { id: 'steps', label: '指标 & 明细' },
-              { id: 'zne', label: zneResponse ? '误差缓解 ZNE ✓' : '误差缓解 ZNE' },
+              { id: 'steps', label: '指标明细' },
+              { id: 'zne', label: zneResponse ? 'ZNE 缓解 ✓' : 'ZNE 缓解' },
             ] as const
           ).map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`h-full text-[12.5px] border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+              className={`h-full text-[12px] border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 tab === t.id
-                  ? 'border-[#0A84FF] text-[var(--text-primary)] font-semibold'
+                  ? 'border-[var(--accent)] text-[var(--text-primary)] font-semibold'
                   : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
             >
@@ -502,17 +502,17 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
           ))}
         </div>
 
-        <div className="flex items-center gap-2 text-[11.5px] font-mono-num text-[var(--text-secondary)] min-w-0">
+        <div className="flex items-center gap-1.5 text-[11px] font-mono-num text-[var(--text-secondary)] shrink-0">
           {!circuitCollapsed && (
-            <span className="hidden xl:inline truncate max-w-[180px]" title={`Step ${activeSnap.step_index}: ${cleanActiveOp}`}>
+            <span className="hidden 2xl:inline truncate max-w-[160px]" title={`Step ${activeSnap.step_index}: ${cleanActiveOp}`}>
               Step {activeSnap.step_index}: {cleanActiveOp}
             </span>
           )}
-          <span className="px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] shrink-0">
+          <span className="hidden xl:inline-flex px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] shrink-0">
             {interpElapsedNs.toFixed(1)} ns
           </span>
           {interpFidelity !== null && (
-            <span className="px-1.5 py-0.5 rounded bg-[#0A84FF]/10 text-[#0A84FF] font-semibold text-[11px] shrink-0">
+            <span className="hidden xl:inline-flex px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] font-semibold text-[11px] shrink-0">
               F = {interpFidelity.toFixed(4)}
             </span>
           )}
@@ -866,13 +866,13 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
         {/* TAB 1: EVOLUTION (Balanced Curve + High-DPI Interactive Bloch 3D) */}
         {/* =============================================================== */}
         {tab === 'evolution' && blochData && (
-          <div className="h-full flex flex-col gap-3 min-h-[340px]">
-            <div className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-3 min-h-[265px]">
+          <div className="min-h-full flex flex-col gap-3">
+            <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-[260px]">
               {/* Left Card: Continuous / Stepwise Bloch Curves */}
               {focusedEvoPanel !== 'sphere' && (
                 <div
                   className={`${
-                    focusedEvoPanel === 'curve' ? 'xl:col-span-12' : 'xl:col-span-7'
+                    focusedEvoPanel === 'curve' ? 'lg:col-span-12' : 'lg:col-span-7'
                   } flex flex-col studio-card overflow-hidden min-h-[245px]`}
                 >
                   {/* Crisp Card Header with Inline Qubit Pills & Clean External Legend */}
@@ -967,7 +967,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
 
               {/* Right Card: High-DPI Interactive 3D Bloch Sphere */}
               {focusedEvoPanel !== 'curve' && (
-                <div className={focusedEvoPanel === 'sphere' ? 'xl:col-span-12 min-h-[260px]' : 'xl:col-span-5 min-h-[260px]'}>
+                <div className={focusedEvoPanel === 'sphere' ? 'lg:col-span-12 min-h-[260px]' : 'lg:col-span-5 min-h-[260px]'}>
                   <BlochSphere3D
                     qubitName={obsName}
                     trajectory={blochData.trajectory}
@@ -1802,7 +1802,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
         {/* TAB 6: ZERO-NOISE EXTRAPOLATION (ZNE) ERROR MITIGATION          */}
         {/* =============================================================== */}
         {tab === 'zne' && (
-          <div className="h-full flex flex-col gap-3 min-h-[320px]">
+          <div className="min-h-full flex flex-col gap-3">
             {!zneResponse ? (
               <div className="flex-1 studio-card flex flex-col items-center justify-center gap-3 px-6 text-center">
                 <div className="w-10 h-10 rounded-full bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
@@ -1927,13 +1927,30 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-3">
                         {/* Left 7 Cols: Extrapolation Fit Plot */}
                         <div className="lg:col-span-7 studio-card flex flex-col overflow-hidden min-h-[220px]">
-                          <div className="h-8 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                          <div className="px-3.5 py-1.5 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2 shrink-0">
                             <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                               ZNE 零噪声极限外推曲线 — {metricTitle}
                             </span>
-                            <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">
-                              λ ∈ [{zneResponse.scale_factors.join(', ')}] → 0
-                            </span>
+                            <div className="flex flex-wrap items-center gap-2.5 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                              <span className="flex items-center gap-1">
+                                <span className="w-2 h-2 rounded-full bg-[#EF4444]" />
+                                含噪观测
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <span className="w-2.5 h-[2px] bg-[#0A84FF]" />
+                                线性ZNE
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <span className="w-2.5 h-[2px] bg-[#10B981]" />
+                                Richardson
+                              </span>
+                              {yIdeal !== null && (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2.5 h-[1.5px] border-t border-dashed border-[#94A3B8]" />
+                                  理想值
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <div className="flex-1 min-h-0 px-1.5 pb-1">
                             <PlotlyChart
@@ -1995,7 +2012,8 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                                 paper_bgcolor: plotBg,
                                 plot_bgcolor: plotBg,
                                 hovermode: 'closest',
-                                margin: { l: 52, r: 18, t: 12, b: 36 },
+                                showlegend: false,
+                                margin: { l: 52, r: 18, t: 14, b: 36 },
                                 xaxis: {
                                   title: {
                                     text: '噪声放大倍率 λ (λ → 0 为零噪声外推点)',
