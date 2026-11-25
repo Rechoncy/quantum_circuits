@@ -16,13 +16,14 @@ import type {
   GateBenchmarkResponse,
   GstBenchmarkResponse,
   RbBenchmarkResponse,
+  XebBenchmarkResponse,
 } from '../types';
 import { PlotlyChart } from './PlotlyChart';
 import { downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface BenchmarkWorkspaceProps {
-  activeProtocol: 'rb' | 'allxy' | 'gst';
-  onSwitchProtocol: (p: 'rb' | 'allxy' | 'gst') => void;
+  activeProtocol: 'rb' | 'allxy' | 'gst' | 'xeb';
+  onSwitchProtocol: (p: 'rb' | 'allxy' | 'gst' | 'xeb') => void;
   response: GateBenchmarkResponse | null;
   darkMode: boolean;
   onRunBenchmark: () => void;
@@ -86,7 +87,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         ].join(',')
       );
       downloadTextFile(`allxy_${r.target_label}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
-    } else {
+    } else if (matchingResp.protocol === 'gst') {
       const r = matchingResp;
       const header = 'gate_id,label,avg_gate_fidelity,process_fidelity,gate_infidelity,diamond_distance,unitarity,coherent_ratio';
       const rows = r.gates.map((g) =>
@@ -102,6 +103,11 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         ].join(',')
       );
       downloadTextFile(`gst_${r.target_label}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
+    } else {
+      const r = matchingResp;
+      const header = 'cycle_depth_m,mean_xeb,stderr_xeb';
+      const rows = r.lengths.map((m, i) => [m, r.mean_xeb[i], r.std_xeb[i]].join(','));
+      downloadTextFile(`xeb_${r.entangler_name}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
     }
   };
 
@@ -124,7 +130,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
       md += `- RMS 阶梯残差 $\\Delta\\langle Z \\rangle$: **${matchingResp.rms_error_z.toFixed(5)}**\n`;
       md += `- 估计拉比幅度偏差: **${matchingResp.estimated_amp_error_pct.toFixed(2)}%**\n`;
       md += `- 自动诊断结论: ${matchingResp.diagnosis}\n`;
-    } else {
+    } else if (matchingResp.protocol === 'gst') {
       md += `## Gate Set Tomography (GST) 门集层析汇总\n`;
       md += `- 门集平均保真度: **${(matchingResp.mean_gate_fidelity * 100).toFixed(4)}%**\n`;
       md += `- 最大半钻石距离 $\\frac{1}{2}\\|\\Delta\\mathcal{E}\\|_\\diamond$: **${matchingResp.max_diamond_distance.toFixed(5)}**\n`;
@@ -135,6 +141,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
       matchingResp.gates.forEach((g) => {
         md += `| ${g.gate_id} | ${g.label} | ${(g.avg_gate_fidelity * 100).toFixed(3)}% | ${(g.process_fidelity * 100).toFixed(3)}% | ${g.diamond_distance.toFixed(5)} | ${g.unitarity.toFixed(5)} | ${(g.coherent_ratio * 100).toFixed(1)}% |\n`;
       });
+    } else {
+      md += `## 双比特线性交叉熵基准 (2Q Linear XEB)\n`;
+      md += `- 待测纠缠门: **${matchingResp.entangler_name}**\n`;
+      md += `- 单周期极化度 $f_{\\text{cycle}}$: **${(matchingResp.cycle_polarization * 100).toFixed(4)}%**\n`;
+      md += `- 单周期泡利错误率 $e_{\\text{cycle}}$: **${(matchingResp.cycle_pauli_error * 100).toFixed(4)}%**\n`;
+      md += `- 剥离单比特层后纠缠门保真度: **${(matchingResp.entangler_fidelity * 100).toFixed(4)}%**\n`;
     }
     downloadTextFile(`calibration_report_${matchingResp.protocol}.md`, md, 'text/markdown;charset=utf-8');
   };
@@ -149,6 +161,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               { id: 'rb', label: 'RB 随机基准' },
               { id: 'allxy', label: 'AllXY 脉冲诊断' },
               { id: 'gst', label: 'GST 门集层析' },
+              { id: 'xeb', label: 'XEB 交叉熵基准' },
             ] as const
           ).map((t) => {
             const active = activeProtocol === t.id;
@@ -210,14 +223,18 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 ? 'Clifford 随机基准与交织门保真度标定 (RB & Interleaved RB)'
                 : activeProtocol === 'allxy'
                 ? 'AllXY 21 序列相干过旋转 / 失谐 / 正交偏斜脉冲诊断'
-                : '门集层析成像 Gate Set Tomography (PTM 重构与钻石范数误差)'}
+                : activeProtocol === 'gst'
+                ? '门集层析成像 Gate Set Tomography (6 门 PTM 重构与钻石范数误差)'
+                : '双比特线性交叉熵基准 Linear XEB (支持 √iSWAP 等非 Clifford 原生纠缠门)'}
             </div>
             <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
               {activeProtocol === 'rb'
                 ? '在右侧检查器选择 1Q (C₁=24) 或 2Q (C₂=11,520) Clifford 序列深度及待测交织门（如 SX、CZ、CNOT），通过指数衰减拟合剥离 SPAM 读出误差，精确提取单门平均失真度与相干极限。'
                 : activeProtocol === 'allxy'
                 ? '依次执行 21 组 {I, X, Y, X90, Y90} 双脉冲组合，对照 (+1, 0, -1) 理想三阶平台自动鉴别拉比幅度过/欠旋转锯齿、本振失谐分裂与 T1/T2 退相干压缩。'
-                : '利用完备态制备与测量基准组（IC Fiducials）实施免 SPAM 干扰的规范对准线性反演层析，重构全套 4×4 泡利转移矩阵 (PTM)，定量分离相干标定误差与随机退相干误差。'}
+                : activeProtocol === 'gst'
+                ? '利用完备态制备与测量基准组（IC Fiducials）实施免 SPAM 干扰的规范对准线性反演层析，重构含 Gh (Hadamard) 在内的 6 门 4×4 泡利转移矩阵 (PTM)，定量分离相干标定误差与随机退相干误差。'
+                : '采用 Google Sycamore 随机单比特 {√X, √Y, √W} + 双比特纠缠门交替周期，无需逆恢复门即可通过 Porter-Thomas 散斑比特串分布标定任意非 Clifford 双比特原生门（如 √iSWAP、fSim 或自定义纠缠门）的周期极化度与门保真度。'}
             </p>
             <button
               onClick={onRunBenchmark}
@@ -1043,6 +1060,212 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* =================================================================== */}
+      {/* VIEW 4: 2Q LINEAR CROSS-ENTROPY BENCHMARKING (LINEAR XEB)           */}
+      {/* =================================================================== */}
+      {matchingResp && matchingResp.protocol === 'xeb' && (() => {
+        const xeb: XebBenchmarkResponse = matchingResp;
+        const maxSpk = Math.max(0.55, ...xeb.speckle_ideal, ...xeb.speckle_measured) * 1.06;
+        return (
+          <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
+            {/* 4 KPI Strip */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+              <div className="studio-kpi p-2.5 flex flex-col justify-between">
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  纠缠门 [{xeb.entangler_name}] 保真度
+                </div>
+                <div className="text-[19px] font-bold font-mono-num text-emerald-500 mt-0.5 leading-tight">
+                  {(xeb.entangler_fidelity * 100).toFixed(3)}%
+                </div>
+                <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
+                  已剥离并行单比特层极化损耗
+                </div>
+              </div>
+
+              <div className="studio-kpi p-2.5 flex flex-col justify-between">
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  单周期极化度 f_cycle
+                </div>
+                <div className="text-[19px] font-bold font-mono-num text-[var(--accent)] mt-0.5 leading-tight">
+                  {(xeb.cycle_polarization * 100).toFixed(3)}%
+                </div>
+                <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
+                  SPAM 可见度 A = {xeb.a_spam.toFixed(4)}
+                </div>
+              </div>
+
+              <div className="studio-kpi p-2.5 flex flex-col justify-between">
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  单周期泡利错误率 e_cycle
+                </div>
+                <div className="text-[19px] font-bold font-mono-num text-amber-500 mt-0.5 leading-tight">
+                  {(xeb.cycle_pauli_error * 100).toFixed(3)}%
+                </div>
+                <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
+                  e_c = ¾(1 − f_cycle)
+                </div>
+              </div>
+
+              <div className="studio-kpi p-2.5 flex flex-col justify-between">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                    标定对 · {xeb.target_label}
+                  </span>
+                  <button
+                    onClick={() =>
+                      onLoadCircuitToDesign(
+                        xeb.sample_operations,
+                        `XEB_${xeb.entangler_name}_Sample.qproj`
+                      )
+                    }
+                    title="将一条随机 Sycamore 周期标定电路导入设计画布"
+                    className="px-1.5 py-0.5 rounded-[2px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[10px] font-semibold flex items-center gap-0.5 shrink-0 cursor-pointer"
+                  >
+                    <ArrowRightLeft className="w-2.5 h-2.5" />
+                    导入序列
+                  </button>
+                </div>
+                <div className="text-[15px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight truncate">
+                  {xeb.num_seeds} 随机电路 × {xeb.lengths.length} 深度
+                </div>
+                <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
+                  {xeb.shots > 0 ? `${xeb.shots} Shots/电路` : '精确密度矩阵极限'}
+                </div>
+              </div>
+            </div>
+
+            {/* XEB Decay Curve + Porter-Thomas Speckle Scatter */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+              <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[325px]">
+                <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                    线性交叉熵保真度衰减曲线 F_XEB(m) = A · f_cycle^m
+                  </span>
+                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
+                    随机 &#123;√X, √Y, √W&#125; + {xeb.entangler_name}
+                  </span>
+                </div>
+                <div className="flex-1 min-h-0 px-1.5 pb-1">
+                  <PlotlyChart
+                    data={[
+                      {
+                        x: xeb.fit_x,
+                        y: xeb.fit_y,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: `指数拟合 (f=${xeb.cycle_polarization.toFixed(4)})`,
+                        line: { color: '#10B981', width: 2.4 },
+                      },
+                      {
+                        x: xeb.lengths,
+                        y: xeb.mean_xeb,
+                        error_y: {
+                          type: 'data',
+                          array: xeb.std_xeb,
+                          visible: true,
+                          color: '#2F81F7',
+                          thickness: 1.5,
+                          width: 3,
+                        },
+                        type: 'scatter',
+                        mode: 'markers',
+                        name: '实测 F_XEB ±1σ',
+                        marker: { color: '#2F81F7', size: 8.5, symbol: 'circle' },
+                      },
+                    ]}
+                    layout={{
+                      paper_bgcolor: plotBg,
+                      plot_bgcolor: plotBg,
+                      showlegend: false,
+                      hovermode: 'closest',
+                      margin: { l: 52, r: 18, t: 14, b: 40 },
+                      xaxis: {
+                        title: {
+                          text: '交变纠缠周期深度 m (Cycles)',
+                          font: { size: 11, color: mutedColor },
+                        },
+                        gridcolor: gridColor,
+                        tickfont: { color: mutedColor, size: 10.5 },
+                      },
+                      yaxis: {
+                        title: {
+                          text: '归一化线性交叉熵 F_XEB',
+                          font: { size: 11, color: mutedColor },
+                        },
+                        range: [-0.04, 1.06],
+                        gridcolor: gridColor,
+                        tickfont: { color: mutedColor, size: 10.5 },
+                      },
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[325px]">
+                <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
+                  <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
+                    Porter-Thomas 散斑概率相关性
+                  </span>
+                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)] shrink-0">
+                    p_meas vs p_ideal
+                  </span>
+                </div>
+                <div className="flex-1 min-h-0 px-1.5 pb-1">
+                  <PlotlyChart
+                    data={[
+                      {
+                        x: [0, maxSpk],
+                        y: [0, maxSpk],
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: '无噪理想对角线 y = x',
+                        line: { color: '#10B981', width: 1.8, dash: 'dot' },
+                      },
+                      {
+                        x: [0, maxSpk],
+                        y: [0.25, 0.25],
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: '完全退极化均匀极限 1/4',
+                        line: { color: '#EF4444', width: 1.2, dash: 'dash' },
+                      },
+                      {
+                        x: xeb.speckle_ideal,
+                        y: xeb.speckle_measured,
+                        type: 'scatter',
+                        mode: 'markers',
+                        name: '比特串散斑点',
+                        marker: { color: '#2F81F7', size: 6.5, opacity: 0.78 },
+                        hovertemplate: '理想 p=%{x:.3f}<br>实测 p=%{y:.3f}<extra></extra>',
+                      },
+                    ]}
+                    layout={{
+                      paper_bgcolor: plotBg,
+                      plot_bgcolor: plotBg,
+                      showlegend: false,
+                      hovermode: 'closest',
+                      margin: { l: 48, r: 16, t: 14, b: 40 },
+                      xaxis: {
+                        title: { text: '理想无噪概率 p_ideal(x)', font: { size: 10.5, color: mutedColor } },
+                        range: [0, maxSpk],
+                        gridcolor: gridColor,
+                        tickfont: { color: mutedColor, size: 10 },
+                      },
+                      yaxis: {
+                        title: { text: '含噪实测概率 p_meas(x)', font: { size: 10.5, color: mutedColor } },
+                        range: [0, maxSpk],
+                        gridcolor: gridColor,
+                        tickfont: { color: mutedColor, size: 10 },
+                      },
+                    }}
+                  />
                 </div>
               </div>
             </div>

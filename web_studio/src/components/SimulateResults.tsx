@@ -16,7 +16,13 @@ import {
   SkipForward,
   X,
 } from 'lucide-react';
-import type { ProjectModel, RunHistoryItem, SimulationResponse, ZneResponse } from '../types';
+import type {
+  NoiseBudgetResponse,
+  ProjectModel,
+  RunHistoryItem,
+  SimulationResponse,
+  ZneResponse,
+} from '../types';
 import { PlotlyChart } from './PlotlyChart';
 import { BlochSphere3D } from './BlochSphere3D';
 import { downloadTextFile } from '../utils/exportCircuitSvg';
@@ -26,6 +32,8 @@ interface SimulateResultsProps {
   simResponse: SimulationResponse | null;
   zneResponse?: ZneResponse | null;
   onRunZne?: () => void;
+  noiseBudgetResponse?: NoiseBudgetResponse | null;
+  onRunNoiseBudget?: () => void;
   isBusy?: boolean;
   timeCursorStep: number;
   maxCursorStep: number;
@@ -98,6 +106,8 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   simResponse,
   zneResponse = null,
   onRunZne,
+  noiseBudgetResponse = null,
+  onRunNoiseBudget,
   isBusy = false,
   timeCursorStep,
   maxCursorStep,
@@ -117,15 +127,26 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   isStale = false,
   onRefreshSim,
 }) => {
-  const [tab, setTab] = useState<'evolution' | 'populations' | 'measurement' | 'density' | 'steps' | 'zne'>('evolution');
+  const [tab, setTab] = useState<
+    'evolution' | 'pulses' | 'populations' | 'measurement' | 'density' | 'steps' | 'zne'
+  >('evolution');
+  const [mitigationSubView, setMitigationSubView] = useState<'zne' | 'budget'>('zne');
   const [zneMetric, setZneMetric] = useState<'z' | 'energy'>('z');
 
   useEffect(() => {
     if (zneResponse) {
       setTab('zne');
+      setMitigationSubView('zne');
       setZneMetric(zneResponse.energy_by_scale ? 'energy' : 'z');
     }
   }, [zneResponse]);
+
+  useEffect(() => {
+    if (noiseBudgetResponse) {
+      setTab('zne');
+      setMitigationSubView('budget');
+    }
+  }, [noiseBudgetResponse]);
   const [rhoPart, setRhoPart] = useState<'abs' | 'real' | 'imag'>('abs');
   const [tomoLeftMode, setTomoLeftMode] = useState<'auto' | 'rho' | 'mi' | 'local'>('auto');
   const [measUnit, setMeasUnit] = useState<'prob' | 'counts'>('prob');
@@ -359,6 +380,194 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   const xMaxPlot = blochData && blochData.xs.length > 0 ? Math.max(...blochData.xs) : 1;
   const cleanActiveOp = formatOpLabelClean(activeSnap.operation_label);
 
+  // Map physical time t (ns) back to continuous step index for direct waveform probe scrubbing
+  const timeNsToContinuousStep = (targetNs: number): number => {
+    const steps = primaryRes.steps;
+    if (steps.length <= 1) return 0;
+    const totalNs = steps[steps.length - 1].elapsed_time_ns;
+    if (totalNs <= 1e-6) {
+      return Math.max(0, Math.min(maxCursorStep, targetNs));
+    }
+    const clampedNs = Math.max(0, Math.min(totalNs, targetNs));
+    for (let si = 1; si < steps.length; si++) {
+      const t0 = steps[si - 1].elapsed_time_ns;
+      const t1 = steps[si].elapsed_time_ns;
+      if (t1 > t0 + 1e-6 && clampedNs <= t1 + 1e-6) {
+        return Math.max(0, Math.min(maxCursorStep, si - 1 + (clampedNs - t0) / (t1 - t0)));
+      }
+    }
+    return maxCursorStep;
+  };
+
+  const activeHw =
+    project.hardware_profiles.find((h) => h.id === project.active_hardware_id) ||
+    project.hardware_profiles[0];
+
+  // Synthesize Multi-Channel AWD / RF / Raman Control Pulse Waveforms aligned with primaryRes.steps
+  const pulseSchedule = useMemo(() => {
+    const visibleQ = project.qubits.slice(0, 8);
+    const nLanes = Math.max(1, visibleQ.length);
+    const laneStep = 2.35;
+    const pulseShape = activeHw?.pulse_shape || 'cosine';
+    const shapeFn = (u: number): number => {
+      if (pulseShape === 'gaussian') {
+        const z = (u - 0.5) / 0.19;
+        const g0 = Math.exp(-0.5 * Math.pow(0.5 / 0.19, 2));
+        return Math.max(0, (Math.exp(-0.5 * z * z) - g0) / (1 - g0));
+      }
+      if (pulseShape === 'rectangular') {
+        if (u < 0.04) return u / 0.04;
+        if (u > 0.96) return (1 - u) / 0.04;
+        return 1.0;
+      }
+      return 0.5 * (1 - Math.cos(2 * Math.PI * u));
+    };
+
+    const resolveNumParam = (val: number | string | undefined, fallback: number): number => {
+      if (typeof val === 'number') return val;
+      if (typeof val === 'string') return project.variables[val] ?? fallback;
+      return fallback;
+    };
+
+    // Group gate operations by sorted step index to align with primaryRes.steps[1..]
+    const gateOps = project.operations.filter((o) => o.kind === 'gate');
+    const stepMap = new Map<number, typeof gateOps>();
+    for (const op of gateOps) {
+      const arr = stepMap.get(op.step) || [];
+      arr.push(op);
+      stepMap.set(op.step, arr);
+    }
+    const sortedStepCols = Array.from(stepMap.keys()).sort((a, b) => a - b);
+
+    const totalT = Math.max(20, primaryRes.total_duration_ns || sortedStepCols.length * (activeHw?.t_1q_ns || 40));
+    const nPts = Math.min(480, Math.max(180, sortedStepCols.length * 28));
+    const ts = Array.from({ length: nPts }, (_, i) => (i / (nPts - 1)) * totalT);
+
+    const iDrive: number[][] = Array.from({ length: nLanes }, () => new Array(nPts).fill(0));
+    const qDrive: number[][] = Array.from({ length: nLanes }, () => new Array(nPts).fill(0));
+    const couplerSpans: { t0: number; t1: number; qA: number; qB: number; label: string }[] = [];
+    const vzMarkers: { t: number; q: number; label: string }[] = [];
+
+    let fallbackClock = 0;
+    sortedStepCols.forEach((colIdx, layerIdx) => {
+      const layerOps = stepMap.get(colIdx) || [];
+      const snapPrev = primaryRes.steps[layerIdx];
+      const snapCur = primaryRes.steps[layerIdx + 1];
+      let t0 = snapPrev ? snapPrev.elapsed_time_ns : fallbackClock;
+      let t1 = snapCur ? snapCur.elapsed_time_ns : t0;
+      if (!snapCur) {
+        const maxDur = Math.max(
+          0,
+          ...layerOps.map((o) =>
+            o.duration_ns != null
+              ? o.duration_ns
+              : o.name.toUpperCase() === 'RZ' || o.name.toUpperCase() === 'S' || o.name.toUpperCase() === 'T' || o.name.toUpperCase() === 'Z'
+              ? 0
+              : o.qubits.length >= 2
+              ? activeHw?.t_2q_ns || 160
+              : activeHw?.t_1q_ns || 40
+          )
+        );
+        t1 = t0 + maxDur;
+      }
+      fallbackClock = t1;
+
+      for (const op of layerOps) {
+        const gName = op.name.toUpperCase();
+        if (op.qubits.length === 1) {
+          const q = op.qubits[0];
+          if (q < 0 || q >= nLanes) continue;
+          const isVirtualZ =
+            (gName === 'RZ' || gName === 'Z' || gName === 'S' || gName === 'SDG' || gName === 'T' || gName === 'TDG') &&
+            t1 - t0 < 1e-3;
+          if (isVirtualZ) {
+            const ang =
+              gName === 'Z'
+                ? Math.PI
+                : gName === 'S'
+                ? Math.PI / 2
+                : gName === 'T'
+                ? Math.PI / 4
+                : resolveNumParam(op.params[0], Math.PI / 2);
+            vzMarkers.push({
+              t: t0,
+              q,
+              label: `VZ(${(ang / Math.PI).toFixed(2)}π)`,
+            });
+            continue;
+          }
+          if (t1 <= t0 + 1e-4) continue;
+
+          let theta = Math.PI;
+          let phi = 0;
+          if (gName === 'SX') {
+            theta = Math.PI / 2;
+            phi = 0;
+          } else if (gName === 'X') {
+            theta = Math.PI;
+            phi = 0;
+          } else if (gName === 'Y') {
+            theta = Math.PI;
+            phi = Math.PI / 2;
+          } else if (gName === 'H') {
+            theta = Math.PI / 2;
+            phi = Math.PI / 2;
+            vzMarkers.push({ t: t1, q, label: 'VZ(π)' });
+          } else if (gName === 'RX') {
+            theta = resolveNumParam(op.params[0], Math.PI / 2);
+            phi = 0;
+          } else if (gName === 'RY') {
+            theta = resolveNumParam(op.params[0], Math.PI / 2);
+            phi = Math.PI / 2;
+          } else if (gName === 'RXY') {
+            theta = resolveNumParam(op.params[0], Math.PI / 2);
+            phi = resolveNumParam(op.params[1], 0);
+          } else {
+            theta = Math.PI / 2;
+            phi = 0.35;
+          }
+          const normAmp = Math.max(-1, Math.min(1, theta / Math.PI)) * 0.85;
+          const ampI = normAmp * Math.cos(phi);
+          const ampQ = normAmp * Math.sin(phi);
+          for (let i = 0; i < nPts; i++) {
+            const t = ts[i];
+            if (t >= t0 && t <= t1) {
+              const u = (t - t0) / Math.max(1e-6, t1 - t0);
+              const env = shapeFn(u);
+              iDrive[q][i] += ampI * env;
+              qDrive[q][i] += ampQ * env;
+            }
+          }
+        } else if (op.qubits.length >= 2) {
+          const qA = op.qubits[0];
+          const qB = op.qubits[1];
+          const spanEnd = t1 > t0 + 1e-3 ? t1 : t0 + (activeHw?.t_2q_ns || 120);
+          couplerSpans.push({
+            t0,
+            t1: spanEnd,
+            qA,
+            qB,
+            label: gName,
+          });
+          // Add coupler flux / Rydberg / CR envelope onto participating lanes
+          for (const q of [qA, qB]) {
+            if (q < 0 || q >= nLanes) continue;
+            const sign = q === qA ? 0.68 : -0.52;
+            for (let i = 0; i < nPts; i++) {
+              const t = ts[i];
+              if (t >= t0 && t <= spanEnd) {
+                const u = (t - t0) / Math.max(1e-6, spanEnd - t0);
+                qDrive[q][i] += sign * shapeFn(u);
+              }
+            }
+          }
+        }
+      }
+    });
+
+    return { visibleQ, nLanes, laneStep, pulseShape, totalT, ts, iDrive, qDrive, couplerSpans, vzMarkers };
+  }, [project.qubits, project.operations, project.variables, activeHw, primaryRes.steps, primaryRes.total_duration_ns]);
+
   // Deduplicate / space out gate annotations so adjacent gates (e.g. CZ + √iSWAP) never collide
   const spacedStepAnnotations = useMemo(() => {
     if (!blochData) return [];
@@ -478,6 +687,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
           {(
             [
               { id: 'evolution', label: '演化' },
+              { id: 'pulses', label: '脉冲波形' },
               { id: 'populations', label: '布居' },
               { id: 'measurement', label: '测量' },
               {
@@ -485,7 +695,10 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                 label: rhoMatrix ? '层析 & 互信息' : '纠缠互信息',
               },
               { id: 'steps', label: '指标明细' },
-              { id: 'zne', label: zneResponse ? 'ZNE 缓解 ✓' : 'ZNE 缓解' },
+              {
+                id: 'zne',
+                label: zneResponse || noiseBudgetResponse ? 'ZNE & 误差预算 ✓' : 'ZNE & 误差预算',
+              },
             ] as const
           ).map((t) => (
             <button
@@ -954,6 +1167,21 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       data={evoPlotData}
                       layout={evoPlotLayout}
                       cursorX={cursorXVal}
+                      cursorLabel={
+                        blochData.hasPulse
+                          ? `${interpElapsedNs.toFixed(0)}ns`
+                          : `S${clampedCursor.toFixed(1)}`
+                      }
+                      onScrubX={
+                        onTimeCursorChange
+                          ? (xVal) =>
+                              onTimeCursorChange(
+                                blochData.hasPulse
+                                  ? timeNsToContinuousStep(xVal)
+                                  : Math.max(0, Math.min(maxCursorStep, xVal))
+                              )
+                          : undefined
+                      }
                       progressiveReveal
                       cursorTips={[
                         { y: curBlochVec[0], color: '#0A84FF' },
@@ -1022,6 +1250,155 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
         )}
 
         {/* =============================================================== */}
+        {/* TAB 1.5: MULTI-CHANNEL AWD / RF / RAMAN PULSE WAVEFORM VIEWER   */}
+        {/* =============================================================== */}
+        {tab === 'pulses' && (
+          <div className="h-full flex flex-col studio-card overflow-hidden min-h-[300px]">
+            <div className="h-9 px-3.5 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
+                  多通道物理控制脉冲时序示波器 (AWD Schedule)
+                </span>
+                <span className="px-1.5 py-0.25 rounded-[2px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[10px] font-mono-num text-[var(--text-secondary)]">
+                  包络: {pulseSchedule.pulseShape.toUpperCase()} · {activeHw?.name || 'Hardware'}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-[10.5px] font-mono-num text-[var(--text-secondary)] shrink-0">
+                <span className="flex items-center gap-1">
+                  <span className="w-2.5 h-[2px] bg-[#2F81F7]" />
+                  I 同相 Ω_x(t)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2.5 h-[2px] bg-[#F59E0B]" />
+                  Q 正交 / 耦合包络
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rotate-45 bg-[#10B981]" />
+                  Virtual-Z 帧移相
+                </span>
+                <span className="hidden xl:inline text-[var(--accent)]">
+                  拖拽波形可直接联动探针游标
+                </span>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 p-1.5">
+              <PlotlyChart
+                data={[
+                  ...pulseSchedule.visibleQ.flatMap((q, laneIdx) => {
+                    const base = -laneIdx * pulseSchedule.laneStep;
+                    const yI = pulseSchedule.iDrive[laneIdx].map((v) => base + v);
+                    const yQ = pulseSchedule.qDrive[laneIdx].map((v) => base + v);
+                    return [
+                      {
+                        x: [0, pulseSchedule.totalT],
+                        y: [base, base],
+                        type: 'scatter',
+                        mode: 'lines',
+                        showlegend: false,
+                        hoverinfo: 'skip',
+                        line: {
+                          color: darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(15,23,42,0.12)',
+                          width: 1,
+                        },
+                      },
+                      {
+                        x: pulseSchedule.ts,
+                        y: yI,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: `${q.name} Ω_x`,
+                        line: { color: '#2F81F7', width: 2 },
+                        hovertemplate: `${q.name} I(t): %{customdata:+.3f}<extra></extra>`,
+                        customdata: pulseSchedule.iDrive[laneIdx],
+                      },
+                      {
+                        x: pulseSchedule.ts,
+                        y: yQ,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: `${q.name} Ω_y/J`,
+                        line: { color: '#F59E0B', width: 1.7, dash: 'dot' },
+                        hovertemplate: `${q.name} Q/Coupler(t): %{customdata:+.3f}<extra></extra>`,
+                        customdata: pulseSchedule.qDrive[laneIdx],
+                      },
+                    ];
+                  }),
+                  ...(pulseSchedule.vzMarkers.length > 0
+                    ? [
+                        {
+                          x: pulseSchedule.vzMarkers.map((m) => m.t),
+                          y: pulseSchedule.vzMarkers.map((m) => -m.q * pulseSchedule.laneStep),
+                          text: pulseSchedule.vzMarkers.map((m) => m.label),
+                          type: 'scatter',
+                          mode: 'markers+text',
+                          textposition: 'top center',
+                          textfont: { size: 9, color: '#10B981' },
+                          name: 'Virtual-Z',
+                          marker: { color: '#10B981', size: 7, symbol: 'diamond' },
+                          hovertemplate: 't=%{x:.1f}ns · %{text}<extra></extra>',
+                        },
+                      ]
+                    : []),
+                ]}
+                layout={{
+                  paper_bgcolor: plotBg,
+                  plot_bgcolor: plotBg,
+                  showlegend: false,
+                  hovermode: 'closest',
+                  margin: { l: 58, r: 22, t: 18, b: 38 },
+                  xaxis: {
+                    title: { text: '物理控制时序 t (ns)', font: { size: 11, color: mutedColor } },
+                    range: [-pulseSchedule.totalT * 0.015, pulseSchedule.totalT * 1.02],
+                    gridcolor: gridColor,
+                    zeroline: false,
+                    tickfont: { color: mutedColor, size: 10.5 },
+                  },
+                  yaxis: {
+                    tickmode: 'array',
+                    tickvals: pulseSchedule.visibleQ.map((_, idx) => -idx * pulseSchedule.laneStep),
+                    ticktext: pulseSchedule.visibleQ.map((q) => `${q.name} CH`),
+                    range: [
+                      -(pulseSchedule.nLanes - 1) * pulseSchedule.laneStep - 1.25,
+                      1.25,
+                    ],
+                    gridcolor: 'rgba(0,0,0,0)',
+                    zeroline: false,
+                    tickfont: { color: textColor, size: 11 },
+                  },
+                  shapes: pulseSchedule.couplerSpans.slice(0, 24).map((sp) => {
+                    const yTop = -Math.min(sp.qA, sp.qB, pulseSchedule.nLanes - 1) * pulseSchedule.laneStep + 0.85;
+                    const yBot = -Math.min(Math.max(sp.qA, sp.qB), pulseSchedule.nLanes - 1) * pulseSchedule.laneStep - 0.85;
+                    return {
+                      type: 'rect',
+                      x0: sp.t0,
+                      x1: sp.t1,
+                      y0: yBot,
+                      y1: yTop,
+                      fillcolor: darkMode ? 'rgba(16, 185, 129, 0.09)' : 'rgba(16, 185, 129, 0.11)',
+                      line: { color: 'rgba(16, 185, 129, 0.42)', width: 1, dash: 'dot' },
+                    };
+                  }),
+                  annotations: pulseSchedule.couplerSpans.slice(0, 14).map((sp) => ({
+                    x: (sp.t0 + sp.t1) / 2,
+                    y: -Math.min(sp.qA, sp.qB, pulseSchedule.nLanes - 1) * pulseSchedule.laneStep + 0.92,
+                    text: `${sp.label}`,
+                    showarrow: false,
+                    font: { size: 9.5, color: '#10B981' },
+                  })),
+                }}
+                cursorX={interpElapsedNs}
+                cursorLabel={`${interpElapsedNs.toFixed(0)}ns`}
+                onScrubX={
+                  onTimeCursorChange
+                    ? (tNs) => onTimeCursorChange(timeNsToContinuousStep(tNs))
+                    : undefined
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        {/* =============================================================== */}
         {/* TAB 2: STATE POPULATIONS                                         */}
         {/* =============================================================== */}
         {tab === 'populations' && (
@@ -1079,6 +1456,12 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     },
                   }}
                   cursorX={clampedCursor}
+                  cursorLabel={`S${clampedCursor.toFixed(1)}`}
+                  onScrubX={
+                    onTimeCursorChange
+                      ? (x) => onTimeCursorChange(Math.max(0, Math.min(maxCursorStep, x)))
+                      : undefined
+                  }
                   progressiveReveal
                 />
               </div>
@@ -1723,6 +2106,12 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     legend: { orientation: 'h', y: 1.15, font: { size: 10, color: textColor } },
                   }}
                   cursorX={clampedCursor}
+                  cursorLabel={`S${clampedCursor.toFixed(1)}`}
+                  onScrubX={
+                    onTimeCursorChange
+                      ? (x) => onTimeCursorChange(Math.max(0, Math.min(maxCursorStep, x)))
+                      : undefined
+                  }
                   progressiveReveal
                 />
               </div>
@@ -1799,11 +2188,186 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
         )}
 
         {/* =============================================================== */}
-        {/* TAB 6: ZERO-NOISE EXTRAPOLATION (ZNE) ERROR MITIGATION          */}
+        {/* TAB 6: ZNE ERROR MITIGATION & NOISE ERROR BUDGET ABLATION        */}
         {/* =============================================================== */}
         {tab === 'zne' && (
           <div className="min-h-full flex flex-col gap-3">
-            {!zneResponse ? (
+            {/* Inner Sub-View Switcher: ZNE vs Noise Error Budget */}
+            <div className="shrink-0 flex items-center justify-between gap-2">
+              <div className="p-0.5 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] inline-flex text-[11.5px]">
+                <button
+                  type="button"
+                  onClick={() => setMitigationSubView('zne')}
+                  className={`px-3 py-1 rounded-[2px] cursor-pointer transition-colors ${
+                    mitigationSubView === 'zne'
+                      ? 'bg-[var(--accent)] text-white font-semibold'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  ZNE 零噪声外推缓解 {zneResponse ? '✓' : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMitigationSubView('budget')}
+                  className={`px-3 py-1 rounded-[2px] cursor-pointer transition-colors ${
+                    mitigationSubView === 'budget'
+                      ? 'bg-[var(--accent)] text-white font-semibold'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  噪声误差预算拆解 (Error Budget) {noiseBudgetResponse ? '✓' : ''}
+                </button>
+              </div>
+            </div>
+
+            {mitigationSubView === 'budget' ? (
+              !noiseBudgetResponse ? (
+                <div className="flex-1 studio-card flex flex-col items-center justify-center gap-3 px-6 text-center min-h-[240px]">
+                  <div className="w-10 h-10 rounded-[4px] bg-amber-500/12 text-amber-500 flex items-center justify-center">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                    含噪线路「误差预算消融拆解」（Noise Error Budget）
+                  </div>
+                  <p className="max-w-[540px] text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                    对当前量子线路依次单独开启 T1 能量弛豫、T2* 纯退相干、单比特门控制误差、双比特纠缠门噪声、静态 ZZ 耦合串扰及测量读出混淆（TVD），量化各物理噪声源对总失真度的贡献占比并定位硬件优化首要瓶颈。
+                  </p>
+                  {onRunNoiseBudget && (
+                    <button
+                      onClick={onRunNoiseBudget}
+                      disabled={isBusy}
+                      className="mt-1 h-8 px-4 rounded-[3px] studio-btn-primary text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      执行噪声误差预算消融拆解
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col gap-3">
+                  {/* Bottleneck Banner */}
+                  <div className="studio-card px-3.5 py-2 border-l-2 border-l-amber-500 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[12px] text-[var(--text-primary)] font-medium">
+                      {noiseBudgetResponse.bottleneck_summary}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 text-[11px] font-mono-num">
+                      <span className="px-2 py-0.5 rounded-[2px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)]">
+                        F_full = {noiseBudgetResponse.full_fidelity.toFixed(4)} · 1−F ={' '}
+                        {(noiseBudgetResponse.total_state_infidelity * 100).toFixed(2)}%
+                      </span>
+                      {onRunNoiseBudget && (
+                        <button
+                          onClick={onRunNoiseBudget}
+                          disabled={isBusy}
+                          className="h-6 px-2.5 rounded-[2px] bg-[var(--bg-subtle)] hover:border-[var(--accent)] border border-[var(--border-hairline)] text-[11px] text-[var(--accent)] flex items-center gap-1 cursor-pointer"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isBusy ? 'animate-spin' : ''}`} />
+                          重算预算
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Pareto Bar Chart + Breakdown Table */}
+                  <div className="flex-1 min-h-[220px] grid grid-cols-1 lg:grid-cols-12 gap-3">
+                    <div className="lg:col-span-7 studio-card flex flex-col overflow-hidden min-h-[220px]">
+                      <div className="h-8 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          各物理噪声通道误差贡献占比帕累托图
+                        </span>
+                        <span className="text-[10.5px] font-mono-num text-[var(--text-secondary)]">
+                          {noiseBudgetResponse.hardware_name} ({noiseBudgetResponse.backend.toUpperCase()})
+                        </span>
+                      </div>
+                      <div className="flex-1 min-h-0 px-1.5 pb-1">
+                        <PlotlyChart
+                          data={[
+                            {
+                              type: 'bar',
+                              orientation: 'h',
+                              y: [...noiseBudgetResponse.contributions].reverse().map((c) => c.label),
+                              x: [...noiseBudgetResponse.contributions].reverse().map((c) => c.share_pct),
+                              text: [...noiseBudgetResponse.contributions]
+                                .reverse()
+                                .map((c) => `${c.share_pct.toFixed(1)}% (${(c.infidelity * 100).toFixed(3)}%)`),
+                              textposition: 'auto',
+                              marker: {
+                                color: [...noiseBudgetResponse.contributions]
+                                  .reverse()
+                                  .map((_, i, arr) =>
+                                    i === arr.length - 1
+                                      ? '#F59E0B'
+                                      : i === arr.length - 2
+                                      ? '#2F81F7'
+                                      : '#64748B'
+                                  ),
+                              },
+                              hovertemplate: '%{y}: 占比 %{x:.1f}%<extra></extra>',
+                            },
+                          ]}
+                          layout={{
+                            paper_bgcolor: plotBg,
+                            plot_bgcolor: plotBg,
+                            showlegend: false,
+                            margin: { l: 148, r: 24, t: 12, b: 34 },
+                            xaxis: {
+                              title: { text: '误差预算占比 (%)', font: { size: 10.5, color: mutedColor } },
+                              range: [0, 105],
+                              gridcolor: gridColor,
+                              tickfont: { color: mutedColor, size: 10 },
+                            },
+                            yaxis: {
+                              tickfont: { color: textColor, size: 11 },
+                            },
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-5 studio-card flex flex-col overflow-hidden min-h-[220px]">
+                      <div className="h-8 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          独立通道消融明细表
+                        </span>
+                        <span className="text-[10.5px] font-mono-num text-[var(--text-secondary)]">
+                          Σeᵢ = {(noiseBudgetResponse.sum_isolated_errors * 100).toFixed(2)}%
+                        </span>
+                      </div>
+                      <div className="flex-1 overflow-auto">
+                        <table className="w-full text-[11px] font-mono-num border-collapse">
+                          <thead className="sticky top-0 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] text-[10px] text-[var(--text-secondary)] text-left">
+                            <tr>
+                              <th className="py-1.5 px-2.5">物理噪声源</th>
+                              <th className="py-1.5 px-2.5">参数</th>
+                              <th className="py-1.5 px-2.5">独立失真</th>
+                              <th className="py-1.5 px-2.5">占比</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[var(--border-hairline)]">
+                            {noiseBudgetResponse.contributions.map((it, idx) => (
+                              <tr key={it.id} className="hover:bg-black/[0.025] dark:hover:bg-white/[0.04]">
+                                <td className="py-1.5 px-2.5 font-sans font-medium text-[var(--text-primary)]">
+                                  {it.label}
+                                </td>
+                                <td className="py-1.5 px-2.5 text-[var(--text-secondary)]">{it.detail}</td>
+                                <td className="py-1.5 px-2.5">{(it.infidelity * 100).toFixed(3)}%</td>
+                                <td
+                                  className={`py-1.5 px-2.5 font-semibold ${
+                                    idx === 0 ? 'text-amber-500' : 'text-[var(--accent)]'
+                                  }`}
+                                >
+                                  {it.share_pct.toFixed(1)}%
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            ) : !zneResponse ? (
               <div className="flex-1 studio-card flex flex-col items-center justify-center gap-3 px-6 text-center">
                 <div className="w-10 h-10 rounded-full bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
                   <ShieldCheck className="w-5 h-5" />

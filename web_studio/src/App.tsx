@@ -6,6 +6,7 @@ import type {
   GateBenchmarkResponse,
   HardwareBenchmarkResponse,
   NlCircuitResponse,
+  NoiseBudgetResponse,
   OptimizeResponse,
   ProjectModel,
   QubitSpec,
@@ -22,6 +23,7 @@ import {
   fetchPresets,
   runCrossHardwareBenchmark,
   runGateBenchmark,
+  runNoiseBudget,
   runOptimization,
   runSimulation,
   runSweep,
@@ -68,7 +70,7 @@ export default function App() {
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
   const [selection, setSelection] = useState<SelectionTarget>({ type: 'none' });
-  const [activeToolGate, setActiveToolGate] = useState<string | null>('RXY');
+  const [activeToolGate, setActiveToolGate] = useState<string | null>(null);
 
   // Synchronized code & logs
   const [dslText, setDslText] = useState('');
@@ -82,6 +84,7 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('正在初始化 Quantum Studio...');
   const [simResponse, setSimResponse] = useState<SimulationResponse | null>(null);
   const [zneResponse, setZneResponse] = useState<ZneResponse | null>(null);
+  const [noiseBudgetResponse, setNoiseBudgetResponse] = useState<NoiseBudgetResponse | null>(null);
   const [simDirty, setSimDirty] = useState(false);
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -114,6 +117,7 @@ export default function App() {
     rb_lengths_str: '1, 2, 4, 8, 16, 32, 64, 128',
     rb_num_seeds: 20,
     interleaved_gate: 'SX',
+    xeb_entangler: 'SQISWAP',
     gst_max_length: 4,
     shots: 4096,
     amp_error_pct: 0,
@@ -394,6 +398,7 @@ export default function App() {
             rb_lengths: parsedLengths.length >= 3 ? parsedLengths : [1, 2, 4, 8, 16, 32, 64, 128],
             rb_num_seeds: cfg.rb_num_seeds,
             interleaved_gate: cfg.interleaved_gate || null,
+            xeb_entangler: cfg.xeb_entangler || 'SQISWAP',
             gst_max_length: cfg.gst_max_length,
             shots: cfg.shots,
             amp_error_pct: cfg.amp_error_pct,
@@ -408,7 +413,9 @@ export default function App() {
             ? `RB 标定完成 · F_Clifford=${(res.clifford_fidelity * 100).toFixed(3)}% · EPC=${(res.epc * 100).toFixed(3)}%`
             : res.protocol === 'allxy'
             ? `AllXY 脉冲诊断完成 · RMS Δ⟨Z⟩=${res.rms_error_z.toFixed(4)}`
-            : `GST 门集层析完成 · 平均保真度=${(res.mean_gate_fidelity * 100).toFixed(3)}% · 最大 ½‖Δℰ‖_⋄=${res.max_diamond_distance.toFixed(4)}`;
+            : res.protocol === 'gst'
+            ? `GST 门集层析完成 · 平均保真度=${(res.mean_gate_fidelity * 100).toFixed(3)}% · 最大 ½‖Δℰ‖_⋄=${res.max_diamond_distance.toFixed(4)}`
+            : `2Q Linear XEB 完成 · ${res.entangler_name} 保真度=${(res.entangler_fidelity * 100).toFixed(3)}% · f_cycle=${(res.cycle_polarization * 100).toFixed(3)}%`;
         setStatusMsg(summary);
         addLog(summary, 'info');
       } catch (err) {
@@ -465,6 +472,46 @@ export default function App() {
       }
     },
     [project, observedQubit, sweepConfig.hamiltonian_str, addLog]
+  );
+
+  // Run Noise Error Budget Ablation
+  const handleRunNoiseBudget = useCallback(
+    async (projOverride?: ProjectModel) => {
+      const target = projOverride || project;
+      if (!target) return;
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
+      setIsBusy(true);
+      setStatusMsg('正在执行含噪线路误差预算消融分析 (T1 / T2* / 1Q / 2Q / ZZ / Readout)...');
+      try {
+        const res = await runNoiseBudget(
+          {
+            project: target,
+            backend:
+              target.sim_settings.backend === 'compare' ? undefined : target.sim_settings.backend,
+          },
+          controller.signal
+        );
+        setNoiseBudgetResponse(res);
+        setMode('simulate');
+        const msg = `误差预算拆解完成 · F=${res.full_fidelity.toFixed(4)} · ${res.bottleneck_summary}`;
+        setStatusMsg(msg);
+        addLog(msg, 'info');
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+        const errTxt = err instanceof Error ? err.message : String(err);
+        setStatusMsg(`误差预算拆解失败: ${errTxt}`);
+        addLog(`误差预算拆解失败: ${errTxt}`, 'error');
+      } finally {
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
+      }
+    },
+    [project, addLog]
   );
 
   // Run Parameter Sweep OR Closed-Loop VQE Optimization (with AbortController cancelation support)
@@ -786,6 +833,31 @@ export default function App() {
         const maxS = Math.max(0, (pRes?.steps.length ?? 1) - 1);
         setTimeCursorStep((cur) => (cur >= maxS ? 0 : cur));
         setIsPlayingTimeline((v) => !v);
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'v' && mode === 'design') {
+        e.preventDefault();
+        setActiveToolGate(null);
+      } else if (
+        mode === 'simulate' &&
+        simResponse &&
+        (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')
+      ) {
+        e.preventDefault();
+        const pRes = simResponse.results[simResponse.primary_backend];
+        const maxS = Math.max(0, (pRes?.steps.length ?? 1) - 1);
+        if (e.key === 'Home') {
+          handleSmoothStepJump(0);
+        } else if (e.key === 'End') {
+          handleSmoothStepJump(maxS);
+        } else if (e.shiftKey) {
+          const delta = e.key === 'ArrowRight' ? 0.05 : -0.05;
+          handleDirectTimeCursorChange(Math.max(0, Math.min(maxS, timeCursorRef.current + delta)));
+        } else {
+          const nextStep =
+            e.key === 'ArrowRight'
+              ? Math.min(maxS, Math.floor(timeCursorRef.current + 1e-4) + 1)
+              : Math.max(0, Math.ceil(timeCursorRef.current - 1e-4) - 1);
+          handleSmoothStepJump(nextStep);
+        }
       } else if (e.key === 'Escape') {
         setActiveToolGate(null);
         setSelection({ type: 'none' });
@@ -1344,6 +1416,7 @@ export default function App() {
           setSweepResponse(null);
           setVqeResponse(null);
           setZneResponse(null);
+          setNoiseBudgetResponse(null);
           setGateBenchResponse(null);
           const varKeys = Object.keys(clone.variables);
           const firstVar = varKeys[0] || 'hw:depol_2q';
@@ -1514,6 +1587,14 @@ export default function App() {
                     setSelection({ type: 'none' });
                   }
                 }}
+                onDeleteMultipleOps={(opIds) => {
+                  const drop = new Set(opIds);
+                  mutateProject((p) => ({
+                    ...p,
+                    operations: p.operations.filter((o) => !drop.has(o.id)),
+                  }));
+                  setSelection({ type: 'none' });
+                }}
                 onAddQubit={handleAddQubit}
                 onPackageMacro={handlePackageMacro}
                 onOpenNlModal={() => setNlModalOpen(true)}
@@ -1561,6 +1642,19 @@ export default function App() {
                       onAddQubit={() => {}}
                       timeCursorStep={timeCursorStep}
                       maxCursorStep={maxCursorStep}
+                      cursorReadoutLabel={
+                        primaryRes
+                          ? (() => {
+                              const sf = Math.max(0, Math.min(primaryRes.steps.length - 1, Math.floor(timeCursorStep)));
+                              const sc = Math.min(primaryRes.steps.length - 1, sf + 1);
+                              const frac = Math.max(0, timeCursorStep - sf);
+                              const tNs =
+                                primaryRes.steps[sf].elapsed_time_ns +
+                                frac * (primaryRes.steps[sc].elapsed_time_ns - primaryRes.steps[sf].elapsed_time_ns);
+                              return `S${Math.round(timeCursorStep)} · ${tNs.toFixed(0)}ns`;
+                            })()
+                          : null
+                      }
                       onTimeCursorChange={handleDirectTimeCursorChange}
                       onStepJump={handleSmoothStepJump}
                       isPlayingTimeline={isPlayingTimeline}
@@ -1602,6 +1696,8 @@ export default function App() {
                 simResponse={simResponse}
                 zneResponse={zneResponse}
                 onRunZne={() => handleRunZne()}
+                noiseBudgetResponse={noiseBudgetResponse}
+                onRunNoiseBudget={() => handleRunNoiseBudget()}
                 isBusy={isBusy}
                 timeCursorStep={timeCursorStep}
                 maxCursorStep={maxCursorStep}
@@ -1840,6 +1936,7 @@ export default function App() {
             hardwareSweepParams={hardwareSweepParams}
             onRunSweep={() => handleRunSweep()}
             onRunZne={() => handleRunZne()}
+            onRunNoiseBudget={() => handleRunNoiseBudget()}
             onCancelSweep={handleCancelSweep}
             benchmarkConfig={benchmarkConfig}
             onBenchmarkConfigChange={(patch) =>

@@ -427,18 +427,19 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 <span className="text-[11.5px] font-bold text-[var(--text-primary)]">
                   EDA 工作台快捷键
                 </span>
-                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.5</span>
+                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.6</span>
               </div>
               <div className="space-y-1.5 text-[11px]">
                 {[
+                  ['V / 右键空白', '切换选择指针 / 释放放置工具'],
+                  ['空白拖拽框选', '批量框选门（删除 / 封装宏门）'],
+                  ['Ctrl + 滚轮', '原理图画布无级缩放 (60%–150%)'],
+                  ['Space / ← →', '播放 / 单步步进探针游标 (SIM)'],
+                  ['Shift + ← →', '连续脉冲门内微步进 0.05 (SIM)'],
                   ['Ctrl + K', '唤起 / 关闭 AI 线路综合助手'],
-                  ['Ctrl + Enter', '执行运行 / 编译底部代码'],
-                  ['Space', '播放 / 暂停演化时间轴 (SIM)'],
+                  ['Ctrl + Enter', '执行当前工作区任务'],
                   ['Ctrl + Z / Y', '撤销 / 重做编辑'],
-                  ['Ctrl + D', '复制当前选中量子门'],
-                  ['Delete', '删除当前选中量子门'],
-                  ['Shift + 框选', '批量框选并封装为宏门'],
-                  ['Esc', '释放放置工具 / 清除选中'],
+                  ['Ctrl + D / Del', '复制 / 删除选中量子门'],
                 ].map(([keyStr, desc]) => (
                   <div key={keyStr} className="flex items-center justify-between gap-2">
                     <span className="text-[var(--text-secondary)] truncate">{desc}</span>

@@ -210,17 +210,25 @@ class ZneRequest(BaseModel):
     backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "kraus"
 
 
-class GateBenchmarkRequest(BaseModel):
-    """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST)."""
+class NoiseBudgetRequest(BaseModel):
+    """Channel-by-channel Noise Error Budget ablation request."""
 
     project: ProjectModel
-    protocol: Literal["rb", "allxy", "gst"] = "rb"
+    backend: Optional[Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"]] = None
+
+
+class GateBenchmarkRequest(BaseModel):
+    """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST, XEB)."""
+
+    project: ProjectModel
+    protocol: Literal["rb", "allxy", "gst", "xeb"] = "rb"
     target_qubit: int = 0
     second_qubit: int = 1
     rb_num_qubits: Literal[1, 2] = 1
     rb_lengths: List[int] = Field(default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128])
     rb_num_seeds: int = 20
     interleaved_gate: Optional[str] = None
+    xeb_entangler: str = "SQISWAP"
     gst_max_length: int = 4
     shots: int = 4096
     # Optional coherent calibration error injection for realistic experimental diagnostics

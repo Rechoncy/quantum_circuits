@@ -45,13 +45,14 @@ export interface SweepConfigState {
 }
 
 export interface BenchmarkConfigState {
-  protocol: 'rb' | 'allxy' | 'gst';
+  protocol: 'rb' | 'allxy' | 'gst' | 'xeb';
   target_qubit: number;
   second_qubit: number;
   rb_num_qubits: 1 | 2;
   rb_lengths_str: string;
   rb_num_seeds: number;
   interleaved_gate: string;
+  xeb_entangler: string;
   gst_max_length: number;
   shots: number;
   amp_error_pct: number;
@@ -145,6 +146,7 @@ interface RightInspectorProps {
   onRunSweep: () => void;
   onCancelSweep?: () => void;
   onRunZne?: () => void;
+  onRunNoiseBudget?: () => void;
   // Gate Benchmarking controls
   benchmarkConfig?: BenchmarkConfigState;
   onBenchmarkConfigChange?: (patch: Partial<BenchmarkConfigState>) => void;
@@ -211,6 +213,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onRunSweep,
   onCancelSweep,
   onRunZne,
+  onRunNoiseBudget,
   benchmarkConfig,
   onBenchmarkConfigChange,
   onRunGateBenchmark,
@@ -371,19 +374,32 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </div>
           </div>
 
-          {onRunZne && (
-            <div className="pt-2 space-y-1.5">
-              <button
-                type="button"
-                onClick={onRunZne}
-                disabled={isBusy}
-                className="w-full py-1.5 px-3 rounded-lg border border-[#0A84FF]/35 bg-[#0A84FF]/10 hover:bg-[#0A84FF]/18 text-[#0A84FF] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 transition-colors"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                执行 ZNE 零噪声外推缓解 (λ=1,2,3)
-              </button>
+          {(onRunZne || onRunNoiseBudget) && (
+            <div className="pt-2 space-y-2">
+              {onRunZne && (
+                <button
+                  type="button"
+                  onClick={onRunZne}
+                  disabled={isBusy}
+                  className="w-full py-1.5 px-3 rounded-[3px] border border-[#0A84FF]/40 bg-[#0A84FF]/10 hover:bg-[#0A84FF]/18 text-[#0A84FF] text-[11.5px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 transition-colors"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  执行 ZNE 零噪声外推 (λ=1,2,3)
+                </button>
+              )}
+              {onRunNoiseBudget && (
+                <button
+                  type="button"
+                  onClick={onRunNoiseBudget}
+                  disabled={isBusy}
+                  className="w-full py-1.5 px-3 rounded-[3px] border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/18 text-amber-500 text-[11.5px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 transition-colors"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  噪声误差预算消融拆解 (Budget)
+                </button>
+              )}
               <p className="text-[10.5px] text-[var(--text-secondary)] leading-snug">
-                放大硬件弛豫/退极化噪声并用 Richardson 多项式外推至 λ→0 无噪极限。
+                支持 Richardson 零噪声外推缓解，或逐通道消融定位 T1 / T2* / 门退极化 / ZZ / 读出瓶颈。
               </p>
             </div>
           )}
@@ -837,18 +853,19 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         {/* Protocol Switcher */}
         <div className="space-y-2">
           <SectionTitle>标定协议选择</SectionTitle>
-          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-3 gap-0.5">
+          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-4 gap-0.5">
             {(
               [
-                ['rb', 'RB 基准'],
+                ['rb', 'RB'],
                 ['allxy', 'AllXY'],
-                ['gst', 'GST 层析'],
+                ['gst', 'GST'],
+                ['xeb', 'XEB'],
               ] as const
             ).map(([pid, lbl]) => (
               <button
                 key={pid}
                 onClick={() => onBenchmarkConfigChange({ protocol: pid })}
-                className={`py-1.5 rounded-[2px] text-[11.5px] font-medium cursor-pointer ${
+                className={`py-1.5 rounded-[2px] text-[11px] font-mono-num font-medium cursor-pointer ${
                   bc.protocol === pid
                     ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold border border-[var(--border-hairline)]'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -1010,6 +1027,83 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <option value={8}>L = 8 (高精度过旋转探测)</option>
               </select>
             </div>
+          )}
+
+          {bc.protocol === 'xeb' && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    耦合配对比特 q_b
+                  </label>
+                  <select
+                    value={bc.second_qubit}
+                    disabled={project.qubits.length < 2}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({ second_qubit: Number(e.target.value) })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  >
+                    {project.qubits
+                      .filter((q) => q.id !== bc.target_qubit)
+                      .map((q) => (
+                        <option key={q.id} value={q.id}>
+                          {q.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    随机电路数 K
+                  </label>
+                  <input
+                    type="number"
+                    min={4}
+                    max={60}
+                    value={bc.rb_num_seeds}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({ rb_num_seeds: Number(e.target.value) })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  周期双比特纠缠门 (Cycle Entangler)
+                </label>
+                <select
+                  value={bc.xeb_entangler}
+                  onChange={(e) => onBenchmarkConfigChange({ xeb_entangler: e.target.value })}
+                  className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                >
+                  <option value="SQISWAP">√iSWAP (Sycamore fSim 纠缠门)</option>
+                  <option value="ISWAP">iSWAP (电容交换门)</option>
+                  <option value="CZ">CZ (受控相位门)</option>
+                  <option value="CNOT">CNOT (受控非门)</option>
+                  {project.custom_gates
+                    .filter((cg) => cg.num_qubits === 2 && cg.name.toUpperCase() !== 'SQISWAP')
+                    .map((cg) => (
+                      <option key={cg.id} value={cg.name}>
+                        {cg.display_label || cg.name} (自定义 2Q 门)
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  XEB 周期深度列表 m
+                </label>
+                <input
+                  value={bc.rb_lengths_str}
+                  onChange={(e) => onBenchmarkConfigChange({ rb_lengths_str: e.target.value })}
+                  className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] font-mono-num outline-none"
+                />
+              </div>
+            </>
           )}
         </div>
 

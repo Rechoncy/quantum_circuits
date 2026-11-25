@@ -28,6 +28,7 @@ from .models import (
     DslSyncRequest,
     GateBenchmarkRequest,
     NlCircuitRequest,
+    NoiseBudgetRequest,
     OptimizeRequest,
     ProjectModel,
     QasmSyncRequest,
@@ -42,6 +43,7 @@ from .project_engine import (
     build_preset_projects,
     dsl_to_project_ops,
     execute_cross_hardware_benchmark,
+    execute_noise_budget,
     execute_project_optimization,
     execute_project_simulation,
     execute_project_sweep,
@@ -58,7 +60,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.5.0")
+    app = FastAPI(title="Quantum Studio API", version="2.6.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -70,7 +72,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.5.0"}
+        return {"status": "ok", "version": "2.6.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:
@@ -182,6 +184,13 @@ def create_app() -> FastAPI:
     def api_zne_mitigation(req: ZneRequest) -> Dict[str, Any]:
         try:
             return execute_zne_mitigation(req)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/noise-budget")
+    def api_noise_budget(req: NoiseBudgetRequest) -> Dict[str, Any]:
+        try:
+            return execute_noise_budget(req.project, req.backend)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

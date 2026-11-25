@@ -4,6 +4,7 @@ import type {
   GateBenchmarkResponse,
   HardwareBenchmarkResponse,
   NlCircuitResponse,
+  NoiseBudgetResponse,
   OptimizeResponse,
   ProjectModel,
   QubitSpec,
@@ -164,16 +165,27 @@ export async function runZneMitigation(
   return postJson('/api/zne', payload, signal);
 }
 
+export async function runNoiseBudget(
+  payload: {
+    project: ProjectModel;
+    backend?: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
+  },
+  signal?: AbortSignal
+): Promise<NoiseBudgetResponse> {
+  return postJson('/api/noise-budget', payload, signal);
+}
+
 export async function runGateBenchmark(
   payload: {
     project: ProjectModel;
-    protocol: 'rb' | 'allxy' | 'gst';
+    protocol: 'rb' | 'allxy' | 'gst' | 'xeb';
     target_qubit: number;
     second_qubit?: number;
     rb_num_qubits?: 1 | 2;
     rb_lengths?: number[];
     rb_num_seeds?: number;
     interleaved_gate?: string | null;
+    xeb_entangler?: string;
     gst_max_length?: number;
     shots?: number;
     amp_error_pct?: number;

@@ -1097,6 +1097,7 @@ def _run_gst_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         ("Gy90", "Y90", "√Y 脉冲 RY(π/2)"),
         ("Gx", "X", "π 翻转脉冲 X"),
         ("Gy", "Y", "π 翻转脉冲 Y"),
+        ("Gh", "H", "Hadamard 门 H"),
     ]
 
     # 6 informationally complete preparation fiducials F_j (acting on |0>)
@@ -1331,12 +1332,262 @@ def _run_gst_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
     }
 
 
+# ============================================================================
+# 4. 2-Qubit Linear Cross-Entropy Benchmarking (Linear XEB — Non-Clifford Cycles)
+# ============================================================================
+
+def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
+    """
+    Google Sycamore-style 2-qubit Linear Cross-Entropy Benchmarking (XEB):
+      Each cycle applies independent random pi/2 rotations from {SX, SY, SW, SXdg, SYdg, SWdg}
+      (where W = (X + Y)/sqrt(2) is non-Clifford!) on (q_a, q_b), followed by the target
+      2-qubit entangling gate (e.g. SQISWAP / √iSWAP, ISWAP, CZ, CNOT, or any 2Q custom gate).
+    """
+    from .custom_gates import evaluate_custom_gate_unitary
+
+    project = req.project
+    n_proj = len(project.qubits)
+    q0 = max(0, min(req.target_qubit, n_proj - 1))
+    q1 = max(0, min(req.second_qubit, n_proj - 1))
+    if q1 == q0 and n_proj >= 2:
+        q1 = (q0 + 1) % n_proj
+
+    noise0 = _extract_qubit_noise_params(project, q0)
+    noise1 = _extract_qubit_noise_params(project, q1)
+    rng = np.random.default_rng(req.seed)
+    shots = max(0, int(req.shots))
+
+    raw_lens = sorted({max(1, min(40, int(m))) for m in req.rb_lengths if int(m) <= 40})
+    if len(raw_lens) < 3:
+        raw_lens = [1, 2, 4, 8, 12, 16, 24]
+    num_seeds = max(6, min(30, int(req.rb_num_seeds)))
+
+    # Build 6 single-qubit pi/2 gates {+X90, +Y90, +W90, -X90, -Y90, -W90} on q0 & q1
+    s2_inv = 1.0 / math.sqrt(2.0)
+    axes_1q = [
+        ("SX", (1.0, 0.0, 0.5 * math.pi)),
+        ("SY", (0.0, 1.0, 0.5 * math.pi)),
+        ("SW", (s2_inv, s2_inv, 0.5 * math.pi)),
+        ("SXdg", (-1.0, 0.0, 0.5 * math.pi)),
+        ("SYdg", (0.0, -1.0, 0.5 * math.pi)),
+        ("SWdg", (-s2_inv, -s2_inv, 0.5 * math.pi)),
+    ]
+
+    def lift_1q(s4: np.ndarray, which: int) -> np.ndarray:
+        s0_m = s4 if which == 0 else np.eye(4, dtype=np.complex128)
+        s1_m = s4 if which == 1 else np.eye(4, dtype=np.complex128)
+        t8 = np.kron(s0_m, s1_m).reshape(2, 2, 2, 2, 2, 2, 2, 2)
+        return np.transpose(t8, (0, 2, 1, 3, 4, 6, 5, 7)).reshape(16, 16)
+
+    g1_q0: List[Tuple[str, np.ndarray, np.ndarray]] = []
+    g1_q1: List[Tuple[str, np.ndarray, np.ndarray]] = []
+    for nm, ax in axes_1q:
+        s_0, u_0 = _build_1q_noisy_pulse_superop(
+            ax, noise0["t_1q_ns"], noise0["t1_ns"], noise0["t2_ns"], noise0["depol_1q"],
+            req.amp_error_pct, req.detuning_mhz, req.phase_skew_deg,
+        )
+        s_1, u_1 = _build_1q_noisy_pulse_superop(
+            ax, noise1["t_1q_ns"], noise1["t1_ns"], noise1["t2_ns"], noise1["depol_1q"],
+            req.amp_error_pct, req.detuning_mhz, req.phase_skew_deg,
+        )
+        g1_q0.append((nm, lift_1q(s_0, 0), np.kron(u_0, _I2)))
+        g1_q1.append((nm, lift_1q(s_1, 1), np.kron(_I2, u_1)))
+
+    # Resolve target 2Q entangling gate (supports SQISWAP, ISWAP, CZ, CNOT, or 2Q custom gates!)
+    ent_key = (req.xeb_entangler or "SQISWAP").strip().upper()
+    custom_match = next(
+        (cg for cg in project.custom_gates if cg.name.upper() == ent_key and cg.num_qubits == 2),
+        None,
+    )
+    if custom_match is not None:
+        cg_map = {g.name.upper(): g for g in project.custom_gates}
+        u_ent, _ = evaluate_custom_gate_unitary(
+            custom_match, list(custom_match.default_params), cg_map
+        )
+        t_ent_ns = float(custom_match.duration_ns)
+        dep2_eff = float(custom_match.infidelity) if project.sim_settings.enable_depol else 0.0
+        ent_label = custom_match.display_label or custom_match.name
+        dsl_ent_name = custom_match.name
+    elif ent_key in ("SQISWAP", "SQRT_ISWAP"):
+        u_ent = expm(-0.25j * math.pi * (0.5 * (np.kron(_SX, _SX) + np.kron(_SY, _SY))))
+        t_ent_ns = noise0["t_2q_ns"] * 0.75
+        dep2_eff = noise0["depol_2q"]
+        ent_label = "√iSWAP"
+        dsl_ent_name = "SQISWAP" if any(g.name.upper() == "SQISWAP" for g in project.custom_gates) else "ISWAP"
+    elif ent_key in ("CZ", "CNOT", "ISWAP"):
+        u_ent = gate_unitary(ent_key)
+        t_ent_ns = noise0["t_2q_ns"]
+        dep2_eff = noise0["depol_2q"]
+        ent_label = "iSWAP" if ent_key == "ISWAP" else ent_key
+        dsl_ent_name = ent_key
+    else:
+        u_ent = gate_unitary("CZ")
+        t_ent_ns = noise0["t_2q_ns"]
+        dep2_eff = noise0["depol_2q"]
+        ent_label = "CZ"
+        dsl_ent_name = "CZ"
+
+    zz_rad = 2.0 * math.pi * (noise0["zz_khz"] * 1e-6) * t_ent_ns
+    amp_rad = (req.amp_error_pct / 100.0) * (0.25 * math.pi)
+    u_ent_phys = expm(-0.5j * (zz_rad + amp_rad) * np.kron(_SZ, _SZ)) @ u_ent
+    s_ent = _unitary_to_liouville(u_ent_phys)
+    if t_ent_ns > 0:
+        if math.isfinite(noise0["t1_ns"]) or math.isfinite(noise0["t2_ns"]):
+            tr0 = NoiseChannel.thermal_relaxation(0, noise0["t1_ns"], noise0["t2_ns"], t_ent_ns)
+            s_ent = lift_1q(_kraus_to_liouville(tr0.kraus_operators()), 0) @ s_ent
+        if math.isfinite(noise1["t1_ns"]) or math.isfinite(noise1["t2_ns"]):
+            tr1 = NoiseChannel.thermal_relaxation(1, noise1["t1_ns"], noise1["t2_ns"], t_ent_ns)
+            s_ent = lift_1q(_kraus_to_liouville(tr1.kraus_operators()), 1) @ s_ent
+    if dep2_eff > 1e-12:
+        dep2_ch = NoiseChannel.depolarizing_2q(0, 1, min(0.90, dep2_eff))
+        s_ent = _kraus_to_liouville(dep2_ch.kraus_operators()) @ s_ent
+
+    # Readout confusion matrix M_ro (4 x 4) on 2-qubit computational basis probabilities
+    m_ro0 = np.array(
+        [[1.0 - noise0["p1_given_0"], noise0["p0_given_1"]], [noise0["p1_given_0"], 1.0 - noise0["p0_given_1"]]],
+        dtype=np.float64,
+    )
+    m_ro1 = np.array(
+        [[1.0 - noise1["p1_given_0"], noise1["p0_given_1"]], [noise1["p1_given_0"], 1.0 - noise1["p0_given_1"]]],
+        dtype=np.float64,
+    )
+    m_ro_2q = np.kron(m_ro0, m_ro1)
+
+    psi0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128)
+    rho0_vec = np.outer(psi0, psi0.conj()).reshape(-1)
+    diag_indices = [0, 5, 10, 15]
+
+    xeb_means: List[float] = []
+    xeb_stds: List[float] = []
+    speckle_ideal: List[float] = []
+    speckle_meas: List[float] = []
+    sample_ops: List[CircuitOpModel] = []
+
+    for m_idx, m_cyc in enumerate(raw_lens):
+        num_sum = 0.0
+        den_sum = 0.0
+        per_seed_f: List[float] = []
+        for k in range(num_seeds):
+            psi_id = psi0.copy()
+            rho_v = rho0_vec.copy()
+            rec = m_idx == min(1, len(raw_lens) - 1) and k == 0
+            step_c = 0
+            for _ in range(m_cyc):
+                i_a = int(rng.integers(0, len(g1_q0)))
+                i_b = int(rng.integers(0, len(g1_q1)))
+                nm_a, s_a, u_a = g1_q0[i_a]
+                nm_b, s_b, u_b = g1_q1[i_b]
+                psi_id = u_ent @ (u_b @ (u_a @ psi_id))
+                rho_v = s_ent @ (s_b @ (s_a @ rho_v))
+                if rec:
+                    for q_t, g_tok in ((q0, nm_a), (q1, nm_b)):
+                        if g_tok == "SX":
+                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="SX", qubits=[q_t], params=[]))
+                        elif g_tok == "SY":
+                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="RY", qubits=[q_t], params=[round(0.5 * math.pi, 4)]))
+                        else:
+                            phi_w = 0.25 * math.pi if "W" in g_tok else 0.0
+                            th_w = -0.5 * math.pi if "dg" in g_tok else 0.5 * math.pi
+                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="RXY", qubits=[q_t], params=[round(th_w, 4), round(phi_w, 4)]))
+                    step_c += 1
+                    sample_ops.append(CircuitOpModel(id=f"xeb_e_{step_c}", step=step_c, kind="gate", name=dsl_ent_name, qubits=[q0, q1], params=[]))
+                    step_c += 1
+            if rec:
+                sample_ops.append(CircuitOpModel(id="xeb_m", step=step_c, kind="measure", name="MEASURE", qubits=[q0, q1], params=[]))
+
+            p_id = np.abs(psi_id) ** 2
+            p_ns_raw = np.clip(np.real(rho_v[diag_indices]), 0.0, 1.0)
+            p_ns = m_ro_2q @ p_ns_raw
+            p_ns = np.clip(p_ns / max(1e-12, float(np.sum(p_ns))), 0.0, 1.0)
+            if shots > 0:
+                counts = rng.multinomial(shots, p_ns)
+                p_obs = counts.astype(np.float64) / float(shots)
+            else:
+                p_obs = p_ns
+
+            # Normalized Linear XEB estimator: (d * sum(p_id * p_obs) - 1) / (d * sum(p_id^2) - 1)
+            raw_num = 4.0 * float(np.dot(p_id, p_obs)) - 1.0
+            raw_den = max(0.05, 4.0 * float(np.dot(p_id, p_id)) - 1.0)
+            num_sum += raw_num
+            den_sum += raw_den
+            per_seed_f.append(float(raw_num / raw_den))
+
+            if m_idx == len(raw_lens) // 2 and len(speckle_ideal) < 80:
+                for b_i in range(4):
+                    speckle_ideal.append(round(float(p_id[b_i]), 5))
+                    speckle_meas.append(round(float(p_obs[b_i]), 5))
+
+        f_m = float(np.clip(num_sum / max(1e-9, den_sum), 0.0, 1.05))
+        xeb_means.append(round(f_m, 6))
+        xeb_stds.append(round(float(np.std(per_seed_f, ddof=1) / math.sqrt(len(per_seed_f))), 6))
+
+    # Fit F_XEB(m) = A * f_cycle^m
+    m_arr = np.array(raw_lens, dtype=np.float64)
+    y_arr = np.array(xeb_means, dtype=np.float64)
+    if float(np.max(y_arr) - np.min(y_arr)) < 1e-5 and float(np.mean(y_arr)) > 0.96:
+        a_xeb, f_cyc = float(min(1.0, np.mean(y_arr))), 1.0
+    else:
+        def xeb_fn(m: np.ndarray, a: float, f: float) -> np.ndarray:
+            return a * np.power(f, m)
+
+        try:
+            popt, _ = curve_fit(xeb_fn, m_arr, np.clip(y_arr, 1e-4, 1.05), p0=[0.98, 0.985], bounds=([0.2, 0.1], [1.05, 1.0]), maxfev=3000)
+            a_xeb, f_cyc = float(popt[0]), float(popt[1])
+        except Exception:
+            a_xeb, f_cyc = float(y_arr[0]), 0.985
+
+    # Cycle Pauli error e_cycle = (1 - 1/4) * (1 - f_cycle) = 0.75 * (1 - f_cycle)
+    e_cycle = 0.75 * (1.0 - f_cyc)
+    # Compute exact 2-qubit Pauli-twirled polarization of the parallel 1Q gate layer
+    s0_single, u0_single = _build_1q_noisy_pulse_superop(
+        axes_1q[0][1], noise0["t_1q_ns"], noise0["t1_ns"], noise0["t2_ns"], noise0["depol_1q"],
+        req.amp_error_pct, req.detuning_mhz, req.phase_skew_deg,
+    )
+    s1_single, u1_single = _build_1q_noisy_pulse_superop(
+        axes_1q[0][1], noise1["t_1q_ns"], noise1["t1_ns"], noise1["t2_ns"], noise1["depol_1q"],
+        req.amp_error_pct, req.detuning_mhz, req.phase_skew_deg,
+    )
+    f_proc_0 = float(np.clip(0.25 * np.trace(_liouville_to_ptm_1q(_unitary_to_liouville(u0_single)).T @ _liouville_to_ptm_1q(s0_single)), 0.0, 1.0))
+    f_proc_1 = float(np.clip(0.25 * np.trace(_liouville_to_ptm_1q(_unitary_to_liouville(u1_single)).T @ _liouville_to_ptm_1q(s1_single)), 0.0, 1.0))
+    p0_1q = max(0.01, (4.0 * f_proc_0 - 1.0) / 3.0)
+    p1_1q = max(0.01, (4.0 * f_proc_1 - 1.0) / 3.0)
+    p_layer_2q = max(0.01, (3.0 * p0_1q + 3.0 * p1_1q + 9.0 * p0_1q * p1_1q) / 15.0)
+    f_ent_pol = min(1.0, f_cyc / p_layer_2q)
+    entangler_fidelity = 1.0 - 0.75 * (1.0 - f_ent_pol)
+
+    dense_m = np.linspace(0.0, float(max(raw_lens)), 80)
+    fit_y = [round(float(a_xeb * (f_cyc ** xm)), 6) for xm in dense_m]
+
+    return {
+        "protocol": "xeb",
+        "hardware_name": noise0["hardware_name"],
+        "target_label": f"{project.qubits[q0].name}, {project.qubits[q1].name}",
+        "entangler_name": ent_label,
+        "lengths": raw_lens,
+        "num_seeds": num_seeds,
+        "shots": shots,
+        "fit_x": [round(float(x), 3) for x in dense_m],
+        "fit_y": fit_y,
+        "mean_xeb": xeb_means,
+        "std_xeb": xeb_stds,
+        "a_spam": round(a_xeb, 5),
+        "cycle_polarization": round(f_cyc, 6),
+        "cycle_pauli_error": round(e_cycle, 6),
+        "entangler_fidelity": round(entangler_fidelity, 6),
+        "speckle_ideal": speckle_ideal,
+        "speckle_measured": speckle_meas,
+        "sample_operations": [op.model_dump() for op in sample_ops],
+    }
+
+
 def execute_gate_benchmark(req: GateBenchmarkRequest) -> Dict[str, Any]:
-    """Dispatch RB / Interleaved RB, AllXY, or Gate Set Tomography (GST)."""
+    """Dispatch RB / Interleaved RB, AllXY, Gate Set Tomography (GST), or Linear XEB."""
     if req.protocol == "rb":
         return _run_rb_protocol(req)
     if req.protocol == "allxy":
         return _run_allxy_protocol(req)
     if req.protocol == "gst":
         return _run_gst_protocol(req)
+    if req.protocol == "xeb":
+        return _run_xeb_protocol(req)
     raise ValueError(f"未知门标定协议: {req.protocol}")

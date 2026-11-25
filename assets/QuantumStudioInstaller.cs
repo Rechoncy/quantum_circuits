@@ -9,11 +9,11 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("Quantum Studio v2.5.0 Setup")]
-[assembly: AssemblyDescription("Quantum Studio v2.5.0 Self-Contained Desktop Installer & Uninstaller (Embedded Python 3.13 + QuTiP + Trajectory + Stim)")]
+[assembly: AssemblyTitle("Quantum Studio v2.6.0 Setup")]
+[assembly: AssemblyDescription("Quantum Studio v2.6.0 Self-Contained Desktop Installer & Uninstaller (Embedded Python 3.13 + QuTiP + Trajectory + Stim)")]
 [assembly: AssemblyProduct("Quantum Studio v2")]
-[assembly: AssemblyVersion("2.5.0.0")]
-[assembly: AssemblyFileVersion("2.5.0.0")]
+[assembly: AssemblyVersion("2.6.0.0")]
+[assembly: AssemblyFileVersion("2.6.0.0")]
 
 namespace QuantumStudioSetup
 {
@@ -93,7 +93,7 @@ namespace QuantumStudioSetup
 
         public SetupForm(string defaultDir)
         {
-            Text = "Quantum Studio v2.5.0 安装程序";
+            Text = "Quantum Studio v2.6.0 安装程序";
             Size = new Size(560, 395);
             MinimumSize = new Size(560, 395);
             MaximumSize = new Size(560, 395);
@@ -132,7 +132,7 @@ namespace QuantumStudioSetup
 
             Label titleLbl = new Label
             {
-                Text = "Quantum Studio v2.5.0",
+                Text = "Quantum Studio v2.6.0",
                 ForeColor = Color.White,
                 Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold),
                 Location = new Point(80, 14),
@@ -316,7 +316,7 @@ namespace QuantumStudioSetup
                         bool launchNow = _chkLaunch.Checked;
                         MessageBox.Show(
                             this,
-                            "Quantum Studio v2.5.0 已成功安装至:\n" + targetDir + "\n\n（如需卸载，可在 Windows「设置 → 已安装的应用」或安装目录运行 Uninstall.exe）",
+                            "Quantum Studio v2.6.0 已成功安装至:\n" + targetDir + "\n\n（如需卸载，可在 Windows「设置 → 已安装的应用」或安装目录运行 Uninstall.exe）",
                             "安装成功",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information
@@ -502,8 +502,8 @@ namespace QuantumStudioSetup
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UNINSTALL_REG_KEY))
                 {
                     if (key == null) return;
-                    key.SetValue("DisplayName", "Quantum Studio v2.5.0");
-                    key.SetValue("DisplayVersion", "2.5.0");
+                    key.SetValue("DisplayName", "Quantum Studio v2.6.0");
+                    key.SetValue("DisplayVersion", "2.6.0");
                     key.SetValue("Publisher", "Quantum Studio Project");
                     key.SetValue("InstallLocation", targetDir);
                     key.SetValue("DisplayIcon", File.Exists(iconPath) ? iconPath : appExe);
@@ -562,7 +562,7 @@ namespace QuantumStudioSetup
             if (!silent)
             {
                 DialogResult dr = MessageBox.Show(
-                    "确定要卸载 Quantum Studio v2.5.0 并移除快捷方式与安装目录吗？\n\n目录: " + targetDir,
+                    "确定要卸载 Quantum Studio v2.6.0 并移除快捷方式与安装目录吗？\n\n目录: " + targetDir,
                     "卸载 Quantum Studio",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question

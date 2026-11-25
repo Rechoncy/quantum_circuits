@@ -1301,6 +1301,66 @@ def test_gate_benchmarking_rb_irb_allxy_and_gst() -> None:
     assert gx_rep["coherent_ratio"] > 0.95
     assert gst_coh["spam_prep_fidelity"] > 0.98
     assert gst_coh["spam_readout_fidelity"] < 0.95  # GST simultaneously catches the 8% readout SPAM!
+    assert any(g["gate_id"] == "Gh" for g in gst_coh["gates"]), "GST should include 6th gate Gh (Hadamard)"
+
+
+def test_noise_error_budget_and_2q_linear_xeb() -> None:
+    """
+    Verify v2.6 Noise Error Budget ablation (`execute_noise_budget`) and 2Q Linear XEB
+    (`execute_gate_benchmark(..., protocol='xeb')`) including non-Clifford √iSWAP.
+    """
+    from quantum_solver.studio import (
+        GateBenchmarkRequest,
+        build_preset_projects,
+        execute_gate_benchmark,
+        execute_noise_budget,
+    )
+
+    p_base = build_preset_projects()[0]
+
+    # 1. Noise Error Budget isolates channels and sums shares to 100%
+    nb = execute_noise_budget(p_base)
+    assert 0.85 < nb["full_fidelity"] < 1.0
+    assert len(nb["contributions"]) >= 5
+    total_share = sum(c["share_pct"] for c in nb["contributions"])
+    assert abs(total_share - 100.0) < 0.25
+    assert nb["contributions"][0]["infidelity"] >= nb["contributions"][-1]["infidelity"]
+
+    # 2. Ideal vs Noisy 2Q Linear XEB for non-Clifford √iSWAP
+    p_ideal = p_base.model_copy(deep=True)
+    p_ideal.sim_settings.enable_t1_t2 = False
+    p_ideal.sim_settings.enable_depol = False
+    p_ideal.sim_settings.enable_zz = False
+    p_ideal.sim_settings.enable_readout = False
+    xeb_ideal = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_ideal,
+            protocol="xeb",
+            rb_lengths=[1, 2, 4, 8, 12],
+            rb_num_seeds=10,
+            xeb_entangler="SQISWAP",
+            shots=0,
+        )
+    )
+    assert xeb_ideal["protocol"] == "xeb"
+    assert xeb_ideal["cycle_polarization"] > 0.999
+    assert xeb_ideal["entangler_fidelity"] > 0.999
+    assert len(xeb_ideal["speckle_ideal"]) >= 20
+
+    xeb_noisy = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_base,
+            protocol="xeb",
+            rb_lengths=[1, 2, 4, 8, 16],
+            rb_num_seeds=12,
+            xeb_entangler="SQISWAP",
+            shots=0,
+        )
+    )
+    assert 0.95 < xeb_noisy["cycle_polarization"] < 0.9995
+    assert 0.96 < xeb_noisy["entangler_fidelity"] < 1.0
+    assert len(xeb_noisy["sample_operations"]) > 0
+
 
 
 

@@ -2626,3 +2626,244 @@ def execute_zne_mitigation(req: ZneRequest) -> Dict[str, Any]:
         "energy_richardson_curve": en_rich_curve,
         "per_qubit_z": per_qubit_z,
     }
+
+
+def execute_noise_budget(project: ProjectModel, backend_override: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Decompose total circuit state infidelity (1 - F) and readout Total Variation Distance (TVD)
+    across individual physical noise mechanisms via channel-isolation ablation:
+      1. T1 Energy Relaxation (t1_us finite, t2_us = 2 * t1_us)
+      2. T2* Pure Dephasing (t_phi contribution beyond 2 * t1_us)
+      3. 1Q Gate Depolarizing Control Error (depol_1q)
+      4. 2Q Entangling Gate Error (depol_2q)
+      5. Static ZZ Crosstalk (zz_khz, evaluated via QuTiP drift Hamiltonian when N <= 7)
+      6. Explicit Inline Noise Operations (CircuitOpModel kind == 'noise')
+      7. Readout Confusion Error (TVD = 0.5 * sum_x |P_noisy_readout(x) - P_clean_readout(x)|)
+    """
+    n_q = len(project.qubits)
+    req_bk = backend_override or project.sim_settings.backend
+    if req_bk == "compare":
+        req_bk = "qutip" if n_q <= 6 else ("kraus" if n_q <= 12 else ("trajectory" if n_q <= 20 else "stim"))
+    if req_bk == "qutip" and n_q > 7:
+        req_bk = "kraus" if n_q <= 12 else ("trajectory" if n_q <= 20 else "stim")
+    if req_bk == "kraus" and n_q > 12:
+        req_bk = "trajectory" if n_q <= 20 else "stim"
+    if req_bk == "trajectory" and n_q > 22:
+        req_bk = "stim"
+
+    init_labels = [q.init_state for q in project.qubits]
+    init_psi = (
+        build_initial_statevector(project.qubits)
+        if req_bk in ("qutip", "kraus", "trajectory") and n_q <= 22
+        else None
+    )
+
+    shots = min(max(int(project.sim_settings.shots), 2048), 8192)
+
+    def _clean_copy() -> ProjectModel:
+        cp = project.model_copy(deep=True)
+        cp.sim_settings.enable_t1_t2 = False
+        cp.sim_settings.enable_depol = False
+        cp.sim_settings.enable_zz = False
+        cp.sim_settings.enable_readout = False
+        cp.operations = [op for op in cp.operations if op.kind != "noise"]
+        for op in cp.operations:
+            if op.kind == "gate":
+                op.noise_mode = "inherit"
+        return cp
+
+    def _eval_proj(sp: ProjectModel, bk: str = req_bk) -> EvolutionResult:
+        hw_m = build_hardware_model(sp)
+        circ_m = compile_project_circuit(sp)
+        loc_s = QuantumSolver(hardware=hw_m, intra_gate_steps=8)
+        return loc_s.solve(
+            circ_m,
+            backend=bk,
+            hardware=hw_m,
+            shots=shots,
+            seed=512,
+            initial_state=init_psi if bk != "stim" else None,
+            initial_state_labels=init_labels if bk in ("stim", "stim_qutip") else None,
+        )
+
+    # 0. Ideal baseline & Full active-settings circuit
+    p_ideal = _clean_copy()
+    res_ideal = _eval_proj(p_ideal)
+
+    p_full = project.model_copy(deep=True)
+    # If all toggles were off and no inline noise, turn on standard hardware channels so budget is informative
+    has_inline = any(op.kind == "noise" or (op.kind == "gate" and op.noise_mode == "custom") for op in project.operations)
+    if not (
+        p_full.sim_settings.enable_t1_t2
+        or p_full.sim_settings.enable_depol
+        or p_full.sim_settings.enable_zz
+        or p_full.sim_settings.enable_readout
+        or has_inline
+    ):
+        p_full.sim_settings.enable_t1_t2 = True
+        p_full.sim_settings.enable_depol = True
+        p_full.sim_settings.enable_zz = True
+        p_full.sim_settings.enable_readout = True
+
+    res_full = _eval_proj(p_full)
+    full_fid = float(res_full.final_fidelity if res_full.final_fidelity is not None else 1.0)
+    total_infid = max(0.0, 1.0 - full_fid)
+
+    active_hp = next(
+        (h for h in p_full.hardware_profiles if h.id == p_full.active_hardware_id),
+        p_full.hardware_profiles[0],
+    )
+
+    items: List[Dict[str, Any]] = []
+
+    # 1 & 2. T1 relaxation vs T2* pure dephasing
+    if p_full.sim_settings.enable_t1_t2:
+        p_t1_only = _clean_copy()
+        p_t1_only.sim_settings.enable_t1_t2 = True
+        for hp in p_t1_only.hardware_profiles:
+            hp.t2_us = 2.0 * hp.t1_us
+        for q in p_t1_only.qubits:
+            if q.t1_us is not None:
+                q.t2_us = 2.0 * q.t1_us
+            elif q.t2_us is not None:
+                q.t2_us = 2.0 * active_hp.t1_us
+        res_t1 = _eval_proj(p_t1_only)
+        infid_t1 = max(0.0, 1.0 - float(res_t1.final_fidelity if res_t1.final_fidelity is not None else 1.0))
+
+        p_t12 = _clean_copy()
+        p_t12.sim_settings.enable_t1_t2 = True
+        res_t12 = _eval_proj(p_t12)
+        infid_t12 = max(0.0, 1.0 - float(res_t12.final_fidelity if res_t12.final_fidelity is not None else 1.0))
+        infid_tphi = max(0.0, infid_t12 - infid_t1)
+
+        items.append(
+            {
+                "id": "t1_relaxation",
+                "label": "T1 能量弛豫衰减",
+                "infidelity": round(infid_t1, 6),
+                "detail": f"T1 = {active_hp.t1_us:g} μs",
+            }
+        )
+        items.append(
+            {
+                "id": "t2_dephasing",
+                "label": "T2* 纯相位退相干",
+                "infidelity": round(infid_tphi, 6),
+                "detail": f"T2* = {active_hp.t2_us:g} μs",
+            }
+        )
+
+    # 3 & 4. 1Q vs 2Q Control Depolarizing Error
+    if p_full.sim_settings.enable_depol:
+        p_dep1 = _clean_copy()
+        p_dep1.sim_settings.enable_depol = True
+        for hp in p_dep1.hardware_profiles:
+            hp.depol_2q = 0.0
+        res_d1 = _eval_proj(p_dep1)
+        infid_d1 = max(0.0, 1.0 - float(res_d1.final_fidelity if res_d1.final_fidelity is not None else 1.0))
+
+        p_dep2 = _clean_copy()
+        p_dep2.sim_settings.enable_depol = True
+        for hp in p_dep2.hardware_profiles:
+            hp.depol_1q = 0.0
+        for q in p_dep2.qubits:
+            q.depol_1q = 0.0
+        res_d2 = _eval_proj(p_dep2)
+        infid_d2 = max(0.0, 1.0 - float(res_d2.final_fidelity if res_d2.final_fidelity is not None else 1.0))
+
+        n_1q = sum(1 for o in p_full.operations if o.kind == "gate" and len(o.qubits) == 1)
+        n_2q = sum(1 for o in p_full.operations if o.kind == "gate" and len(o.qubits) >= 2)
+        items.append(
+            {
+                "id": "depol_1q",
+                "label": "单比特门控制退极化",
+                "infidelity": round(infid_d1, 6),
+                "detail": f"{n_1q} 门 × p_1q={active_hp.depol_1q:g}",
+            }
+        )
+        items.append(
+            {
+                "id": "depol_2q",
+                "label": "双比特纠缠门噪声",
+                "infidelity": round(infid_d2, 6),
+                "detail": f"{n_2q} 门 × p_2q={active_hp.depol_2q:g}",
+            }
+        )
+
+    # 5. Static ZZ Crosstalk (via QuTiP Hamiltonian solver when n_q <= 7 and zz_khz > 0)
+    if p_full.sim_settings.enable_zz and active_hp.zz_khz > 0 and n_q >= 2 and n_q <= 7:
+        p_zz = _clean_copy()
+        p_zz.sim_settings.enable_zz = True
+        res_zz = _eval_proj(p_zz, bk="qutip")
+        infid_zz = max(0.0, 1.0 - float(res_zz.final_fidelity if res_zz.final_fidelity is not None else 1.0))
+        items.append(
+            {
+                "id": "zz_crosstalk",
+                "label": "静态 ZZ 耦合串扰",
+                "infidelity": round(infid_zz, 6),
+                "detail": f"ξ_ZZ = {active_hp.zz_khz:g} kHz",
+            }
+        )
+
+    # 6. Explicit Inline Noise Ops
+    if has_inline:
+        p_inl = _clean_copy()
+        p_inl.operations = [op.model_copy(deep=True) for op in project.operations]
+        res_inl = _eval_proj(p_inl)
+        infid_inl = max(0.0, 1.0 - float(res_inl.final_fidelity if res_inl.final_fidelity is not None else 1.0))
+        n_inl = sum(1 for op in project.operations if op.kind == "noise")
+        items.append(
+            {
+                "id": "inline_noise",
+                "label": "显式注入噪声通道",
+                "infidelity": round(infid_inl, 6),
+                "detail": f"{n_inl} 处内联噪声操作",
+            }
+        )
+
+    # 7. Readout Confusion Error (Total Variation Distance on measurement probabilities)
+    readout_tvd = 0.0
+    if p_full.sim_settings.enable_readout and active_hp.readout_err > 0:
+        p_ro = _clean_copy()
+        p_ro.sim_settings.enable_readout = True
+        res_ro = _eval_proj(p_ro)
+        all_keys = set(res_ideal.final_probabilities.keys()) | set(res_ro.final_probabilities.keys())
+        readout_tvd = 0.5 * sum(
+            abs(res_ro.final_probabilities.get(k, 0.0) - res_ideal.final_probabilities.get(k, 0.0))
+            for k in all_keys
+        )
+        items.append(
+            {
+                "id": "readout_error",
+                "label": "测量读出混淆误差 (TVD)",
+                "infidelity": round(readout_tvd, 6),
+                "detail": f"e_ro = {active_hp.readout_err * 100:.2f}%",
+            }
+        )
+
+    sum_iso = sum(float(it["infidelity"]) for it in items)
+    for it in items:
+        it["share_pct"] = round((float(it["infidelity"]) / sum_iso * 100.0) if sum_iso > 1e-9 else 0.0, 2)
+
+    items.sort(key=lambda x: float(x["infidelity"]), reverse=True)
+
+    if not items or sum_iso < 1e-6:
+        summary = "当前线路处于近无噪理想状态，各项物理通道均未引入可观测失真。"
+    else:
+        top = items[0]
+        summary = (
+            f"首要误差瓶颈为「{top['label']}」（占总误差预算 {top['share_pct']:.1f}%，"
+            f"单独引入失真 {top['infidelity'] * 100:.3f}% · {top['detail']}）。"
+        )
+
+    return {
+        "backend": req_bk,
+        "hardware_name": active_hp.name,
+        "num_qubits": n_q,
+        "full_fidelity": round(full_fid, 6),
+        "total_state_infidelity": round(total_infid, 6),
+        "readout_tvd": round(readout_tvd, 6),
+        "sum_isolated_errors": round(sum_iso, 6),
+        "bottleneck_summary": summary,
+        "contributions": items,
+    }

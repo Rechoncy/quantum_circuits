@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState, useCallback } from 'react';
 import {
   Plus,
   Play,
@@ -11,6 +11,10 @@ import {
   Sparkles,
   SkipBack,
   SkipForward,
+  MousePointer,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
 } from 'lucide-react';
 import type {
   CircuitOpModel,
@@ -33,12 +37,14 @@ interface CircuitCanvasProps {
   onPlaceGate: (gateName: string, step: number, qubits: number[]) => void;
   onMoveOp?: (opId: string, newStep: number, newAnchorQubit: number) => void;
   onDeleteOp: (opId: string) => void;
+  onDeleteMultipleOps?: (opIds: string[]) => void;
   onAddQubit: () => void;
   onPackageMacro?: (selectedOpIds: string[]) => void;
   onOpenNlModal?: () => void;
   // Simulate mode timeline cursor
   timeCursorStep?: number;
   maxCursorStep?: number;
+  cursorReadoutLabel?: string | null;
   onTimeCursorChange?: (step: number) => void;
   onStepJump?: (targetStep: number) => void;
   isPlayingTimeline?: boolean;
@@ -48,13 +54,13 @@ interface CircuitCanvasProps {
   titleBadge?: string;
 }
 
-const ROW_H = 54;
-const ROW_H_COMPACT = 35;
-const COL_W = 86;
-const LEFT_PAD = 92;
+const BASE_ROW_H = 54;
+const BASE_ROW_H_COMPACT = 35;
+const BASE_COL_W = 86;
+const BASE_LEFT_PAD = 92;
 
 const PALETTE_1Q = ['H', 'X', 'SX', 'RXY', 'RX', 'RY', 'RZ'];
-const PALETTE_2Q = ['CZ', 'CNOT', 'ISWAP'];
+const PALETTE_2Q = ['CZ', 'CNOT', 'ISWAP', 'SWAP'];
 const PALETTE_UTIL = ['DEPOLARIZE', 'MEASURE'];
 
 export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
@@ -69,11 +75,13 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   onPlaceGate,
   onMoveOp,
   onDeleteOp,
+  onDeleteMultipleOps,
   onAddQubit,
   onPackageMacro,
   onOpenNlModal,
   timeCursorStep,
   maxCursorStep,
+  cursorReadoutLabel,
   onTimeCursorChange,
   onStepJump,
   isPlayingTimeline,
@@ -83,7 +91,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   titleBadge,
 }) => {
   const ops = operationsOverride ?? project.operations;
-  const rowH = compact ? ROW_H_COMPACT : ROW_H;
+  const [zoom, setZoom] = useState(1);
+  const effZoom = compact ? 1 : zoom;
+  const rowH = Math.round((compact ? BASE_ROW_H_COMPACT : BASE_ROW_H) * effZoom);
+  const colW = Math.round(BASE_COL_W * effZoom);
+  const leftPad = Math.round(BASE_LEFT_PAD * Math.max(0.85, Math.min(1.15, effZoom)));
+
   const [pendingFirstQubit, setPendingFirstQubit] = useState<{
     gateName: string;
     step: number;
@@ -94,9 +107,19 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   const [extraCols, setExtraCols] = useState(2);
   const [dragHoverCell, setDragHoverCell] = useState<{ q: number; c: number } | null>(null);
   const [hoverCell, setHoverCell] = useState<{ q: number; c: number } | null>(null);
+  const [marquee, setMarquee] = useState<{
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+  } | null>(null);
+  const [isScrubbingCanvas, setIsScrubbingCanvas] = useState(false);
+  const suppressNextClickRef = useRef(false);
+
   const [vpScroll, setVpScroll] = useState({ top: 0, left: 0, height: 720, width: 1280 });
   const gridRef = useRef<HTMLDivElement>(null);
   const scrollWrapRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
 
   const customGateMap = useMemo(() => {
     const m = new Map<string, CustomGateDef>();
@@ -109,7 +132,6 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     return m;
   }, []);
 
-  // O(1) / sparse hardware coupling lookup to flag topology/blockade violations live on canvas
   const activeHwTopology = useMemo(() => {
     const hw =
       project.hardware_profiles.find((h) => h.id === project.active_hardware_id) ||
@@ -209,14 +231,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     setDragHoverCell(null);
     if (readOnly) return;
 
-    // Case 1: Moving an existing placed gate on the canvas
     const moveOpId = e.dataTransfer.getData('application/quantum-move-op');
     if (moveOpId && onMoveOp) {
       onMoveOp(moveOpId, step, qubitIdx);
       return;
     }
 
-    // Case 2: Placing a new gate dragged from palette or left library
     const gateName = e.dataTransfer.getData('application/quantum-gate') || activeToolGate;
     if (!gateName) return;
     const arity = getGateArity(gateName);
@@ -228,17 +248,19 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         onPlaceGate(gateName, step, [qubitIdx, target]);
       }
     } else if (arity === 3 && project.qubits.length >= 3) {
-      const base = Math.min(qubitIdx, project.qubits.length - 3);
-      onPlaceGate(gateName, step, [base, base + 1, base + 2]);
+      const q1 = (qubitIdx + 1) % project.qubits.length;
+      const q2 = (qubitIdx + 2) % project.qubits.length;
+      onPlaceGate(gateName, step, [qubitIdx, q1, q2]);
     }
   };
 
-  const formatOpParams = (op: CircuitOpModel) => {
+  const formatOpParams = (op: CircuitOpModel): string => {
     if (!op.params || op.params.length === 0) return '';
     return op.params
       .map((p) => {
         if (typeof p === 'string') return p;
         const ratio = p / Math.PI;
+        if (Math.abs(p) < 1e-4) return '0';
         if (Math.abs(ratio - 1) < 1e-3) return 'π';
         if (Math.abs(ratio + 1) < 1e-3) return '-π';
         if (Math.abs(ratio - 0.5) < 1e-3) return 'π/2';
@@ -250,8 +272,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
       .join(',');
   };
 
-  const getGateStyle = (op: CircuitOpModel) => {
-    const u = op.name.toUpperCase();
+  const getGateStyleByName = (gateName: string, kind: CircuitOpModel['kind'] = 'gate') => {
+    const u = gateName.toUpperCase();
     const cg = customGateMap.get(u);
     if (cg) {
       return {
@@ -262,7 +284,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         isCustom: true,
       };
     }
-    if (op.kind === 'measure') {
+    if (kind === 'measure' || u === 'MEASURE') {
       return {
         bg: 'bg-[#e2e8f0] dark:bg-[#242e3d]',
         border: 'border-slate-400 dark:border-slate-500/80',
@@ -271,12 +293,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         isCustom: false,
       };
     }
-    if (op.kind === 'noise') {
+    if (kind === 'noise' || u === 'DEPOLARIZE' || u === 'PHASE_FLIP') {
       return {
         bg: 'bg-[#fffbeb] dark:bg-[#332613]',
         border: 'border-amber-400 border-dashed dark:border-amber-400/75',
         text: 'text-amber-900 dark:text-amber-200',
-        label: op.name.slice(0, 5),
+        label: u.slice(0, 5),
         isCustom: false,
       };
     }
@@ -303,10 +325,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
       bg: 'bg-[#eff6ff] dark:bg-[#15263d]',
       border: 'border-sky-400 dark:border-sky-400/75',
       text: 'text-sky-950 dark:text-sky-200',
-      label: bgInfo?.label || op.name,
+      label: bgInfo?.label || gateName,
       isCustom: false,
     };
   };
+
+  const getGateStyle = (op: CircuitOpModel) => getGateStyleByName(op.name, op.kind);
 
   // Match backend parallel-layer grouping (disjoint gates on same `step` form one snapshot)
   const orderedLayerSteps = useMemo(() => {
@@ -339,6 +363,69 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     return layerCols;
   }, [ops]);
 
+  // Step <-> Canvas X Pixel bidirectional mapping for 60fps Oscilloscope Probe Scrubbing!
+  const stepToX = useCallback(
+    (stepVal: number): number => {
+      if (maxCursorStep === undefined || maxCursorStep <= 0) return leftPad - 6;
+      const clamped = Math.max(0, Math.min(maxCursorStep, stepVal));
+      const k0 = Math.floor(clamped);
+      const k1 = Math.min(maxCursorStep, k0 + 1);
+      const frac = clamped - k0;
+
+      const colOfStep = (sIdx: number): number => {
+        if (sIdx <= 0) return -1;
+        if (sIdx >= maxCursorStep && ops.some((o) => o.kind === 'measure')) {
+          return Math.max(...ops.filter((o) => o.kind === 'measure').map((o) => o.step));
+        }
+        const layerIdx = Math.min(Math.max(0, sIdx - 1), orderedLayerSteps.length - 1);
+        return orderedLayerSteps[layerIdx] ?? numCols - 1;
+      };
+
+      if (clamped <= 0) return leftPad - 6;
+      if (frac > 1e-3 && k1 > k0) {
+        const activeCol = colOfStep(k1);
+        const colStart = leftPad + activeCol * colW + colW * 0.15;
+        const colEnd = leftPad + activeCol * colW + colW * 0.85;
+        return colStart + frac * (colEnd - colStart);
+      }
+      const doneCol = colOfStep(k0);
+      return k0 >= maxCursorStep && ops.some((o) => o.kind === 'measure')
+        ? leftPad + doneCol * colW + colW * 0.55
+        : leftPad + doneCol * colW + colW * 0.85;
+    },
+    [maxCursorStep, ops, orderedLayerSteps, numCols, leftPad, colW]
+  );
+
+  // Monotonic piecewise-linear inverse mapping X pixel -> continuous step [0..maxCursorStep]
+  const xPxToStep = useCallback(
+    (xPx: number, snapNearInteger: boolean): number => {
+      if (!maxCursorStep || maxCursorStep <= 0) return 0;
+      if (xPx <= leftPad - 2) return 0;
+      // Sample monotonic knot table of stepToX(0..maxCursorStep)
+      const knots: { s: number; x: number }[] = [{ s: 0, x: leftPad - 6 }];
+      for (let s = 1; s <= maxCursorStep; s++) {
+        const prevX = knots[knots.length - 1].x;
+        const sx = Math.max(prevX + 4, stepToX(s));
+        knots.push({ s, x: sx });
+      }
+      if (xPx >= knots[knots.length - 1].x) return maxCursorStep;
+      for (let i = 0; i < knots.length - 1; i++) {
+        const a = knots[i];
+        const b = knots[i + 1];
+        if (xPx >= a.x && xPx <= b.x) {
+          const t = (xPx - a.x) / Math.max(1, b.x - a.x);
+          const raw = a.s + t * (b.s - a.s);
+          if (snapNearInteger && Math.abs(raw - Math.round(raw)) < 0.08) {
+            return Math.round(raw);
+          }
+          return Number(raw.toFixed(3));
+        }
+      }
+      return maxCursorStep;
+    },
+    [maxCursorStep, leftPad, stepToX]
+  );
+
   const { cursorX, activeExecCol } = useMemo(() => {
     if (timeCursorStep === undefined || maxCursorStep === undefined) {
       return { cursorX: null, activeExecCol: null };
@@ -347,32 +434,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     const k0 = Math.floor(clamped);
     const k1 = Math.min(maxCursorStep, k0 + 1);
     const frac = clamped - k0;
-
-    const colOfStep = (sIdx: number): number => {
-      if (sIdx <= 0) return -1;
-      if (sIdx >= maxCursorStep && ops.some((o) => o.kind === 'measure')) {
-        return Math.max(...ops.filter((o) => o.kind === 'measure').map((o) => o.step));
-      }
-      const layerIdx = Math.min(Math.max(0, sIdx - 1), orderedLayerSteps.length - 1);
-      return orderedLayerSteps[layerIdx] ?? numCols - 1;
-    };
-
-    let cx: number;
-    if (clamped <= 0) {
-      cx = LEFT_PAD - 6;
-    } else if (frac > 1e-3 && k1 > k0) {
-      // Sweep symmetrically across the active executing gate column (from 15% to 85%, passing center at frac=0.5)
-      const activeCol = colOfStep(k1);
-      const colStart = LEFT_PAD + activeCol * COL_W + COL_W * 0.15;
-      const colEnd = LEFT_PAD + activeCol * COL_W + COL_W * 0.85;
-      cx = colStart + frac * (colEnd - colStart);
-    } else {
-      const doneCol = colOfStep(k0);
-      cx =
-        k0 >= maxCursorStep && ops.some((o) => o.kind === 'measure')
-          ? LEFT_PAD + doneCol * COL_W + COL_W * 0.55
-          : LEFT_PAD + doneCol * COL_W + COL_W * 0.85;
-    }
+    const cx = stepToX(clamped);
 
     let actCol: number | null = null;
     if (clamped > 0.02) {
@@ -385,10 +447,101 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
       }
     }
     return { cursorX: cx, activeExecCol: actCol };
-  }, [timeCursorStep, maxCursorStep, orderedLayerSteps, ops, numCols]);
+  }, [timeCursorStep, maxCursorStep, orderedLayerSteps, ops, stepToX]);
 
-  const canvasW = LEFT_PAD + numCols * COL_W + 52;
+  const canvasW = leftPad + numCols * colW + 52;
   const canvasH = Math.max(1, project.qubits.length) * rowH + (compact ? 22 : 38);
+
+  const isSelectMode = !readOnly && !activeToolGate && !pendingFirstQubit;
+
+  // Interactive Simulate Canvas Scrubbing handler
+  const startSimulateCanvasScrub = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!readOnly || !onTimeCursorChange || !gridRef.current || e.button !== 0) return;
+    e.preventDefault();
+    setIsScrubbingCanvas(true);
+    const updateFromEvent = (clientX: number, shiftKey: boolean) => {
+      if (!gridRef.current || !onTimeCursorChange) return;
+      const rect = gridRef.current.getBoundingClientRect();
+      const xPx = clientX - rect.left;
+      onTimeCursorChange(xPxToStep(xPx, !shiftKey));
+    };
+    updateFromEvent(e.clientX, e.shiftKey);
+
+    const onMove = (ev: PointerEvent) => updateFromEvent(ev.clientX, ev.shiftKey);
+    const onUp = () => {
+      setIsScrubbingCanvas(false);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  // Interactive Custom Stepped Timeline Scrubber Track handler
+  const startTrackScrub = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onTimeCursorChange || maxCursorStep === undefined || !trackRef.current || e.button !== 0) return;
+    e.preventDefault();
+    const updateTrack = (clientX: number, shiftKey: boolean) => {
+      if (!trackRef.current || !onTimeCursorChange || maxCursorStep === undefined) return;
+      const rect = trackRef.current.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+      const raw = ratio * maxCursorStep;
+      const snapped = !shiftKey && Math.abs(raw - Math.round(raw)) < 0.06 ? Math.round(raw) : Number(raw.toFixed(3));
+      onTimeCursorChange(snapped);
+    };
+    updateTrack(e.clientX, e.shiftKey);
+    const onMove = (ev: PointerEvent) => updateTrack(ev.clientX, ev.shiftKey);
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  // Design Mode Marquee Box Selection handler
+  const startMarqueeDrag = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isSelectMode || e.button !== 0 || !gridRef.current) return;
+    // Only start marquee if clicking directly on the empty wire/grid stage (not on a gate or sticky label)
+    if ((e.target as HTMLElement).closest('.studio-gate-node, button')) return;
+    const rect = gridRef.current.getBoundingClientRect();
+    const x0 = e.clientX - rect.left;
+    const y0 = e.clientY - rect.top;
+    if (x0 < leftPad) return;
+
+    const onMove = (ev: MouseEvent) => {
+      if (!gridRef.current) return;
+      const r = gridRef.current.getBoundingClientRect();
+      const x1 = ev.clientX - r.left;
+      const y1 = ev.clientY - r.top;
+      if (Math.hypot(x1 - x0, y1 - y0) > 5) {
+        suppressNextClickRef.current = true;
+        setMarquee({ x0, y0, x1, y1 });
+        const minX = Math.min(x0, x1);
+        const maxX = Math.max(x0, x1);
+        const minY = Math.min(y0, y1);
+        const maxY = Math.max(y0, y1);
+        const hitIds = ops
+          .filter((op) => {
+            const vq = op.qubits.filter((q) => q >= 0 && q < project.qubits.length);
+            if (vq.length === 0) return false;
+            const gx = leftPad + op.step * colW + colW / 2;
+            const gyTop = Math.min(...vq) * rowH + rowH / 2;
+            const gyBot = Math.max(...vq) * rowH + rowH / 2;
+            return gx >= minX && gx <= maxX && gyBot >= minY && gyTop <= maxY;
+          })
+          .map((o) => o.id);
+        setMultiSelectedIds(hitIds);
+      }
+    };
+    const onUp = () => {
+      setMarquee(null);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const renderPaletteButton = (gName: string) => {
     const info = builtinMap.get(gName);
@@ -409,10 +562,14 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         draggable
         onDragStart={(e) => {
           e.dataTransfer.setData('application/quantum-gate', gName);
+          setPendingFirstQubit(null);
           onPickGateTool(gName);
         }}
-        onClick={() => onPickGateTool(active ? null : gName)}
-        title={`${info?.description || gName}（拖放到原理图格点，或点击选中后放置）`}
+        onClick={() => {
+          setPendingFirstQubit(null);
+          onPickGateTool(active ? null : gName);
+        }}
+        title={`${info?.description || gName}（点击吸附至光标放置，右键或按 V 键退回指针选择）`}
         className={`h-[26px] min-w-[30px] px-2 rounded-[3px] border text-[11px] font-bold font-mono-num transition-colors cursor-grab active:cursor-grabbing ${tintCls} ${
           active
             ? 'ring-2 ring-[var(--accent)] border-[var(--accent)]'
@@ -424,24 +581,58 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     );
   };
 
+  const trackPct =
+    timeCursorStep !== undefined && maxCursorStep && maxCursorStep > 0
+      ? Math.max(0, Math.min(100, (timeCursorStep / maxCursorStep) * 100))
+      : 0;
+
   return (
-    <div className="relative flex-1 flex flex-col dot-grid-canvas overflow-hidden">
+    <div
+      className="relative flex-1 flex flex-col dot-grid-canvas overflow-hidden"
+      onContextMenu={(e) => {
+        if (readOnly) return;
+        if (pendingFirstQubit || activeToolGate) {
+          e.preventDefault();
+          setPendingFirstQubit(null);
+          onPickGateTool(null);
+        }
+      }}
+    >
       {/* Docked Industrial EDA Schematic Component Toolbar */}
       {!readOnly && (
         <div className="min-h-[38px] px-3 py-1 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 z-10 shrink-0">
           <div className="flex items-center gap-1.5 flex-wrap">
+            {/* Explicit Select / Pointer Mode Tool (V / Esc) */}
+            <button
+              type="button"
+              onClick={() => {
+                setPendingFirstQubit(null);
+                onPickGateTool(null);
+              }}
+              title="指针选择与矩形框选工具 (快捷键 V / Esc，或画布右键切换)"
+              className={`h-[26px] px-2 rounded-[3px] border text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors ${
+                isSelectMode
+                  ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
+                  : 'bg-[var(--bg-subtle)] border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)]'
+              }`}
+            >
+              <MousePointer className="w-3 h-3" />
+              <span>选择</span>
+            </button>
+
+            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-0.5" />
             <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
               1Q
             </span>
             {PALETTE_1Q.map(renderPaletteButton)}
-            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
+            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-0.5" />
             <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
               2Q
             </span>
             {PALETTE_2Q.map(renderPaletteButton)}
             {project.custom_gates.length > 0 && (
               <>
-                <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
+                <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-0.5" />
                 {project.custom_gates.slice(0, 2).map((cg) => {
                   const active = activeToolGate === cg.name;
                   return (
@@ -450,9 +641,13 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                       draggable
                       onDragStart={(e) => {
                         e.dataTransfer.setData('application/quantum-gate', cg.name);
+                        setPendingFirstQubit(null);
                         onPickGateTool(cg.name);
                       }}
-                      onClick={() => onPickGateTool(active ? null : cg.name)}
+                      onClick={() => {
+                        setPendingFirstQubit(null);
+                        onPickGateTool(active ? null : cg.name);
+                      }}
                       title={`自定义门: ${cg.display_label || cg.name}`}
                       className={`h-[26px] px-2 rounded-[3px] border bg-[#f5f3ff] dark:bg-[#251d3a] border-violet-400 dark:border-violet-400/70 text-violet-900 dark:text-violet-200 text-[11px] font-bold font-mono-num transition-colors cursor-grab ${
                         active ? 'ring-2 ring-[var(--accent)]' : 'hover:border-[var(--accent)]'
@@ -464,7 +659,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                 })}
               </>
             )}
-            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-1" />
+            <div className="w-[1px] h-4 bg-[var(--border-hairline)] mx-0.5" />
             <span className="text-[9.5px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-tertiary)] mr-0.5">
               UTIL
             </span>
@@ -472,18 +667,73 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {multiSelectedIds.length >= 2 && onPackageMacro && (
-              <button
-                onClick={() => {
-                  onPackageMacro(multiSelectedIds);
-                  setMultiSelectedIds([]);
-                }}
-                className="h-[26px] px-2.5 rounded-[3px] bg-[var(--accent)] text-white text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                <Layers className="w-3 h-3" />
-                封装宏门 ({multiSelectedIds.length})
-              </button>
+            {multiSelectedIds.length >= 2 && (
+              <>
+                {onDeleteMultipleOps && (
+                  <button
+                    onClick={() => {
+                      onDeleteMultipleOps(multiSelectedIds);
+                      setMultiSelectedIds([]);
+                    }}
+                    className="h-[26px] px-2 rounded-[3px] bg-red-600/15 hover:bg-red-600/25 border border-red-500/40 text-red-500 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    删除 ({multiSelectedIds.length})
+                  </button>
+                )}
+                {onPackageMacro && (
+                  <button
+                    onClick={() => {
+                      onPackageMacro(multiSelectedIds);
+                      setMultiSelectedIds([]);
+                    }}
+                    className="h-[26px] px-2.5 rounded-[3px] bg-[var(--accent)] text-white text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Layers className="w-3 h-3" />
+                    封装宏门 ({multiSelectedIds.length})
+                  </button>
+                )}
+              </>
             )}
+
+            {/* Schematic Zoom Controls (60% ~ 150%) */}
+            <div className="hidden md:flex items-center h-[26px] rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[10.5px] font-mono-num">
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.max(0.6, Number((z - 0.1).toFixed(2))))}
+                title="缩小原理图 (Ctrl + 滚轮向下)"
+                className="px-1.5 h-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                <ZoomOut className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom(1)}
+                title="点击重置为 100% 原始比例"
+                className="px-1.5 h-full border-x border-[var(--border-hairline)] text-[var(--text-primary)] hover:text-[var(--accent)] cursor-pointer min-w-[42px]"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.min(1.5, Number((z + 0.1).toFixed(2))))}
+                title="放大原理图 (Ctrl + 滚轮向上)"
+                className="px-1.5 h-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                <ZoomIn className="w-3 h-3" />
+              </button>
+              {zoom !== 1 && (
+                <button
+                  type="button"
+                  onClick={() => setZoom(1)}
+                  title="复位缩放"
+                  className="px-1 h-full border-l border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--accent)] cursor-pointer"
+                >
+                  <RotateCcw className="w-2.5 h-2.5" />
+                </button>
+              )}
+            </div>
+
             {onOpenNlModal && (
               <button
                 onClick={onOpenNlModal}
@@ -510,8 +760,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
       {pendingFirstQubit && (
         <div className="px-3 py-1 bg-[var(--accent)] text-white text-[11.5px] font-mono-num font-medium flex items-center justify-between gap-2 z-20 shrink-0">
           <span>
-            [放置多比特门 {pendingFirstQubit.gateName}] 已锚定:{' '}
-            {pendingFirstQubit.qubits.map((q) => project.qubits[q]?.name || `q${q}`).join(', ')} → 请点击目标比特连线
+            [正在连线 {pendingFirstQubit.gateName}] 已锚定控制端:{' '}
+            {pendingFirstQubit.qubits.map((q) => project.qubits[q]?.name || `q${q}`).join(', ')} → 移动光标预览橡皮筋连线并点击目标比特（右键或 ESC 取消）
           </span>
           <button
             onClick={() => setPendingFirstQubit(null)}
@@ -522,16 +772,16 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         </div>
       )}
 
-      {/* Simulate Mode Timeline Scrubber Bar */}
+      {/* Simulate Mode Oscilloscope Precision Stepped Scrubber Bar */}
       {readOnly && timeCursorStep !== undefined && maxCursorStep !== undefined && onTimeCursorChange && (
-        <div className="py-1 px-3 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] flex items-center justify-center z-10 shrink-0">
-          <div className="w-full max-w-3xl flex items-center gap-2.5">
-            <div className="flex items-center gap-1 shrink-0">
+        <div className="py-1 px-3 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] flex items-center justify-center z-10 shrink-0 select-none">
+          <div className="w-full max-w-4xl flex items-center gap-2.5">
+            <div className="flex items-center gap-0.5 shrink-0">
               <button
                 type="button"
-                onClick={() => (onStepJump || onTimeCursorChange)(Math.max(0, Math.ceil(timeCursorStep) - 1))}
-                title="跳至上一步"
-                className="w-6 h-6 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center cursor-pointer transition-colors"
+                onClick={() => (onStepJump || onTimeCursorChange)(Math.max(0, Math.ceil(timeCursorStep - 0.02) - 1))}
+                title="上一步门边界 (← 方向键)"
+                className="w-6 h-6 rounded-[3px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center cursor-pointer transition-colors"
               >
                 <SkipBack className="w-3.5 h-3.5" />
               </button>
@@ -540,7 +790,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                   type="button"
                   onClick={onTogglePlayTimeline}
                   title={isPlayingTimeline ? '暂停连续演化 (Space)' : '播放 60fps 连续脉冲演化 (Space)'}
-                  className="w-7 h-6 rounded-md bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/20 flex items-center justify-center cursor-pointer transition-colors"
+                  className="w-7 h-6 rounded-[3px] bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/20 flex items-center justify-center cursor-pointer transition-colors"
                 >
                   {isPlayingTimeline ? (
                     <Pause className="w-3.5 h-3.5" />
@@ -551,27 +801,56 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
               )}
               <button
                 type="button"
-                onClick={() => (onStepJump || onTimeCursorChange)(Math.min(maxCursorStep, Math.floor(timeCursorStep) + 1))}
-                title="跳至下一步"
-                className="w-6 h-6 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center cursor-pointer transition-colors"
+                onClick={() => (onStepJump || onTimeCursorChange)(Math.min(maxCursorStep, Math.floor(timeCursorStep + 0.02) + 1))}
+                title="下一步门边界 (→ 方向键)"
+                className="w-6 h-6 rounded-[3px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center cursor-pointer transition-colors"
               >
                 <SkipForward className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            <input
-              type="range"
-              min={0}
-              max={Math.max(0, maxCursorStep)}
-              step={0.01}
-              value={timeCursorStep}
-              onChange={(e) => onTimeCursorChange(Number(e.target.value))}
-              className="mac-slider flex-1"
-            />
+            {/* Custom Stepped Oscilloscope Scrubber Track with Gate Tick Marks */}
+            <div
+              ref={trackRef}
+              onPointerDown={startTrackScrub}
+              title="点击或拖拽游标探针（按住 Shift 可无吸附微调脉冲内时刻，也可直接拖动下方原理图或波形图游标）"
+              className="relative flex-1 h-6 flex items-center cursor-ew-resize group"
+            >
+              {/* Rail Base */}
+              <div className="w-full h-[5px] rounded-[1px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] relative overflow-hidden">
+                <div
+                  className="absolute inset-y-0 left-0 bg-[var(--accent)]"
+                  style={{ width: `${trackPct}%` }}
+                />
+              </div>
+
+              {/* Discrete Step Tick Marks (up to 40 steps) */}
+              {maxCursorStep > 0 &&
+                maxCursorStep <= 40 &&
+                Array.from({ length: maxCursorStep + 1 }).map((_, sIdx) => {
+                  const leftPct = (sIdx / maxCursorStep) * 100;
+                  const passed = sIdx <= timeCursorStep + 0.02;
+                  return (
+                    <span
+                      key={sIdx}
+                      style={{ left: `${leftPct}%` }}
+                      className={`absolute top-1/2 -translate-y-1/2 -ml-[1px] w-[2px] h-2.5 pointer-events-none ${
+                        passed ? 'bg-[#60a5fa]' : 'bg-[var(--border-input)]'
+                      }`}
+                    />
+                  );
+                })}
+
+              {/* Rectangular Precision Probe Thumb */}
+              <div
+                style={{ left: `${trackPct}%` }}
+                className="absolute top-1/2 -translate-y-1/2 -ml-[5px] w-[10px] h-4 rounded-[2px] bg-[var(--accent)] border border-white shadow-xs pointer-events-none"
+              />
+            </div>
 
             {onPlaybackSpeedChange && (
               <div
-                className="bg-black/[0.045] dark:bg-white/[0.07] p-0.5 rounded-lg inline-flex text-[10px] font-mono-num shrink-0"
+                className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] inline-flex text-[10px] font-mono-num shrink-0"
                 title="演化播放倍速"
               >
                 {([0.5, 1, 2] as const).map((sp) => (
@@ -579,9 +858,9 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                     key={sp}
                     type="button"
                     onClick={() => onPlaybackSpeedChange(sp)}
-                    className={`px-1.5 py-0.5 rounded-md cursor-pointer transition-colors ${
+                    className={`px-1.5 py-0.5 rounded-[2px] cursor-pointer transition-colors ${
                       playbackSpeed === sp
-                        ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold shadow-2xs'
+                        ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold'
                         : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                     }`}
                   >
@@ -591,8 +870,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
               </div>
             )}
 
-            <span className="px-2 py-0.5 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-mono-num text-[var(--text-primary)] font-medium shrink-0 min-w-[78px] text-center">
-              Step {Math.round(timeCursorStep)} / {maxCursorStep}
+            <span className="px-2 py-0.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-mono-num text-[var(--text-primary)] font-medium shrink-0 min-w-[92px] text-center">
+              Step {Number.isInteger(Math.round(timeCursorStep * 10) / 10) ? Math.round(timeCursorStep) : timeCursorStep.toFixed(1)} / {maxCursorStep}
             </span>
           </div>
         </div>
@@ -607,7 +886,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
           <button
             onClick={handleExportSvg}
             title="导出此线路矢量图 (SVG)"
-            className="px-2 py-0.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[#0A84FF] hover:text-[#0A84FF] text-[10.5px] text-[var(--text-secondary)] font-medium flex items-center gap-1 shrink-0 cursor-pointer"
+            className="px-2 py-0.5 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[10.5px] text-[var(--text-secondary)] font-medium flex items-center gap-1 shrink-0 cursor-pointer"
           >
             <Download className="w-3 h-3" />
             SVG
@@ -615,15 +894,21 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         </div>
       )}
 
-      {/* Scrollable Circuit Grid Area (with 2D Viewport Windowing for 50Q~500Q!) */}
+      {/* Scrollable Circuit Grid Area (with 2D Viewport Windowing + Ctrl+Wheel Zoom) */}
       <div
         ref={scrollWrapRef}
+        onWheel={(e) => {
+          if (compact || !(e.ctrlKey || e.metaKey)) return;
+          e.preventDefault();
+          const delta = e.deltaY < 0 ? 0.1 : -0.1;
+          setZoom((z) => Math.max(0.6, Math.min(1.5, Number((z + delta).toFixed(2)))));
+        }}
         onScroll={(e) => {
           if (project.qubits.length <= 48 && numCols <= 40) return;
           const el = e.currentTarget;
           if (
             Math.abs(el.scrollTop - vpScroll.top) > rowH * 2 ||
-            Math.abs(el.scrollLeft - vpScroll.left) > COL_W * 2 ||
+            Math.abs(el.scrollLeft - vpScroll.left) > colW * 2 ||
             Math.abs(el.clientHeight - vpScroll.height) > 40
           ) {
             setVpScroll({
@@ -639,23 +924,32 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         <div className="relative mx-auto" style={{ width: canvasW, minHeight: canvasH }}>
           {/* Step Ruler Header */}
           {!compact && (
-            <div className="flex items-center h-7 text-[11px] font-mono-num text-[var(--text-secondary)]">
+            <div className="flex items-center h-7 text-[11px] font-mono-num text-[var(--text-secondary)] select-none">
               <div
-                style={{ width: LEFT_PAD }}
+                style={{ width: leftPad }}
                 className="sticky left-0 z-30 pl-2 h-full flex items-center font-sans font-medium bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]/60"
               >
                 Step
               </div>
-              {Array.from({ length: numCols }).map((_, c) => (
-                <div key={c} style={{ width: COL_W }} className="text-center shrink-0">
-                  {c + 1}
-                </div>
-              ))}
+              {Array.from({ length: numCols }).map((_, c) => {
+                const isHoverCol = !readOnly && (activeToolGate || pendingFirstQubit) && hoverCell?.c === c;
+                return (
+                  <div
+                    key={c}
+                    style={{ width: colW }}
+                    className={`text-center shrink-0 transition-colors ${
+                      isHoverCol ? 'text-[var(--accent)] font-bold' : ''
+                    }`}
+                  >
+                    {c + 1}
+                  </div>
+                );
+              })}
               {!readOnly && (
                 <button
                   onClick={() => setExtraCols((v) => v + 1)}
                   title="增加时间列"
-                  className="w-6 h-6 rounded-md border border-dashed border-[var(--border-input)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[#0A84FF] hover:border-[#0A84FF] cursor-pointer shrink-0"
+                  className="w-6 h-6 rounded-[3px] border border-dashed border-[var(--border-input)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)] cursor-pointer shrink-0"
                 >
                   <Plus className="w-3 h-3" />
                 </button>
@@ -663,17 +957,25 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             </div>
           )}
 
-          {/* Qubit Wires & Zero-Empty-Cell Coordinate Hit-Testing Stage */}
+          {/* Qubit Wires & Interactive Coordinate Stage */}
           <div
             ref={gridRef}
+            onPointerDown={readOnly && onTimeCursorChange ? startSimulateCanvasScrub : undefined}
+            onMouseDown={!readOnly ? startMarqueeDrag : undefined}
             className={`relative ${
-              !readOnly && (activeToolGate || pendingFirstQubit) ? 'cursor-crosshair' : ''
+              readOnly && onTimeCursorChange
+                ? isScrubbingCanvas
+                  ? 'cursor-ew-resize select-none'
+                  : 'cursor-pointer'
+                : !readOnly && (activeToolGate || pendingFirstQubit)
+                ? 'cursor-crosshair'
+                : 'cursor-default'
             }`}
             style={{ height: project.qubits.length * rowH }}
             onMouseMove={(e) => {
-              if (readOnly || (!activeToolGate && !pendingFirstQubit) || !gridRef.current) return;
+              if (readOnly || !gridRef.current) return;
               const rect = gridRef.current.getBoundingClientRect();
-              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const c = Math.floor((e.clientX - rect.left - leftPad) / colW);
               const q = Math.floor((e.clientY - rect.top) / rowH);
               if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
                 if (hoverCell?.q !== q || hoverCell?.c !== c) setHoverCell({ q, c });
@@ -686,8 +988,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             }}
             onClick={(e) => {
               if (readOnly || !gridRef.current) return;
+              if (suppressNextClickRef.current) {
+                suppressNextClickRef.current = false;
+                return;
+              }
               const rect = gridRef.current.getBoundingClientRect();
-              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const c = Math.floor((e.clientX - rect.left - leftPad) / colW);
               const q = Math.floor((e.clientY - rect.top) / rowH);
               if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
                 handleCellClick(q, c);
@@ -696,7 +1002,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             onDragOver={(e) => {
               if (readOnly || !gridRef.current) return;
               const rect = gridRef.current.getBoundingClientRect();
-              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const c = Math.floor((e.clientX - rect.left - leftPad) / colW);
               const q = Math.floor((e.clientY - rect.top) / rowH);
               if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
                 e.preventDefault();
@@ -711,7 +1017,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
             onDrop={(e) => {
               if (readOnly || !gridRef.current) return;
               const rect = gridRef.current.getBoundingClientRect();
-              const c = Math.floor((e.clientX - rect.left - LEFT_PAD) / COL_W);
+              const c = Math.floor((e.clientX - rect.left - leftPad) / colW);
               const q = Math.floor((e.clientY - rect.top) / rowH);
               if (c >= 0 && c < numCols && q >= 0 && q < project.qubits.length) {
                 handleDropOnCell(e, q, c);
@@ -720,45 +1026,163 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
               }
             }}
           >
-            {/* Blue Vertical Time Cursor in Simulate Mode (60fps GPU translate3d) */}
+            {/* Interactive Oscilloscope Probe Playhead in Simulate Mode */}
             {cursorX !== null && (
               <div
-                className="absolute top-0 bottom-0 left-0 w-[2px] -ml-[1px] bg-[#0A84FF] shadow-[0_0_10px_rgba(10,132,255,0.6)] pointer-events-none z-30 will-change-transform"
+                className="absolute -top-2 bottom-0 left-0 w-[14px] -ml-[7px] z-30 will-change-transform cursor-ew-resize group"
                 style={{ transform: `translate3d(${cursorX}px, 0, 0)` }}
+                title="按住左右拖动演化探针游标（支持按住 Shift 精细观察脉冲内演化）"
               >
-                <div className="w-2.5 h-2.5 rounded-full bg-[#0A84FF] ring-2 ring-white dark:ring-[#222226] -ml-[4px] -mt-1 shadow-sm" />
+                {/* Core 2px Glowing Probe Line */}
+                <div className="mx-auto w-[2px] h-full bg-[#2F81F7] shadow-[0_0_10px_rgba(47,129,247,0.75)]" />
+                {/* Top Oscilloscope Probe Triangle ▼ */}
+                <svg
+                  width="12"
+                  height="9"
+                  viewBox="0 0 12 9"
+                  className="absolute left-[1px] top-0 text-[#2F81F7] drop-shadow-xs"
+                >
+                  <polygon points="0,0 12,0 6,9" fill="currentColor" />
+                </svg>
+                {cursorReadoutLabel && (
+                  <div className="absolute -top-1 left-4 px-1.5 py-0 rounded-[2px] bg-[#0f141b]/95 border border-[#2F81F7]/75 text-[#60a5fa] text-[9.5px] font-mono-num font-semibold whitespace-nowrap pointer-events-none shadow-xs">
+                    {cursorReadoutLabel}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Single Lightweight Hover / Drag-Drop Preview Highlight */}
+            {/* Subtle CAD Crosshair Alignment Guides + 1:1 Ghost Gate Preview */}
             {!readOnly && (dragHoverCell || ((activeToolGate || pendingFirstQubit) && hoverCell)) && (() => {
               const target = dragHoverCell || hoverCell!;
-              const isDrag = Boolean(dragHoverCell);
+              const previewStep = pendingFirstQubit ? pendingFirstQubit.step : target.c;
+              const xCenter = leftPad + previewStep * colW + colW / 2;
+              const yCenter = target.q * rowH + rowH / 2;
+
+              // Case A: Multi-Qubit Rubber-Band Connector Preview when anchor qubit(s) already chosen!
+              if (pendingFirstQubit && !dragHoverCell) {
+                const previewQs = pendingFirstQubit.qubits.includes(target.q)
+                  ? pendingFirstQubit.qubits
+                  : [...pendingFirstQubit.qubits, target.q];
+                const minQ = Math.min(...previewQs);
+                const maxQ = Math.max(...previewQs);
+                const topY = minQ * rowH + rowH / 2;
+                const botY = maxQ * rowH + rowH / 2;
+                const uname = pendingFirstQubit.gateName.toUpperCase();
+                const isTargetXor =
+                  uname === 'CNOT' || uname === 'CX' || uname === 'CCX' || uname === 'TOFFOLI';
+                const topoWarn = isPairTopologyViolated(previewQs);
+
+                return (
+                  <div className="pointer-events-none z-20">
+                    {/* Vertical Rubber-Band Stem */}
+                    {maxQ > minQ && (
+                      <div
+                        className={`absolute w-[2px] border-l-2 border-dashed ${
+                          topoWarn ? 'border-amber-500' : 'border-[#2F81F7]'
+                        }`}
+                        style={{ left: xCenter - 1, top: topY, height: botY - topY }}
+                      />
+                    )}
+                    {/* Target Hover Preview End-Cap */}
+                    {!pendingFirstQubit.qubits.includes(target.q) && (
+                      <div
+                        style={{ left: xCenter - 13, top: yCenter - 13, width: 26, height: 26 }}
+                        className={`absolute rounded-full border-2 border-dashed flex items-center justify-center text-xs font-bold ${
+                          topoWarn
+                            ? 'border-amber-500 bg-amber-500/15 text-amber-400'
+                            : 'border-[#2F81F7] bg-[#2F81F7]/15 text-[#60a5fa]'
+                        }`}
+                      >
+                        {isTargetXor ? '+' : uname === 'SWAP' ? '×' : '●'}
+                      </div>
+                    )}
+                    {topoWarn && (
+                      <div
+                        style={{ left: xCenter + 16, top: yCenter - 10 }}
+                        className="absolute px-1.5 py-0.5 rounded-[2px] bg-amber-500 text-black text-[9.5px] font-mono-num font-bold whitespace-nowrap"
+                      >
+                        ⚠ 超拓扑半径(自动路由)
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              // Case B: Drag-over highlight OR 1:1 Ghost Gate Stamp Preview + Crosshair Guides
+              const gName = activeToolGate || 'GATE';
+              const gStyle = getGateStyleByName(gName);
+              const arity = activeToolGate ? getGateArity(activeToolGate) : 1;
+              const ghostW = Math.round(42 * effZoom);
+              const ghostH = Math.round(34 * effZoom);
+
               return (
-                <div
-                  className={`absolute rounded-lg pointer-events-none transition-transform duration-75 ${
-                    isDrag
-                      ? 'bg-[#0A84FF]/18 ring-1 ring-inset ring-[#0A84FF]/55'
-                      : 'bg-[#0A84FF]/8 ring-1 ring-inset ring-[#0A84FF]/25'
-                  }`}
-                  style={{
-                    left: LEFT_PAD + target.c * COL_W + 4,
-                    top: target.q * rowH + 3,
-                    width: COL_W - 8,
-                    height: rowH - 6,
-                  }}
-                />
+                <div className="pointer-events-none z-20">
+                  {/* Subtle Column & Row CAD Alignment Hairlines */}
+                  <div
+                    className="absolute top-0 bottom-0 w-[1px] border-l border-dashed border-[#2F81F7]/30"
+                    style={{ left: xCenter }}
+                  />
+                  <div
+                    className="absolute h-[1px] border-t border-dashed border-[#2F81F7]/30"
+                    style={{ left: leftPad, width: numCols * colW, top: yCenter }}
+                  />
+
+                  {dragHoverCell ? (
+                    <div
+                      className="absolute rounded-[3px] bg-[#2F81F7]/18 ring-1 ring-inset ring-[#2F81F7]"
+                      style={{
+                        left: leftPad + target.c * colW + 4,
+                        top: target.q * rowH + 4,
+                        width: colW - 8,
+                        height: rowH - 8,
+                      }}
+                    />
+                  ) : arity >= 2 ? (
+                    <div
+                      style={{ left: xCenter - 12, top: yCenter - 12, width: 24, height: 24 }}
+                      className="absolute rounded-full border-2 border-dashed border-[#2F81F7] bg-[#2F81F7]/20 flex items-center justify-center text-[10px] font-mono-num font-bold text-[#60a5fa]"
+                    >
+                      ●
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        left: xCenter - ghostW / 2,
+                        top: yCenter - ghostH / 2,
+                        width: ghostW,
+                        height: ghostH,
+                      }}
+                      className={`absolute rounded-[3px] border border-dashed opacity-65 flex items-center justify-center font-mono-num font-bold text-[11px] ${gStyle.bg} ${gStyle.border} ${gStyle.text}`}
+                    >
+                      {gStyle.label}
+                    </div>
+                  )}
+                </div>
               );
             })()}
+
+            {/* Marquee Box Selection Overlay */}
+            {marquee && (
+              <div
+                className="absolute border border-[#2F81F7] bg-[#2F81F7]/15 pointer-events-none z-30"
+                style={{
+                  left: Math.min(marquee.x0, marquee.x1),
+                  top: Math.min(marquee.y0, marquee.y1),
+                  width: Math.abs(marquee.x1 - marquee.x0),
+                  height: Math.abs(marquee.y1 - marquee.y0),
+                }}
+              />
+            )}
 
             {/* Pending Multi-Qubit First-Click Anchor Dots */}
             {pendingFirstQubit &&
               pendingFirstQubit.qubits.map((pq) => (
                 <span
                   key={`pend_${pq}`}
-                  className="absolute w-3.5 h-3.5 rounded-full bg-[#0A84FF] ring-4 ring-[#0A84FF]/25 pointer-events-none z-20"
+                  className="absolute w-3.5 h-3.5 rounded-full bg-[#2F81F7] ring-4 ring-[#2F81F7]/25 pointer-events-none z-20"
                   style={{
-                    left: LEFT_PAD + pendingFirstQubit.step * COL_W + COL_W / 2 - 7,
+                    left: leftPad + pendingFirstQubit.step * colW + colW / 2 - 7,
                     top: pq * rowH + rowH / 2 - 7,
                   }}
                 />
@@ -772,10 +1196,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                 ? Math.min(nQ, Math.ceil((vpScroll.top + vpScroll.height) / rowH) + 8)
                 : nQ;
               const visColStart = useVirtual
-                ? Math.max(0, Math.floor(Math.max(0, vpScroll.left - LEFT_PAD) / COL_W) - 6)
+                ? Math.max(0, Math.floor(Math.max(0, vpScroll.left - leftPad) / colW) - 6)
                 : 0;
               const visColEnd = useVirtual
-                ? Math.min(numCols, Math.ceil((Math.max(0, vpScroll.left - LEFT_PAD) + vpScroll.width) / COL_W) + 6)
+                ? Math.min(numCols, Math.ceil((Math.max(0, vpScroll.left - leftPad) + vpScroll.width) / colW) + 6)
                 : numCols;
               const visibleQubits = project.qubits.slice(visRowStart, visRowEnd);
               const visibleOps = useVirtual
@@ -794,17 +1218,17 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                     const isQSelected = selection.type === 'qubit' && selection.qubitId === q.id;
                     return (
                       <div key={q.id} className="relative flex items-center" style={{ height: rowH }}>
-                        {/* Sticky Qubit Label (Opaque Mask so scrolled gates slide cleanly underneath) */}
+                        {/* Sticky Qubit Label */}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             if (!readOnly) onSelect({ type: 'qubit', qubitId: q.id });
                           }}
-                          style={{ width: LEFT_PAD, height: rowH }}
+                          style={{ width: leftPad, height: rowH }}
                           className={`sticky left-0 z-30 pr-3 text-right flex items-center justify-end gap-1.5 bg-[var(--bg-subtle)] border-r border-[var(--border-hairline)]/60 transition-colors cursor-pointer shrink-0 ${
                             isQSelected
-                              ? 'text-[#0A84FF] font-semibold'
-                              : 'text-[var(--text-primary)] hover:text-[#0A84FF]'
+                              ? 'text-[var(--accent)] font-semibold'
+                              : 'text-[var(--text-primary)] hover:text-[var(--accent)]'
                           }`}
                         >
                           <span
@@ -823,8 +1247,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                         <div
                           className="absolute h-[1.5px] bg-[#8E8E93]/45 pointer-events-none"
                           style={{
-                            left: LEFT_PAD,
-                            width: numCols * COL_W,
+                            left: leftPad,
+                            width: numCols * colW,
                             top: rowH / 2,
                           }}
                         />
@@ -832,7 +1256,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                     );
                   })}
 
-                  {/* Rendered Operations Overlay (Draggable to reposition in Design Mode!) */}
+                  {/* Rendered Operations Overlay */}
                   {visibleOps.map((op) => {
                     const validQ = op.qubits.filter((q) => q >= 0 && q < nQ);
                     if (validQ.length === 0) return null;
@@ -847,10 +1271,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                     const simStateCls = isExecActive
                       ? 'studio-gate-active'
                       : isFutureStep
-                      ? 'opacity-60'
+                      ? 'opacity-55'
                       : '';
                     const style = getGateStyle(op);
-                    const xCenter = LEFT_PAD + op.step * COL_W + COL_W / 2;
+                    const xCenter = leftPad + op.step * colW + colW / 2;
                     const uname = op.name.toUpperCase();
                     const paramTxt = formatOpParams(op);
 
@@ -867,6 +1291,13 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                       }
                     };
 
+                    const handleOpContextMenu = (e: React.MouseEvent) => {
+                      if (readOnly) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onDeleteOp(op.id);
+                    };
+
                     const dragHandlers = readOnly
                       ? {}
                       : {
@@ -875,12 +1306,13 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                             e.stopPropagation();
                             e.dataTransfer.setData('application/quantum-move-op', op.id);
                           },
+                          onContextMenu: handleOpContextMenu,
                         };
 
                     // Measurement across multiple qubits
                     if (op.kind === 'measure') {
-                      const mH = compact ? 26 : 34;
-                      const mW = compact ? 32 : 38;
+                      const mH = Math.round((compact ? 26 : 34) * effZoom);
+                      const mW = Math.round((compact ? 32 : 38) * effZoom);
                       return (
                         <React.Fragment key={op.id}>
                           {validQ.map((qIdx) => (
@@ -894,10 +1326,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                                 width: mW,
                                 height: mH,
                               }}
-                              className={`studio-gate-node absolute rounded-lg border flex items-center justify-center cursor-pointer z-10 ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
-                                isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/60'
+                              className={`studio-gate-node absolute rounded-[3px] border flex items-center justify-center cursor-pointer z-10 ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
+                                isSelected ? 'ring-2 ring-[var(--accent)]' : 'hover:border-[var(--accent)]'
                               }`}
-                              title="测量 Measurement（可拖拽移动时间列）"
+                              title="测量 Measurement（可拖拽移动时间列，右键快速删除）"
                             >
                               <Gauge className={compact ? 'w-3.5 h-3.5 stroke-[1.7]' : 'w-4 h-4 stroke-[1.7]'} />
                             </div>
@@ -943,17 +1375,17 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                             width: 36,
                             height: botY - topY + 28,
                           }}
-                          className={`studio-gate-node group absolute cursor-grab active:cursor-grabbing z-10 rounded-lg ${simStateCls} ${
+                          className={`studio-gate-node group absolute cursor-grab active:cursor-grabbing z-10 rounded-[3px] ${simStateCls} ${
                             isSelected
-                              ? 'bg-[#0A84FF]/10 ring-2 ring-[#0A84FF]'
+                              ? 'bg-[#2F81F7]/15 ring-2 ring-[#2F81F7]'
                               : topoWarn
                               ? 'bg-amber-500/12 ring-1 ring-amber-500/80 ring-dashed'
-                              : 'hover:bg-indigo-500/8'
+                              : 'hover:bg-indigo-500/10'
                           }`}
                           title={
                             topoWarn
-                              ? `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动插入 SWAP 路由`
-                              : `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
+                              ? `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，编译时自动插入 SWAP`
+                              : `${op.name} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 拖拽移动 / 右键删除`
                           }
                         >
                           <div
@@ -1005,10 +1437,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                           )}
                           {(uname === 'CZ' || uname === 'CCZ') && (
                             <span
-                              className={`absolute left-6 text-[9.5px] font-mono-num font-bold border px-1 rounded ${
+                              className={`absolute left-6 text-[9.5px] font-mono-num font-bold border px-1 rounded-[2px] ${
                                 topoWarn
-                                  ? 'text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/90 border-amber-400'
-                                  : 'text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/80 border-indigo-200 dark:border-indigo-700'
+                                  ? 'text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-950 border-amber-400'
+                                  : 'text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-[#1c2340] border-indigo-300 dark:border-indigo-700'
                               }`}
                               style={{ top: (botY - topY) / 2 + 5 }}
                             >
@@ -1031,9 +1463,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                     if (validQ.length >= 2) {
                       const minQ = Math.min(...validQ);
                       const maxQ = Math.max(...validQ);
-                      const padHalf = compact ? 14 : 20;
+                      const padHalf = Math.round((compact ? 14 : 20) * effZoom);
                       const boxTop = minQ * rowH + rowH / 2 - padHalf;
                       const boxH = (maxQ - minQ) * rowH + padHalf * 2;
+                      const boxW = Math.round((compact ? 60 : 66) * effZoom);
                       const topoWarn = isPairTopologyViolated(validQ);
                       return (
                         <div
@@ -1041,20 +1474,20 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                           {...dragHandlers}
                           onClick={handleOpClick}
                           style={{
-                            left: xCenter - (compact ? 30 : 33),
+                            left: xCenter - boxW / 2,
                             top: boxTop,
-                            width: compact ? 60 : 66,
+                            width: boxW,
                             height: boxH,
                           }}
-                          className={`studio-gate-node absolute rounded-xl border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${
+                          className={`studio-gate-node absolute rounded-[4px] border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 ${style.bg} ${
                             topoWarn ? 'border-amber-500 border-dashed' : style.border
                           } ${style.text} ${simStateCls} ${
-                            isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
+                            isSelected ? 'ring-2 ring-[var(--accent)]' : 'hover:border-[var(--accent)]'
                           }`}
                           title={
                             topoWarn
-                              ? `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出当前硬件拓扑/阻塞半径，优化编译时将自动路由`
-                              : `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 可拖拽移动`
+                              ? `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) — ⚠ 超出硬件拓扑`
+                              : `${style.label} (${validQ.map((q) => project.qubits[q]?.name).join(', ')}) · 拖拽移动 / 右键删除`
                           }
                         >
                           {topoWarn && !compact && (
@@ -1062,11 +1495,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                               <AlertTriangle className="w-2.5 h-2.5" />
                             </span>
                           )}
-                          {/* Active qubit side port dots so skipped wires are clearly distinguishable */}
                           {validQ.map((aq) => (
                             <span
                               key={aq}
-                              className="absolute -left-[4px] w-2 h-2 rounded-full bg-purple-500 border border-white"
+                              className="absolute -left-[4px] w-2 h-2 rounded-full bg-violet-500 border border-white"
                               style={{ top: (aq - minQ) * rowH + padHalf - 4 }}
                             />
                           ))}
@@ -1079,7 +1511,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                             </span>
                           )}
                           {style.isCustom && !compact && (
-                            <span className="mt-1 px-1.5 py-0 rounded bg-white/80 dark:bg-black/25 text-[9px] font-medium">
+                            <span className="mt-1 px-1.5 py-0 rounded-[2px] bg-white/80 dark:bg-black/30 text-[9px] font-medium">
                               自定义
                             </span>
                           )}
@@ -1089,8 +1521,9 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
 
                     // Single-qubit gate or noise box
                     const qIdx = validQ[0];
-                    const boxW = paramTxt && !compact ? Math.min(78, Math.max(46, Math.round(paramTxt.length * 6.4 + 14))) : compact ? 42 : 44;
-                    const boxH = compact ? 26 : 38;
+                    const rawW = paramTxt && !compact ? Math.min(78, Math.max(46, Math.round(paramTxt.length * 6.4 + 14))) : compact ? 42 : 44;
+                    const boxW = Math.round(rawW * effZoom);
+                    const boxH = Math.round((compact ? 26 : 38) * effZoom);
                     return (
                       <div
                         key={op.id}
@@ -1102,10 +1535,10 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                           width: boxW,
                           height: boxH,
                         }}
-                        className={`studio-gate-node group absolute rounded-lg border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 shadow-2xs ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
-                          isSelected ? 'ring-2 ring-[#0A84FF] ring-offset-1' : 'hover:border-[#0A84FF]/70'
+                        className={`studio-gate-node group absolute rounded-[3px] border flex flex-col items-center justify-center px-1 cursor-grab active:cursor-grabbing z-10 ${style.bg} ${style.border} ${style.text} ${simStateCls} ${
+                          isSelected ? 'ring-2 ring-[var(--accent)]' : 'hover:border-[var(--accent)]'
                         }`}
-                        title={`${op.name}${paramTxt ? `(${paramTxt})` : ''} @ ${project.qubits[qIdx]?.name} · 可拖拽移动`}
+                        title={`${op.name}${paramTxt ? `(${paramTxt})` : ''} @ ${project.qubits[qIdx]?.name} · 拖拽移动 / 右键删除`}
                       >
                         <span className="text-[12px] font-bold font-mono-num leading-none">
                           {style.label}
@@ -1122,7 +1555,7 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                               onDeleteOp(op.id);
                             }}
                             title="删除此门"
-                            className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center shadow-xs hover:bg-red-600 cursor-pointer"
+                            className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-red-600 text-white flex items-center justify-center shadow-xs hover:bg-red-500 cursor-pointer"
                           >
                             <Trash2 className="w-2.5 h-2.5" />
                           </button>
@@ -1139,8 +1572,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
           {!readOnly && (
             <button
               onClick={onAddQubit}
-              style={{ marginLeft: LEFT_PAD, width: Math.max(360, numCols * COL_W) }}
-              className="mt-3 h-9 rounded-lg border border-dashed border-[var(--border-input)] hover:border-[#0A84FF] hover:bg-[#0A84FF]/5 text-[var(--text-secondary)] hover:text-[#0A84FF] text-[12px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              style={{ marginLeft: leftPad, width: Math.max(360, numCols * colW) }}
+              className="mt-3 h-8 rounded-[3px] border border-dashed border-[var(--border-input)] hover:border-[var(--accent)] hover:bg-[var(--accent-soft)] text-[var(--text-secondary)] hover:text-[var(--accent)] text-[12px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>添加比特</span>

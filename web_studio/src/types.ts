@@ -254,6 +254,26 @@ export interface ZneResponse {
   per_qubit_z: ZnePerQubitRow[];
 }
 
+export interface NoiseBudgetItem {
+  id: string;
+  label: string;
+  infidelity: number;
+  share_pct: number;
+  detail: string;
+}
+
+export interface NoiseBudgetResponse {
+  backend: string;
+  hardware_name: string;
+  num_qubits: number;
+  full_fidelity: number;
+  total_state_infidelity: number;
+  readout_tvd: number;
+  sum_isolated_errors: number;
+  bottleneck_summary: string;
+  contributions: NoiseBudgetItem[];
+}
+
 export interface RbInterleavedResult {
   gate_name: string;
   mean_survival: number[];
@@ -357,10 +377,32 @@ export interface GstBenchmarkResponse {
   sample_operations: CircuitOpModel[];
 }
 
+export interface XebBenchmarkResponse {
+  protocol: 'xeb';
+  hardware_name: string;
+  target_label: string;
+  entangler_name: string;
+  lengths: number[];
+  num_seeds: number;
+  shots: number;
+  fit_x: number[];
+  fit_y: number[];
+  mean_xeb: number[];
+  std_xeb: number[];
+  a_spam: number;
+  cycle_polarization: number;
+  cycle_pauli_error: number;
+  entangler_fidelity: number;
+  speckle_ideal: number[];
+  speckle_measured: number[];
+  sample_operations: CircuitOpModel[];
+}
+
 export type GateBenchmarkResponse =
   | RbBenchmarkResponse
   | AllXyBenchmarkResponse
-  | GstBenchmarkResponse;
+  | GstBenchmarkResponse
+  | XebBenchmarkResponse;
 
 export interface HardwareBenchmarkEntry {
   hardware_id: string;
