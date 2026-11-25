@@ -1,6 +1,7 @@
 import type {
   CircuitOpModel,
   CustomGateDef,
+  GateBenchmarkResponse,
   HardwareBenchmarkResponse,
   NlCircuitResponse,
   OptimizeResponse,
@@ -161,6 +162,28 @@ export async function runZneMitigation(
   signal?: AbortSignal
 ): Promise<ZneResponse> {
   return postJson('/api/zne', payload, signal);
+}
+
+export async function runGateBenchmark(
+  payload: {
+    project: ProjectModel;
+    protocol: 'rb' | 'allxy' | 'gst';
+    target_qubit: number;
+    second_qubit?: number;
+    rb_num_qubits?: 1 | 2;
+    rb_lengths?: number[];
+    rb_num_seeds?: number;
+    interleaved_gate?: string | null;
+    gst_max_length?: number;
+    shots?: number;
+    amp_error_pct?: number;
+    detuning_mhz?: number;
+    phase_skew_deg?: number;
+    seed?: number;
+  },
+  signal?: AbortSignal
+): Promise<GateBenchmarkResponse> {
+  return postJson('/api/benchmark-gates', payload, signal);
 }
 
 export async function runSweep(

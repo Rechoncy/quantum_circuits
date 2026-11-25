@@ -44,6 +44,21 @@ export interface SweepConfigState {
   backend: 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip';
 }
 
+export interface BenchmarkConfigState {
+  protocol: 'rb' | 'allxy' | 'gst';
+  target_qubit: number;
+  second_qubit: number;
+  rb_num_qubits: 1 | 2;
+  rb_lengths_str: string;
+  rb_num_seeds: number;
+  interleaved_gate: string;
+  gst_max_length: number;
+  shots: number;
+  amp_error_pct: number;
+  detuning_mhz: number;
+  phase_skew_deg: number;
+}
+
 export function buildPresetHamiltonian(
   kind: 'tfim' | 'heisenberg' | 'maxcut',
   project: ProjectModel
@@ -130,6 +145,10 @@ interface RightInspectorProps {
   onRunSweep: () => void;
   onCancelSweep?: () => void;
   onRunZne?: () => void;
+  // Gate Benchmarking controls
+  benchmarkConfig?: BenchmarkConfigState;
+  onBenchmarkConfigChange?: (patch: Partial<BenchmarkConfigState>) => void;
+  onRunGateBenchmark?: () => void;
   isBusy: boolean;
 }
 
@@ -192,6 +211,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onRunSweep,
   onCancelSweep,
   onRunZne,
+  benchmarkConfig,
+  onBenchmarkConfigChange,
+  onRunGateBenchmark,
   isBusy,
 }) => {
   const activeHw =
@@ -780,6 +802,320 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </button>
           )}
         </div>
+      </aside>
+    );
+  }
+
+  // =========================================================================
+  // 3.5 GATE BENCHMARKING & TOMOGRAPHY INSPECTOR (RB / AllXY / GST)
+  // =========================================================================
+  if (mode === 'benchmark' && benchmarkConfig && onBenchmarkConfigChange && onRunGateBenchmark) {
+    const bc = benchmarkConfig;
+    const gateChoices =
+      bc.rb_num_qubits === 2
+        ? [
+            ['', '无 (仅标准 2Q RB)'],
+            ['CZ', 'CZ (受控相位门)'],
+            ['CNOT', 'CNOT (受控非门)'],
+            ['ISWAP', 'iSWAP (交换门)'],
+          ]
+        : [
+            ['', '无 (仅标准 1Q RB)'],
+            ['SX', 'SX (√X π/2 脉冲)'],
+            ['X', 'X (π 翻转脉冲)'],
+            ['Y', 'Y (π 翻转脉冲)'],
+            ['H', 'H (Hadamard 门)'],
+            ['S', 'S (Virtual-Z π/2)'],
+          ];
+
+    return (
+      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
+        <div className="text-[14px] font-semibold text-[var(--text-primary)]">
+          量子门标定与层析配置
+        </div>
+
+        {/* Protocol Switcher */}
+        <div className="space-y-2">
+          <SectionTitle>标定协议选择</SectionTitle>
+          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-3 gap-0.5">
+            {(
+              [
+                ['rb', 'RB 基准'],
+                ['allxy', 'AllXY'],
+                ['gst', 'GST 层析'],
+              ] as const
+            ).map(([pid, lbl]) => (
+              <button
+                key={pid}
+                onClick={() => onBenchmarkConfigChange({ protocol: pid })}
+                className={`py-1.5 rounded-[2px] text-[11.5px] font-medium cursor-pointer ${
+                  bc.protocol === pid
+                    ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold border border-[var(--border-hairline)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Target Qubit(s) & Sampling */}
+        <div className="pt-3 border-t border-[var(--border-hairline)] space-y-2.5">
+          <SectionTitle>标定目标与采样</SectionTitle>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                目标比特 q_a
+              </label>
+              <select
+                value={bc.target_qubit}
+                onChange={(e) => onBenchmarkConfigChange({ target_qubit: Number(e.target.value) })}
+                className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+              >
+                {project.qubits.map((q) => (
+                  <option key={q.id} value={q.id}>
+                    {q.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                测量采样 Shots
+              </label>
+              <select
+                value={bc.shots}
+                onChange={(e) => onBenchmarkConfigChange({ shots: Number(e.target.value) })}
+                className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+              >
+                <option value={0}>∞ 精确密度矩阵</option>
+                <option value={1024}>1,024</option>
+                <option value={4096}>4,096</option>
+                <option value={16384}>16,384</option>
+                <option value={65536}>65,536</option>
+              </select>
+            </div>
+          </div>
+
+          {bc.protocol === 'rb' && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    Clifford 群维度
+                  </label>
+                  <select
+                    value={bc.rb_num_qubits}
+                    disabled={project.qubits.length < 2}
+                    onChange={(e) => {
+                      const nq = Number(e.target.value) as 1 | 2;
+                      onBenchmarkConfigChange({
+                        rb_num_qubits: nq,
+                        interleaved_gate: nq === 2 ? 'CZ' : 'SX',
+                        rb_lengths_str: nq === 2 ? '1, 2, 4, 8, 16, 32' : '1, 2, 4, 8, 16, 32, 64, 128',
+                      });
+                    }}
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] font-mono-num outline-none"
+                  >
+                    <option value={1}>1Q 单比特 (C₁)</option>
+                    <option value={2}>2Q 双比特 (C₂)</option>
+                  </select>
+                </div>
+
+                {bc.rb_num_qubits === 2 ? (
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      耦合配对比特 q_b
+                    </label>
+                    <select
+                      value={bc.second_qubit}
+                      onChange={(e) =>
+                        onBenchmarkConfigChange({ second_qubit: Number(e.target.value) })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                    >
+                      {project.qubits
+                        .filter((q) => q.id !== bc.target_qubit)
+                        .map((q) => (
+                          <option key={q.id} value={q.id}>
+                            {q.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      随机种子数 K
+                    </label>
+                    <input
+                      type="number"
+                      min={4}
+                      max={50}
+                      value={bc.rb_num_seeds}
+                      onChange={(e) =>
+                        onBenchmarkConfigChange({ rb_num_seeds: Number(e.target.value) })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  交织标定门 (Interleaved RB)
+                </label>
+                <select
+                  value={bc.interleaved_gate}
+                  onChange={(e) => onBenchmarkConfigChange({ interleaved_gate: e.target.value })}
+                  className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                >
+                  {gateChoices.map(([val, lbl]) => (
+                    <option key={val} value={val}>
+                      {lbl}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                  序列深度列表 m
+                </label>
+                <input
+                  value={bc.rb_lengths_str}
+                  onChange={(e) => onBenchmarkConfigChange({ rb_lengths_str: e.target.value })}
+                  className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] font-mono-num outline-none"
+                />
+              </div>
+            </>
+          )}
+
+          {bc.protocol === 'gst' && (
+            <div>
+              <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                最大胚序列放大倍数 L_max (Germ Power)
+              </label>
+              <select
+                value={bc.gst_max_length}
+                onChange={(e) =>
+                  onBenchmarkConfigChange({ gst_max_length: Number(e.target.value) })
+                }
+                className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+              >
+                <option value={1}>L = 1 (标准线性反演 LGST)</option>
+                <option value={4}>L = 4 (长序列相干放大)</option>
+                <option value={8}>L = 8 (高精度过旋转探测)</option>
+              </select>
+            </div>
+          )}
+        </div>
+
+        {/* Coherent Calibration Error Injection Simulator */}
+        <div className="pt-3 border-t border-[var(--border-hairline)] space-y-2.5">
+          <div className="flex items-center justify-between">
+            <SectionTitle>相干校准失配注入 (脉冲故障仿真)</SectionTitle>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {(
+              [
+                ['理想校准', 0, 0, 0],
+                ['+4% 过旋转', 4.0, 0, 0],
+                ['-3.5% 欠旋转', -3.5, 0, 0],
+                ['3 MHz 失谐', 0, 3.0, 0],
+                ['+5° 相位偏斜', 0, 0, 5.0],
+              ] as const
+            ).map(([lbl, amp, det, skew]) => (
+              <button
+                key={lbl}
+                type="button"
+                onClick={() =>
+                  onBenchmarkConfigChange({
+                    amp_error_pct: amp,
+                    detuning_mhz: det,
+                    phase_skew_deg: skew,
+                  })
+                }
+                className="px-1.5 py-0.5 rounded-[2px] bg-[var(--bg-subtle)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] border border-[var(--border-hairline)] text-[10px] font-mono-num text-[var(--text-secondary)] cursor-pointer transition-colors"
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+
+          <div>
+            <div className="flex justify-between text-[11px] mb-0.5">
+              <span className="text-[var(--text-secondary)]">拉比幅度偏差 ε_amp</span>
+              <span className="font-mono-num font-semibold text-[var(--accent)]">
+                {bc.amp_error_pct >= 0 ? '+' : ''}
+                {bc.amp_error_pct.toFixed(1)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.5}
+              value={bc.amp_error_pct}
+              onChange={(e) =>
+                onBenchmarkConfigChange({ amp_error_pct: Number(e.target.value) })
+              }
+              className="mac-slider w-full"
+            />
+          </div>
+
+          <div>
+            <div className="flex justify-between text-[11px] mb-0.5">
+              <span className="text-[var(--text-secondary)]">本振频率失谐 Δ/2π</span>
+              <span className="font-mono-num font-semibold text-[var(--accent)]">
+                {bc.detuning_mhz.toFixed(1)} MHz
+              </span>
+            </div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.5}
+              value={bc.detuning_mhz}
+              onChange={(e) =>
+                onBenchmarkConfigChange({ detuning_mhz: Number(e.target.value) })
+              }
+              className="mac-slider w-full"
+            />
+          </div>
+
+          <div>
+            <div className="flex justify-between text-[11px] mb-0.5">
+              <span className="text-[var(--text-secondary)]">IQ 正交相位偏斜 δφ</span>
+              <span className="font-mono-num font-semibold text-[var(--accent)]">
+                {bc.phase_skew_deg >= 0 ? '+' : ''}
+                {bc.phase_skew_deg.toFixed(1)}°
+              </span>
+            </div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.5}
+              value={bc.phase_skew_deg}
+              onChange={(e) =>
+                onBenchmarkConfigChange({ phase_skew_deg: Number(e.target.value) })
+              }
+              className="mac-slider w-full"
+            />
+          </div>
+        </div>
+
+        <button
+          onClick={onRunGateBenchmark}
+          disabled={isBusy}
+          className="w-full py-2 rounded-[3px] studio-btn-primary text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+        >
+          <Play className="w-3.5 h-3.5 fill-current" />
+          执行 {bc.protocol.toUpperCase()} 门标定实验
+        </button>
       </aside>
     );
   }

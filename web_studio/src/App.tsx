@@ -3,6 +3,7 @@ import { CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
 import type {
   CircuitOpModel,
   CustomGateDef,
+  GateBenchmarkResponse,
   HardwareBenchmarkResponse,
   NlCircuitResponse,
   OptimizeResponse,
@@ -20,6 +21,7 @@ import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from './constants';
 import {
   fetchPresets,
   runCrossHardwareBenchmark,
+  runGateBenchmark,
   runOptimization,
   runSimulation,
   runSweep,
@@ -37,12 +39,14 @@ import { CircuitCanvas } from './components/CircuitCanvas';
 import {
   RightInspector,
   buildPresetHamiltonian,
+  type BenchmarkConfigState,
   type SweepConfigState,
 } from './components/RightInspector';
 import { BottomDock } from './components/BottomDock';
 import { SimulateResults } from './components/SimulateResults';
 import { OptimizeWorkspace, type DirectSynthPayload } from './components/OptimizeWorkspace';
 import { SweepWorkspace } from './components/SweepWorkspace';
+import { BenchmarkWorkspace } from './components/BenchmarkWorkspace';
 import { CustomGateModal } from './components/CustomGateModal';
 import { NlCircuitModal } from './components/NlCircuitModal';
 import { buildCircuitSvg, downloadTextFile } from './utils/exportCircuitSvg';
@@ -101,6 +105,21 @@ export default function App() {
   // Sweep & VQE state
   const [sweepResponse, setSweepResponse] = useState<SweepResponse | null>(null);
   const [vqeResponse, setVqeResponse] = useState<VariationalOptimizeResponse | null>(null);
+  const [gateBenchResponse, setGateBenchResponse] = useState<GateBenchmarkResponse | null>(null);
+  const [benchmarkConfig, setBenchmarkConfig] = useState<BenchmarkConfigState>({
+    protocol: 'rb',
+    target_qubit: 0,
+    second_qubit: 1,
+    rb_num_qubits: 1,
+    rb_lengths_str: '1, 2, 4, 8, 16, 32, 64, 128',
+    rb_num_seeds: 20,
+    interleaved_gate: 'SX',
+    gst_max_length: 4,
+    shots: 4096,
+    amp_error_pct: 0,
+    detuning_mhz: 0,
+    phase_skew_deg: 0,
+  });
   const [sweepConfig, setSweepConfig] = useState<SweepConfigState>({
     mode: '1d',
     param_x: 'theta',
@@ -344,6 +363,67 @@ export default function App() {
       }
     },
     [project, addLog]
+  );
+
+  // Run Quantum Gate Benchmarking (RB / Interleaved RB / AllXY / GST)
+  const handleRunGateBenchmark = useCallback(
+    async (projOverride?: ProjectModel, cfgOverride?: Partial<BenchmarkConfigState>) => {
+      const target = projOverride || project;
+      if (!target) return;
+      const cfg = { ...benchmarkConfig, ...(cfgOverride || {}) };
+      if (taskAbortRef.current) taskAbortRef.current.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
+
+      const parsedLengths = cfg.rb_lengths_str
+        .split(/[\s,;]+/)
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n) && n >= 1)
+        .map((n) => Math.round(n));
+
+      setIsBusy(true);
+      setStatusMsg(`正在执行 ${cfg.protocol.toUpperCase()} 量子门标定与误差层析...`);
+      try {
+        const res = await runGateBenchmark(
+          {
+            project: target,
+            protocol: cfg.protocol,
+            target_qubit: Math.min(cfg.target_qubit, Math.max(0, target.qubits.length - 1)),
+            second_qubit: Math.min(cfg.second_qubit, Math.max(0, target.qubits.length - 1)),
+            rb_num_qubits: target.qubits.length >= 2 ? cfg.rb_num_qubits : 1,
+            rb_lengths: parsedLengths.length >= 3 ? parsedLengths : [1, 2, 4, 8, 16, 32, 64, 128],
+            rb_num_seeds: cfg.rb_num_seeds,
+            interleaved_gate: cfg.interleaved_gate || null,
+            gst_max_length: cfg.gst_max_length,
+            shots: cfg.shots,
+            amp_error_pct: cfg.amp_error_pct,
+            detuning_mhz: cfg.detuning_mhz,
+            phase_skew_deg: cfg.phase_skew_deg,
+          },
+          controller.signal
+        );
+        setGateBenchResponse(res);
+        const summary =
+          res.protocol === 'rb'
+            ? `RB 标定完成 · F_Clifford=${(res.clifford_fidelity * 100).toFixed(3)}% · EPC=${(res.epc * 100).toFixed(3)}%`
+            : res.protocol === 'allxy'
+            ? `AllXY 脉冲诊断完成 · RMS Δ⟨Z⟩=${res.rms_error_z.toFixed(4)}`
+            : `GST 门集层析完成 · 平均保真度=${(res.mean_gate_fidelity * 100).toFixed(3)}% · 最大 ½‖Δℰ‖_⋄=${res.max_diamond_distance.toFixed(4)}`;
+        setStatusMsg(summary);
+        addLog(summary, 'info');
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+        const errTxt = err instanceof Error ? err.message : String(err);
+        setStatusMsg(`门标定失败: ${errTxt}`);
+        addLog(`门标定失败: ${errTxt}`, 'error');
+      } finally {
+        if (taskAbortRef.current === controller) {
+          taskAbortRef.current = null;
+          setIsBusy(false);
+        }
+      }
+    },
+    [project, benchmarkConfig, addLog]
   );
 
   // Run Zero-Noise Extrapolation (ZNE) quantum error mitigation
@@ -656,6 +736,7 @@ export default function App() {
         if (isBusy) return;
         if (mode === 'optimize') handleRunOptimize();
         else if (mode === 'sweep') handleRunSweep();
+        else if (mode === 'benchmark') handleRunGateBenchmark();
         else handleRunSimulation(undefined, mode === 'design');
         return;
       }
@@ -1251,6 +1332,7 @@ export default function App() {
           }
           if (m === 'optimize' && !optResponse) handleRunOptimize();
           if (m === 'sweep' && !sweepResponse) handleRunSweep();
+          if (m === 'benchmark' && !gateBenchResponse) handleRunGateBenchmark();
         }}
         onSelectPreset={(p) => {
           const clone = JSON.parse(JSON.stringify(p)) as ProjectModel;
@@ -1262,6 +1344,7 @@ export default function App() {
           setSweepResponse(null);
           setVqeResponse(null);
           setZneResponse(null);
+          setGateBenchResponse(null);
           const varKeys = Object.keys(clone.variables);
           const firstVar = varKeys[0] || 'hw:depol_2q';
           const secondVar = varKeys[1] || 'hw:depol_2q';
@@ -1296,6 +1379,7 @@ export default function App() {
         onRun={() => {
           if (mode === 'optimize') handleRunOptimize();
           else if (mode === 'sweep') handleRunSweep();
+          else if (mode === 'benchmark') handleRunGateBenchmark();
           else handleRunSimulation(undefined, mode === 'design');
         }}
         onStop={handleStopTask}
@@ -1340,6 +1424,7 @@ export default function App() {
             setMode(m);
             if (m === 'optimize' && !optResponse) handleRunOptimize();
             if (m === 'sweep' && !sweepResponse) handleRunSweep();
+            if (m === 'benchmark' && !gateBenchResponse) handleRunGateBenchmark();
           }}
           showLeft={showLeft}
           showRight={showRight}
@@ -1626,6 +1711,29 @@ export default function App() {
               isBusy={isBusy}
             />
           )}
+
+          {mode === 'benchmark' && (
+            <BenchmarkWorkspace
+              activeProtocol={benchmarkConfig.protocol}
+              onSwitchProtocol={(proto) => {
+                setBenchmarkConfig((prev) => ({ ...prev, protocol: proto }));
+                handleRunGateBenchmark(undefined, { protocol: proto });
+              }}
+              response={gateBenchResponse}
+              darkMode={darkMode}
+              onRunBenchmark={() => handleRunGateBenchmark()}
+              onLoadCircuitToDesign={(ops, label) => {
+                mutateProject((p) => ({
+                  ...p,
+                  name: label,
+                  operations: ops,
+                }));
+                setMode('design');
+                addLog(`已将标定序列 (${label}) 导入设计画布`, 'info');
+              }}
+              isBusy={isBusy}
+            />
+          )}
         </main>
 
         {/* Right Context-Sensitive Inspector */}
@@ -1733,6 +1841,11 @@ export default function App() {
             onRunSweep={() => handleRunSweep()}
             onRunZne={() => handleRunZne()}
             onCancelSweep={handleCancelSweep}
+            benchmarkConfig={benchmarkConfig}
+            onBenchmarkConfigChange={(patch) =>
+              setBenchmarkConfig((prev) => ({ ...prev, ...patch }))
+            }
+            onRunGateBenchmark={() => handleRunGateBenchmark()}
             isBusy={isBusy}
           />
         )}

@@ -8,6 +8,7 @@ import {
   Cpu,
   Download,
   FolderOpen,
+  Gauge,
   Keyboard,
   LineChart,
   Loader2,
@@ -65,6 +66,7 @@ const MODES: {
   { id: 'simulate', zh: '演化仿真', short: '仿真', code: 'SIM', icon: Activity },
   { id: 'optimize', zh: '编译综合', short: '综合', code: 'SYN', icon: Cpu },
   { id: 'sweep', zh: '扫描 / VQE', short: '扫描', code: 'SWP', icon: LineChart },
+  { id: 'benchmark', zh: '门标定基准', short: '标定', code: 'CAL', icon: Gauge },
 ];
 
 export const TopToolbar: React.FC<TopToolbarProps> = ({
@@ -386,7 +388,15 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             ) : (
               <Play className="w-3 h-3 fill-current" />
             )}
-            <span>{mode === 'optimize' ? '编译综合' : mode === 'sweep' ? '执行扫描' : '运行仿真'}</span>
+            <span>
+              {mode === 'optimize'
+                ? '编译综合'
+                : mode === 'sweep'
+                ? '执行扫描'
+                : mode === 'benchmark'
+                ? '运行标定'
+                : '运行仿真'}
+            </span>
             {isDirty && !isBusy && (
               <span
                 className="w-2 h-2 rounded-full bg-amber-300"
@@ -417,7 +427,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 <span className="text-[11.5px] font-bold text-[var(--text-primary)]">
                   EDA 工作台快捷键
                 </span>
-                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.4</span>
+                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.5</span>
               </div>
               <div className="space-y-1.5 text-[11px]">
                 {[

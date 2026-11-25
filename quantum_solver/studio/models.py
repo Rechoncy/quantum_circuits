@@ -210,6 +210,26 @@ class ZneRequest(BaseModel):
     backend: Literal["qutip", "kraus", "trajectory", "stim", "stim_qutip"] = "kraus"
 
 
+class GateBenchmarkRequest(BaseModel):
+    """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST)."""
+
+    project: ProjectModel
+    protocol: Literal["rb", "allxy", "gst"] = "rb"
+    target_qubit: int = 0
+    second_qubit: int = 1
+    rb_num_qubits: Literal[1, 2] = 1
+    rb_lengths: List[int] = Field(default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128])
+    rb_num_seeds: int = 20
+    interleaved_gate: Optional[str] = None
+    gst_max_length: int = 4
+    shots: int = 4096
+    # Optional coherent calibration error injection for realistic experimental diagnostics
+    amp_error_pct: float = 0.0
+    detuning_mhz: float = 0.0
+    phase_skew_deg: float = 0.0
+    seed: int = 42
+
+
 class NlCircuitRequest(BaseModel):
     """Natural language -> quantum circuit generation & multi-turn refinement request."""
 

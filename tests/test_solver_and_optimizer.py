@@ -1206,6 +1206,104 @@ def test_dag_consolidation_zne_mitigation_and_parameter_shift_vqe() -> None:
     assert abs(ps_res["optimal_energy"] - (-math.sqrt(2.0))) < 2e-3
 
 
+def test_gate_benchmarking_rb_irb_allxy_and_gst() -> None:
+    """
+    Verify v2.5.0 Quantum Gate Characterization & Benchmarking protocols:
+      1. 1Q & 2Q Standard + Interleaved Randomized Benchmarking (SPAM-insensitivity & IRB gate fidelity);
+      2. AllXY 21-sequence pulse diagnostic (ideal staircase vs. +5% over-rotation sawtooth detection);
+      3. Gate Set Tomography (SPAM-free PTM reconstruction, exact diamond distance sin(|dtheta|/2),
+         and Wallman unitarity coherent/incoherent separation).
+    """
+    import math
+    from quantum_solver.studio import (
+        GateBenchmarkRequest,
+        build_preset_projects,
+        execute_gate_benchmark,
+    )
+
+    presets = build_preset_projects()
+    p_base = presets[0].model_copy(deep=True)
+
+    # 1a. SPAM-insensitivity of 1Q RB: 8% readout error reduces A_spam, NOT clifford_fidelity!
+    p_spam = p_base.model_copy(deep=True)
+    p_spam.sim_settings.enable_t1_t2 = False
+    p_spam.sim_settings.enable_depol = False
+    p_spam.sim_settings.enable_readout = True
+    for hp in p_spam.hardware_profiles:
+        hp.readout_err = 0.08
+    rb_spam = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_spam,
+            protocol="rb",
+            rb_num_qubits=1,
+            rb_lengths=[1, 4, 16, 64],
+            rb_num_seeds=10,
+            interleaved_gate="SX",
+            shots=0,
+        )
+    )
+    assert rb_spam["clifford_fidelity"] > 0.9999
+    assert rb_spam["a_spam"] <= 0.421  # SPAM visibility reduced from 0.50 to 0.42 by 8% readout error
+    assert rb_spam["interleaved"] is not None
+    assert rb_spam["interleaved"]["gate_fidelity"] > 0.9999
+
+    # 1b. Noisy 2Q RB + Interleaved CZ on Rydberg array
+    rb_2q = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_base,
+            protocol="rb",
+            rb_num_qubits=2,
+            rb_lengths=[1, 2, 4, 8, 16],
+            rb_num_seeds=8,
+            interleaved_gate="CZ",
+            shots=0,
+        )
+    )
+    assert rb_2q["num_qubits"] == 2
+    assert 0.96 < rb_2q["clifford_fidelity"] < 0.999
+    assert 0.985 < rb_2q["interleaved"]["gate_fidelity"] < 0.9995
+
+    # 2. AllXY 21-sequence coherent pulse diagnostic
+    p_clean = p_base.model_copy(deep=True)
+    p_clean.sim_settings.enable_t1_t2 = False
+    p_clean.sim_settings.enable_depol = False
+    p_clean.sim_settings.enable_readout = False
+    axy_ideal = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_clean, protocol="allxy", shots=0)
+    )
+    assert len(axy_ideal["sequences"]) == 21
+    assert axy_ideal["rms_error_z"] < 1e-6
+    assert axy_ideal["severity"] == "good"
+
+    axy_over = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_clean, protocol="allxy", amp_error_pct=5.0, shots=0)
+    )
+    assert axy_over["rms_error_z"] > 0.08
+    assert 3.5 < axy_over["estimated_amp_error_pct"] < 6.5
+    assert axy_over["severity"] == "warn"
+
+    # 3. Gate Set Tomography (GST): SPAM-free PTM + exact coherent diamond distance sin(dtheta/2)
+    # Inject +4% over-rotation WITH 5% readout SPAM error -> GST still isolates pure coherent gate error!
+    gst_coh = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_spam,
+            protocol="gst",
+            amp_error_pct=4.0,
+            gst_max_length=4,
+            shots=0,
+        )
+    )
+    gx_rep = next(g for g in gst_coh["gates"] if g["gate_id"] == "Gx")
+    # For pi pulse with +4% over-rotation: dtheta = 0.04 * pi, theoretical 0.5*||Delta E||_diam = sin(0.02 * pi) = 0.06279
+    theo_diam = math.sin(0.02 * math.pi)
+    assert abs(gx_rep["diamond_distance"] - theo_diam) < 0.004
+    assert gx_rep["unitarity"] > 0.998
+    assert gx_rep["coherent_ratio"] > 0.95
+    assert gst_coh["spam_prep_fidelity"] > 0.98
+    assert gst_coh["spam_readout_fidelity"] < 0.95  # GST simultaneously catches the 8% readout SPAM!
+
+
+
 
 
 

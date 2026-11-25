@@ -1,4 +1,4 @@
-export type WorkMode = 'design' | 'simulate' | 'optimize' | 'sweep';
+export type WorkMode = 'design' | 'simulate' | 'optimize' | 'sweep' | 'benchmark';
 
 export type InitStateType = '|0>' | '|1>' | '|+>' | '|->' | '|+i>' | '|-i>' | 'custom';
 
@@ -253,6 +253,114 @@ export interface ZneResponse {
   energy_richardson_curve?: number[] | null;
   per_qubit_z: ZnePerQubitRow[];
 }
+
+export interface RbInterleavedResult {
+  gate_name: string;
+  mean_survival: number[];
+  std_survival: number[];
+  raw_survival: number[][];
+  fit_y: number[];
+  p_irb: number;
+  a_irb: number;
+  b_irb: number;
+  gate_error: number;
+  gate_fidelity: number;
+  systematic_bound: number;
+}
+
+export interface RbBenchmarkResponse {
+  protocol: 'rb';
+  hardware_name: string;
+  target_label: string;
+  num_qubits: 1 | 2;
+  dimension: number;
+  lengths: number[];
+  num_seeds: number;
+  shots: number;
+  fit_x: number[];
+  mean_survival: number[];
+  std_survival: number[];
+  raw_survival: number[][];
+  fit_y: number[];
+  a_spam: number;
+  b_offset: number;
+  depolarizing_p: number;
+  epc: number;
+  clifford_fidelity: number;
+  coherence_epc_floor: number;
+  interleaved: RbInterleavedResult | null;
+  sample_operations: CircuitOpModel[];
+}
+
+export interface AllXySequenceRow {
+  index: number;
+  label: string;
+  gate_first: string;
+  gate_second: string;
+  plateau: 'ground' | 'equator' | 'excited';
+  ideal_z: number;
+  measured_z: number;
+  std_z: number;
+  ideal_p1: number;
+  measured_p1: number;
+  residual_z: number;
+  operations: CircuitOpModel[];
+}
+
+export interface AllXyBenchmarkResponse {
+  protocol: 'allxy';
+  hardware_name: string;
+  target_label: string;
+  shots: number;
+  rms_error_z: number;
+  estimated_amp_error_pct: number;
+  phase_detuning_metric: number;
+  diagnosis: string;
+  severity: 'good' | 'warn' | 'info';
+  sequences: AllXySequenceRow[];
+}
+
+export interface GstGateReport {
+  gate_id: string;
+  gate_token: string;
+  label: string;
+  process_fidelity: number;
+  avg_gate_fidelity: number;
+  gate_infidelity: number;
+  diamond_distance: number;
+  unitarity: number;
+  incoherent_infidelity: number;
+  coherent_ratio: number;
+  ptm_ideal: number[][];
+  ptm_reconstructed: number[][];
+  ptm_error: number[][];
+}
+
+export interface GstBenchmarkResponse {
+  protocol: 'gst';
+  hardware_name: string;
+  target_label: string;
+  pauli_labels: string[];
+  shots: number;
+  max_germ_power: number;
+  germ_powers: number[];
+  germ_curves: Record<string, number[]>;
+  num_experiments: number;
+  mean_gate_fidelity: number;
+  max_diamond_distance: number;
+  mean_unitarity: number;
+  spam_prep_bloch: [number, number, number];
+  spam_prep_fidelity: number;
+  spam_readout_fidelity: number;
+  gram_matrix: number[][];
+  gates: GstGateReport[];
+  sample_operations: CircuitOpModel[];
+}
+
+export type GateBenchmarkResponse =
+  | RbBenchmarkResponse
+  | AllXyBenchmarkResponse
+  | GstBenchmarkResponse;
 
 export interface HardwareBenchmarkEntry {
   hardware_id: string;

@@ -4,6 +4,7 @@ import {
   Bot,
   CircuitBoard,
   Cpu,
+  Gauge,
   LineChart,
   Moon,
   PanelLeft,
@@ -34,6 +35,7 @@ const NAV_ITEMS: {
   { id: 'simulate', code: 'SIM', title: '量子演化仿真 (Simulate)', icon: Activity },
   { id: 'optimize', code: 'SYN', title: '硬件编译综合 (Optimize)', icon: Cpu },
   { id: 'sweep', code: 'SWP', title: '参数扫描 & VQE (Sweep)', icon: LineChart },
+  { id: 'benchmark', code: 'CAL', title: '门标定基准 RB / AllXY / GST (Benchmark)', icon: Gauge },
 ];
 
 export const ActivityBar: React.FC<ActivityBarProps> = ({

@@ -1,9 +1,11 @@
 """Quantum Studio v2 unified project data model, custom gate engine, and FastAPI backend."""
 
+from .benchmarking import execute_gate_benchmark
 from .models import (
     BenchmarkHardwareRequest,
     CircuitOpModel,
     CustomGateDef,
+    GateBenchmarkRequest,
     HardwareProfileModel,
     NlCircuitRequest,
     OptimizeRequest,
@@ -49,6 +51,8 @@ __all__ = [
     "SweepRequest",
     "VariationalOptimizeRequest",
     "ZneRequest",
+    "GateBenchmarkRequest",
+    "execute_gate_benchmark",
     "NlCircuitRequest",
     "generate_circuit_from_nl",
     "build_preset_projects",

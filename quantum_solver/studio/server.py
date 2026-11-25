@@ -22,9 +22,11 @@ from .custom_gates import (
     format_matrix_preview,
     validate_unitary_matrix,
 )
+from .benchmarking import execute_gate_benchmark
 from .models import (
     BenchmarkHardwareRequest,
     DslSyncRequest,
+    GateBenchmarkRequest,
     NlCircuitRequest,
     OptimizeRequest,
     ProjectModel,
@@ -56,7 +58,7 @@ FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.4.0")
+    app = FastAPI(title="Quantum Studio API", version="2.5.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -68,7 +70,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {"status": "ok", "version": "2.4.0"}
+        return {"status": "ok", "version": "2.5.0"}
 
     @app.get("/api/presets")
     def get_presets() -> Dict[str, Any]:
@@ -180,6 +182,13 @@ def create_app() -> FastAPI:
     def api_zne_mitigation(req: ZneRequest) -> Dict[str, Any]:
         try:
             return execute_zne_mitigation(req)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/benchmark-gates")
+    def api_benchmark_gates(req: GateBenchmarkRequest) -> Dict[str, Any]:
+        try:
+            return execute_gate_benchmark(req)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
