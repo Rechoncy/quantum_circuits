@@ -1,13 +1,25 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
+import {
+  Activity,
+  AlertCircle,
+  CheckCircle2,
+  CircuitBoard,
+  Cpu,
+  LineChart,
+  Loader2,
+} from 'lucide-react';
 import type {
+  CalibrationWritebackItem,
   CircuitOpModel,
+  CircuitSubMode,
   CustomGateDef,
+  DeviceSubTab,
   GateBenchmarkResponse,
   HardwareBenchmarkResponse,
   NlCircuitResponse,
   NoiseBudgetResponse,
   OptimizeResponse,
+  PrimaryDomain,
   ProjectModel,
   QubitSpec,
   RunHistoryItem,
@@ -49,6 +61,7 @@ import { SimulateResults } from './components/SimulateResults';
 import { OptimizeWorkspace, type DirectSynthPayload } from './components/OptimizeWorkspace';
 import { SweepWorkspace } from './components/SweepWorkspace';
 import { BenchmarkWorkspace } from './components/BenchmarkWorkspace';
+import { DeviceWorkspace } from './components/DeviceWorkspace';
 import { CustomGateModal } from './components/CustomGateModal';
 import { NlCircuitModal } from './components/NlCircuitModal';
 import { buildCircuitSvg, downloadTextFile } from './utils/exportCircuitSvg';
@@ -64,8 +77,27 @@ export default function App() {
   const [past, setPast] = useState<ProjectModel[]>([]);
   const [future, setFuture] = useState<ProjectModel[]>([]);
 
-  // Workspace UI state (Default to Industrial Dark Mode)
-  const [mode, setMode] = useState<WorkMode>('design');
+  // Three Parallel Top-Level Domains: 量子线路 | 比特门表征 | 器件与硬件
+  const [domain, setDomain] = useState<PrimaryDomain>('circuits');
+  const [circuitSubMode, setCircuitSubMode] = useState<CircuitSubMode>('design');
+  const [deviceSubTab, setDeviceSubTab] = useState<DeviceSubTab>('drive');
+  const mode: WorkMode =
+    domain === 'circuits'
+      ? circuitSubMode
+      : domain === 'characterization'
+      ? 'benchmark'
+      : 'device';
+  const setMode = useCallback((m: WorkMode) => {
+    if (m === 'benchmark') {
+      setDomain('characterization');
+    } else if (m === 'device') {
+      setDomain('device');
+    } else {
+      setDomain('circuits');
+      setCircuitSubMode(m);
+    }
+  }, []);
+
   const [darkMode, setDarkMode] = useState(true);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
@@ -105,12 +137,12 @@ export default function App() {
   const [preferredNative2Q, setPreferredNative2Q] = useState('');
   const [evalNoisyOpt, setEvalNoisyOpt] = useState(true);
 
-  // Sweep & VQE state
+  // Sweep, VQE & Characterization state
   const [sweepResponse, setSweepResponse] = useState<SweepResponse | null>(null);
   const [vqeResponse, setVqeResponse] = useState<VariationalOptimizeResponse | null>(null);
   const [gateBenchResponse, setGateBenchResponse] = useState<GateBenchmarkResponse | null>(null);
   const [benchmarkConfig, setBenchmarkConfig] = useState<BenchmarkConfigState>({
-    protocol: 'rb',
+    protocol: 'rabi',
     target_qubit: 0,
     second_qubit: 1,
     rb_num_qubits: 1,
@@ -119,6 +151,9 @@ export default function App() {
     interleaved_gate: 'SX',
     xeb_entangler: 'SQISWAP',
     gst_max_length: 4,
+    cal_points: 61,
+    cal_max_ns: null,
+    ramsey_detuning_mhz: 0.5,
     shots: 4096,
     amp_error_pct: 0,
     detuning_mhz: 0,
@@ -369,7 +404,26 @@ export default function App() {
     [project, addLog]
   );
 
-  // Run Quantum Gate Benchmarking (RB / Interleaved RB / AllXY / GST)
+  // Quick Alt+1 / Alt+2 / Alt+3 top-level domain switching
+  useEffect(() => {
+    const onDomainShortcut = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === '1') {
+        e.preventDefault();
+        setDomain('circuits');
+      } else if (e.key === '2') {
+        e.preventDefault();
+        setDomain('characterization');
+      } else if (e.key === '3') {
+        e.preventDefault();
+        setDomain('device');
+      }
+    };
+    window.addEventListener('keydown', onDomainShortcut);
+    return () => window.removeEventListener('keydown', onDomainShortcut);
+  }, []);
+
+  // Run Quantum Qubit & Gate Characterization (Rabi / Ramsey / T1 / RB / AllXY / GST / XEB)
   const handleRunGateBenchmark = useCallback(
     async (projOverride?: ProjectModel, cfgOverride?: Partial<BenchmarkConfigState>) => {
       const target = projOverride || project;
@@ -386,7 +440,7 @@ export default function App() {
         .map((n) => Math.round(n));
 
       setIsBusy(true);
-      setStatusMsg(`正在执行 ${cfg.protocol.toUpperCase()} 量子门标定与误差层析...`);
+      setStatusMsg(`正在执行 ${cfg.protocol.toUpperCase()} 量子比特与门表征实验...`);
       try {
         const res = await runGateBenchmark(
           {
@@ -400,6 +454,9 @@ export default function App() {
             interleaved_gate: cfg.interleaved_gate || null,
             xeb_entangler: cfg.xeb_entangler || 'SQISWAP',
             gst_max_length: cfg.gst_max_length,
+            cal_points: cfg.cal_points,
+            cal_max_ns: cfg.cal_max_ns,
+            ramsey_detuning_mhz: cfg.ramsey_detuning_mhz,
             shots: cfg.shots,
             amp_error_pct: cfg.amp_error_pct,
             detuning_mhz: cfg.detuning_mhz,
@@ -415,14 +472,16 @@ export default function App() {
             ? `AllXY 脉冲诊断完成 · RMS Δ⟨Z⟩=${res.rms_error_z.toFixed(4)}`
             : res.protocol === 'gst'
             ? `GST 门集层析完成 · 平均保真度=${(res.mean_gate_fidelity * 100).toFixed(3)}% · 最大 ½‖Δℰ‖_⋄=${res.max_diamond_distance.toFixed(4)}`
-            : `2Q Linear XEB 完成 · ${res.entangler_name} 保真度=${(res.entangler_fidelity * 100).toFixed(3)}% · f_cycle=${(res.cycle_polarization * 100).toFixed(3)}%`;
+            : res.protocol === 'xeb'
+            ? `2Q Linear XEB 完成 · ${res.entangler_name} 保真度=${(res.entangler_fidelity * 100).toFixed(3)}% · f_cycle=${(res.cycle_polarization * 100).toFixed(3)}%`
+            : `${res.protocol.toUpperCase()} 标定完成 · ${res.summary}`;
         setStatusMsg(summary);
         addLog(summary, 'info');
       } catch (err) {
         if ((err as Error)?.name === 'AbortError') return;
         const errTxt = err instanceof Error ? err.message : String(err);
-        setStatusMsg(`门标定失败: ${errTxt}`);
-        addLog(`门标定失败: ${errTxt}`, 'error');
+        setStatusMsg(`门表征失败: ${errTxt}`);
+        addLog(`门表征失败: ${errTxt}`, 'error');
       } finally {
         if (taskAbortRef.current === controller) {
           taskAbortRef.current = null;
@@ -1386,26 +1445,64 @@ export default function App() {
   const primaryRes = simResponse ? simResponse.results[simResponse.primary_backend] : null;
   const maxCursorStep = Math.max(0, (primaryRes?.steps.length ?? 1) - 1);
 
+  const activeHwSummary =
+    project.hardware_profiles.find((h) => h.id === project.active_hardware_id) ||
+    project.hardware_profiles[0];
+
+  const handleSwitchDomain = (nextDomain: PrimaryDomain) => {
+    setDomain(nextDomain);
+    if (nextDomain === 'characterization' && !gateBenchResponse) {
+      handleRunGateBenchmark();
+    } else if (nextDomain === 'circuits') {
+      if (circuitSubMode === 'optimize' && !optResponse) handleRunOptimize();
+      if (circuitSubMode === 'sweep' && !sweepResponse) handleRunSweep();
+    }
+  };
+
+  const handleSwitchCircuitSubMode = (sub: CircuitSubMode) => {
+    setDomain('circuits');
+    setCircuitSubMode(sub);
+    if (sub === 'simulate' && simResponse) {
+      const pRes = simResponse.results[simResponse.primary_backend];
+      if (pRes) {
+        const fStr = pRes.final_fidelity !== null ? ` · F = ${pRes.final_fidelity.toFixed(4)}` : '';
+        setStatusMsg(`求解完成 · ${pRes.backend_name} · ${project.qubits.length} qubits · ${pRes.total_duration_ns.toFixed(0)} ns${fStr}`);
+      }
+    }
+    if (sub === 'optimize' && !optResponse) handleRunOptimize();
+    if (sub === 'sweep' && !sweepResponse) handleRunSweep();
+  };
+
+  const handleApplyCalibrationWriteback = (wb: CalibrationWritebackItem) => {
+    if (wb.scope === 'qubit' && wb.qubit != null) {
+      mutateProject((p) => ({
+        ...p,
+        qubits: p.qubits.map((q) =>
+          q.id === wb.qubit ? { ...q, [wb.field]: wb.value } : q
+        ),
+      }));
+    } else {
+      mutateProject((p) => ({
+        ...p,
+        hardware_profiles: p.hardware_profiles.map((h) =>
+          h.id === p.active_hardware_id ? { ...h, [wb.field]: wb.value } : h
+        ),
+      }));
+    }
+    const msg = `已将标定结果写回器件参数: ${wb.label}`;
+    setStatusMsg(msg);
+    addLog(msg, 'info');
+  };
+
   return (
     <div className="h-full w-full flex flex-col bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden">
-      {/* Top 48px macOS Unified Toolbar */}
+      {/* Top Level-1 Parallel Domain Toolbar */}
       <TopToolbar
         project={project}
         presets={presets}
-        mode={mode}
-        onModeChange={(m) => {
-          setMode(m);
-          if (m === 'simulate' && simResponse) {
-            const pRes = simResponse.results[simResponse.primary_backend];
-            if (pRes) {
-              const fStr = pRes.final_fidelity !== null ? ` · F = ${pRes.final_fidelity.toFixed(4)}` : '';
-              setStatusMsg(`求解完成 · ${pRes.backend_name} · ${project.qubits.length} qubits · ${pRes.total_duration_ns.toFixed(0)} ns${fStr}`);
-            }
-          }
-          if (m === 'optimize' && !optResponse) handleRunOptimize();
-          if (m === 'sweep' && !sweepResponse) handleRunSweep();
-          if (m === 'benchmark' && !gateBenchResponse) handleRunGateBenchmark();
-        }}
+        domain={domain}
+        circuitSubMode={circuitSubMode}
+        onDomainChange={handleSwitchDomain}
         onSelectPreset={(p) => {
           const clone = JSON.parse(JSON.stringify(p)) as ProjectModel;
           setProject(clone);
@@ -1450,10 +1547,11 @@ export default function App() {
           mutateProject((p) => ({ ...p, sim_settings: { ...p.sim_settings, shots } }), false)
         }
         onRun={() => {
-          if (mode === 'optimize') handleRunOptimize();
-          else if (mode === 'sweep') handleRunSweep();
-          else if (mode === 'benchmark') handleRunGateBenchmark();
-          else handleRunSimulation(undefined, mode === 'design');
+          if (domain === 'characterization') handleRunGateBenchmark();
+          else if (domain === 'device') handleRunSimulation(undefined, true);
+          else if (circuitSubMode === 'optimize') handleRunOptimize();
+          else if (circuitSubMode === 'sweep') handleRunSweep();
+          else handleRunSimulation(undefined, circuitSubMode === 'design');
         }}
         onStop={handleStopTask}
         isBusy={isBusy}
@@ -1489,16 +1587,11 @@ export default function App() {
         onOpenNlModal={() => setNlModalOpen(true)}
       />
 
-      {/* Main IDE Workbench: ActivityBar + Left Explorer + Stage + Right Inspector */}
+      {/* Main IDE Workbench: 3-Domain ActivityBar + Context Sidebars + Center Stage */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         <ActivityBar
-          mode={mode}
-          onModeChange={(m) => {
-            setMode(m);
-            if (m === 'optimize' && !optResponse) handleRunOptimize();
-            if (m === 'sweep' && !sweepResponse) handleRunSweep();
-            if (m === 'benchmark' && !gateBenchResponse) handleRunGateBenchmark();
-          }}
+          domain={domain}
+          onDomainChange={handleSwitchDomain}
           showLeft={showLeft}
           showRight={showRight}
           onToggleLeft={() => setShowLeft((v) => !v)}
@@ -1507,8 +1600,9 @@ export default function App() {
           onToggleDark={() => setDarkMode((d) => !d)}
           onOpenNlModal={() => setNlModalOpen(true)}
         />
-        {/* Left Navigator Sidebar */}
-        {showLeft && (
+
+        {/* Left Circuit Explorer Sidebar (Dedicated to Quantum Circuits Domain) */}
+        {domain === 'circuits' && showLeft && (
           <LeftNavigator
             project={project}
             selection={selection}
@@ -1566,8 +1660,63 @@ export default function App() {
           />
         )}
 
-        {/* Center Main Stage (Changes Cleanly by Active Mode) */}
+        {/* Center Main Stage */}
         <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          {/* Level-2 Sub-Tab Bar for Domain 1: 量子线路 (Design | Simulate | Optimize | Sweep) */}
+          {domain === 'circuits' && (
+            <div className="h-9 px-3.5 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-3 shrink-0 select-none">
+              <div className="flex items-center gap-4 h-full overflow-x-auto min-w-0">
+                {(
+                  [
+                    { id: 'design', label: '原理图设计', code: 'SCH', icon: CircuitBoard },
+                    { id: 'simulate', label: '演化仿真', code: 'SIM', icon: Activity },
+                    { id: 'optimize', label: '编译综合', code: 'SYN', icon: Cpu },
+                    { id: 'sweep', label: '参数扫描 & VQE', code: 'SWP', icon: LineChart },
+                  ] as const
+                ).map((t) => {
+                  const Icon = t.icon;
+                  const active = circuitSubMode === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => handleSwitchCircuitSubMode(t.id)}
+                      className={`h-full text-[12px] border-b-2 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        active
+                          ? 'border-[var(--accent)] text-[var(--text-primary)] font-semibold'
+                          : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      <Icon className={`w-3.5 h-3.5 ${active ? 'text-[var(--accent)]' : 'opacity-70'}`} />
+                      <span>{t.label}</span>
+                      <span className="text-[9.5px] font-mono-num text-[var(--text-tertiary)]">
+                        {t.code}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quick Hardware Drive Telemetry Link */}
+              <button
+                type="button"
+                onClick={() => {
+                  setDomain('device');
+                  setDeviceSubTab('drive');
+                }}
+                title="点击进入「器件与硬件」调整单比特拉比频率 Ω_R 与脉冲上升/下降沿"
+                className="hidden lg:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] bg-[var(--bg-subtle)] hover:border-[var(--accent)] border border-[var(--border-hairline)] text-[11px] font-mono-num text-[var(--text-secondary)] hover:text-[var(--accent)] transition-colors cursor-pointer shrink-0"
+              >
+                <Cpu className="w-3 h-3 text-[var(--accent)]" />
+                <span>{activeHwSummary?.name}</span>
+                <span>·</span>
+                <span>Ω_R={activeHwSummary?.rabi_mhz ?? 2.5} MHz</span>
+                <span>
+                  ({(activeHwSummary?.drive_mode || 'fixed_duration') === 'fixed_rabi' ? '固定Ω_R' : `t_1q=${activeHwSummary?.t_1q_ns}ns`})
+                </span>
+              </button>
+            </div>
+          )}
+
           {mode === 'design' && (
             <>
               <CircuitCanvas
@@ -1666,7 +1815,6 @@ export default function App() {
                       onPlaybackSpeedChange={setPlaybackSpeed}
                     />
                   </div>
-                  {/* Draggable macOS Splitter Handle between Circuit & Plots */}
                   <div
                     title="上下拖拽调整线路与绘图区域比例（双击重置）"
                     onDoubleClick={() => setSimCircuitHeight(206)}
@@ -1808,7 +1956,7 @@ export default function App() {
             />
           )}
 
-          {mode === 'benchmark' && (
+          {domain === 'characterization' && (
             <BenchmarkWorkspace
               activeProtocol={benchmarkConfig.protocol}
               onSwitchProtocol={(proto) => {
@@ -1818,6 +1966,7 @@ export default function App() {
               response={gateBenchResponse}
               darkMode={darkMode}
               onRunBenchmark={() => handleRunGateBenchmark()}
+              onApplyWriteback={handleApplyCalibrationWriteback}
               onLoadCircuitToDesign={(ops, label) => {
                 mutateProject((p) => ({
                   ...p,
@@ -1830,10 +1979,94 @@ export default function App() {
               isBusy={isBusy}
             />
           )}
+
+          {domain === 'device' && (
+            <DeviceWorkspace
+              project={project}
+              activeTab={deviceSubTab}
+              onTabChange={setDeviceSubTab}
+              darkMode={darkMode}
+              onUpdateHardware={(hwId, patch) =>
+                mutateProject((p) => ({
+                  ...p,
+                  hardware_profiles: p.hardware_profiles.map((h) =>
+                    h.id === hwId ? { ...h, ...patch } : h
+                  ),
+                }))
+              }
+              onSelectHardware={(hwId) =>
+                mutateProject((p) => ({ ...p, active_hardware_id: hwId }), false)
+              }
+              onUpdateQubit={(qubitId, patch) =>
+                mutateProject((p) => ({
+                  ...p,
+                  qubits: p.qubits.map((q) => (q.id === qubitId ? { ...q, ...patch } : q)),
+                }))
+              }
+              onAddQubit={handleAddQubit}
+              onDeleteQubit={handleDeleteQubit}
+              onApplyLatticeLayout={(positions) => {
+                mutateProject((p) => ({
+                  ...p,
+                  qubits: p.qubits.map((q, idx) =>
+                    positions[idx] ? { ...q, pos_x: positions[idx].x, pos_y: positions[idx].y } : q
+                  ),
+                }));
+                addLog(`已应用二维中性原子晶格排布 (${positions.length} 原子)`, 'info');
+              }}
+              onToggleCustomEdge={(u, v) => {
+                const pair: [number, number] = [Math.min(u, v), Math.max(u, v)];
+                mutateProject((p) => ({
+                  ...p,
+                  hardware_profiles: p.hardware_profiles.map((h) => {
+                    if (h.id !== p.active_hardware_id) return h;
+                    const exists = h.edges.some(([a, b]) => a === pair[0] && b === pair[1]);
+                    const nextEdges = exists
+                      ? h.edges.filter(([a, b]) => !(a === pair[0] && b === pair[1]))
+                      : [...h.edges, pair];
+                    return { ...h, edges: nextEdges };
+                  }),
+                }));
+              }}
+              onToggleCustomGateNative={(gateId, isNative) =>
+                mutateProject((p) => ({
+                  ...p,
+                  custom_gates: p.custom_gates.map((g) =>
+                    g.id === gateId ? { ...g, is_native: isNative } : g
+                  ),
+                }))
+              }
+              onOpenNewGateModal={() => {
+                setEditingCustomGate(null);
+                setMacroSeedOps(null);
+                setGateModalOpen(true);
+              }}
+              onEditCustomGate={(cg) => {
+                setEditingCustomGate(cg);
+                setMacroSeedOps(null);
+                setGateModalOpen(true);
+              }}
+              onDeleteCustomGate={(gid) =>
+                mutateProject((p) => ({
+                  ...p,
+                  custom_gates: p.custom_gates.filter((g) => g.id !== gid),
+                }))
+              }
+              onJumpToCalibrate={(qid, proto) => {
+                setDomain('characterization');
+                setBenchmarkConfig((prev) => ({
+                  ...prev,
+                  target_qubit: qid,
+                  protocol: proto,
+                }));
+                handleRunGateBenchmark(undefined, { target_qubit: qid, protocol: proto });
+              }}
+            />
+          )}
         </main>
 
-        {/* Right Context-Sensitive Inspector */}
-        {showRight && (
+        {/* Right Context-Sensitive Inspector (Shown in Circuits & Characterization; Device workspace uses full stage) */}
+        {domain !== 'device' && showRight && (
           <RightInspector
             mode={mode}
             project={project}
@@ -1943,6 +2176,10 @@ export default function App() {
               setBenchmarkConfig((prev) => ({ ...prev, ...patch }))
             }
             onRunGateBenchmark={() => handleRunGateBenchmark()}
+            onOpenDeviceWorkspace={() => {
+              setDomain('device');
+              setDeviceSubTab('drive');
+            }}
             isBusy={isBusy}
           />
         )}

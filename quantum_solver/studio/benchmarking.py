@@ -34,7 +34,7 @@ import stim
 from ..core.gates import gate_unitary
 from ..core.noise import NoiseChannel
 from .models import CircuitOpModel, GateBenchmarkRequest, ProjectModel
-from .project_engine import build_hardware_model
+from .project_engine import build_hardware_model, rabi_pulse_duration_ns
 
 
 # ============================================================================
@@ -248,10 +248,23 @@ def _extract_qubit_noise_params(project: ProjectModel, q_idx: int) -> Dict[str, 
     depol_2q = float(hp.depol_2q) if sim.enable_depol else 0.0
     zz_khz = float(hp.zz_khz) if sim.enable_zz else 0.0
 
+    # Rabi-frequency drive model: pi and pi/2 pulses get their own physical lengths
+    t_pi_ns = t_1q_ns
+    t_pi2_ns = t_1q_ns
+    q_spec = project.qubits[q_idx] if 0 <= q_idx < len(project.qubits) else None
+    q_rabi = q_spec.rabi_mhz if q_spec is not None else None
+    if hp.drive_mode == "fixed_rabi" or q_rabi is not None:
+        omega = float(q_rabi if q_rabi is not None else hp.rabi_mhz)
+        t_pi_ns = rabi_pulse_duration_ns(math.pi, omega, hp.pulse_shape, hp.rise_ns, hp.fall_ns)
+        t_pi2_ns = rabi_pulse_duration_ns(0.5 * math.pi, omega, hp.pulse_shape, hp.rise_ns, hp.fall_ns)
+        t_1q_ns = 0.5 * (t_pi_ns + t_pi2_ns)
+
     return {
         "t1_ns": t1_ns,
         "t2_ns": t2_ns,
         "t_1q_ns": t_1q_ns,
+        "t_pi_ns": t_pi_ns,
+        "t_pi2_ns": t_pi2_ns,
         "t_2q_ns": t_2q_ns,
         "depol_1q": depol_1q,
         "depol_2q": depol_2q,
@@ -275,6 +288,8 @@ def _build_primitive_1q_library(
     t1 = noise_cfg["t1_ns"]
     t2 = noise_cfg["t2_ns"]
     t_1q = noise_cfg["t_1q_ns"]
+    t_pi = noise_cfg.get("t_pi_ns", t_1q)
+    t_pi2 = noise_cfg.get("t_pi2_ns", t_1q)
     dep1 = noise_cfg["depol_1q"]
 
     def mk(ax: Optional[Tuple[float, float, float]], dur: float = t_1q) -> Tuple[np.ndarray, np.ndarray]:
@@ -284,12 +299,12 @@ def _build_primitive_1q_library(
 
     lib: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
         "I": mk(None, t_1q),
-        "X": mk((1.0, 0.0, math.pi)),
-        "Y": mk((0.0, 1.0, math.pi)),
-        "X90": mk((1.0, 0.0, 0.5 * math.pi)),
-        "Xm90": mk((-1.0, 0.0, 0.5 * math.pi)),
-        "Y90": mk((0.0, 1.0, 0.5 * math.pi)),
-        "Ym90": mk((0.0, -1.0, 0.5 * math.pi)),
+        "X": mk((1.0, 0.0, math.pi), t_pi),
+        "Y": mk((0.0, 1.0, math.pi), t_pi),
+        "X90": mk((1.0, 0.0, 0.5 * math.pi), t_pi2),
+        "Xm90": mk((-1.0, 0.0, 0.5 * math.pi), t_pi2),
+        "Y90": mk((0.0, 1.0, 0.5 * math.pi), t_pi2),
+        "Ym90": mk((0.0, -1.0, 0.5 * math.pi), t_pi2),
         # Virtual-Z frame updates (0 ns duration, exact software phase)
         "Z": (_unitary_to_liouville(_SZ), _SZ),
         "S": (_unitary_to_liouville(gate_unitary("S")), gate_unitary("S")),
@@ -1590,4 +1605,8 @@ def execute_gate_benchmark(req: GateBenchmarkRequest) -> Dict[str, Any]:
         return _run_gst_protocol(req)
     if req.protocol == "xeb":
         return _run_xeb_protocol(req)
+    if req.protocol in ("rabi", "ramsey", "t1"):
+        from .calibration import run_basic_calibration
+
+        return run_basic_calibration(req, _extract_qubit_noise_params(req.project, req.target_qubit))
     raise ValueError(f"未知门标定协议: {req.protocol}")

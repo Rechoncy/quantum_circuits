@@ -1,4 +1,9 @@
-export type WorkMode = 'design' | 'simulate' | 'optimize' | 'sweep' | 'benchmark';
+export type PrimaryDomain = 'circuits' | 'characterization' | 'device';
+export type CircuitSubMode = 'design' | 'simulate' | 'optimize' | 'sweep';
+export type DeviceSubTab = 'drive' | 'qubits' | 'topology' | 'platforms';
+export type BenchmarkProtocol = 'rabi' | 'ramsey' | 't1' | 'rb' | 'allxy' | 'gst' | 'xeb';
+
+export type WorkMode = 'design' | 'simulate' | 'optimize' | 'sweep' | 'benchmark' | 'device';
 
 export type InitStateType = '|0>' | '|1>' | '|+>' | '|->' | '|+i>' | '|-i>' | 'custom';
 
@@ -14,6 +19,7 @@ export interface QubitSpec {
   freq_ghz: number | null;
   depol_1q: number | null;
   readout_err: number | null;
+  rabi_mhz?: number | null;
   pos_x: number;
   pos_y: number;
 }
@@ -28,6 +34,7 @@ export interface CircuitOpModel {
   duration_ns?: number | null;
   noise_mode?: 'inherit' | 'none' | 'custom';
   custom_depol?: number | null;
+  rabi_mhz?: number | null;
 }
 
 export type CustomGateDefinitionType = 'matrix' | 'expression' | 'hamiltonian' | 'composite';
@@ -44,7 +51,7 @@ export interface CustomGateDef {
   default_params: number[];
   hamiltonian_str?: string | null;
   hamiltonian_scale: number;
-  pulse_shape: 'cosine' | 'gaussian' | 'rectangular';
+  pulse_shape: 'cosine' | 'gaussian' | 'rectangular' | 'trapezoid';
   sub_operations: CircuitOpModel[];
   duration_ns: number;
   infidelity: number;
@@ -75,7 +82,11 @@ export interface HardwareProfileModel {
   topology_mode: 'all' | 'linear' | 'custom' | 'rydberg_radius';
   edges: [number, number][];
   blockade_radius_um: number;
-  pulse_shape: 'cosine' | 'gaussian' | 'rectangular';
+  pulse_shape: 'cosine' | 'gaussian' | 'rectangular' | 'trapezoid';
+  drive_mode?: 'fixed_duration' | 'fixed_rabi';
+  rabi_mhz?: number;
+  rise_ns?: number;
+  fall_ns?: number;
 }
 
 export type SolverBackendType = 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip' | 'compare';
@@ -398,11 +409,45 @@ export interface XebBenchmarkResponse {
   sample_operations: CircuitOpModel[];
 }
 
+export interface BasicCalibrationParam {
+  key: string;
+  label: string;
+  value: number;
+  unit: string;
+}
+
+export interface CalibrationWritebackItem {
+  scope: 'qubit' | 'hardware';
+  qubit?: number;
+  field: 'rabi_mhz' | 't1_us' | 't2_us' | 'freq_ghz' | 't_1q_ns';
+  value: number;
+  label: string;
+}
+
+export interface BasicCalibrationResponse {
+  protocol: 'rabi' | 'ramsey' | 't1';
+  hardware_name: string;
+  target_label: string;
+  qubit: number;
+  shots: number;
+  x: number[];
+  measured: number[];
+  ideal: number[];
+  fit_x: number[];
+  fit_y: number[];
+  x_label: string;
+  y_label: string;
+  params: BasicCalibrationParam[];
+  writeback: CalibrationWritebackItem[];
+  summary: string;
+}
+
 export type GateBenchmarkResponse =
   | RbBenchmarkResponse
   | AllXyBenchmarkResponse
   | GstBenchmarkResponse
-  | XebBenchmarkResponse;
+  | XebBenchmarkResponse
+  | BasicCalibrationResponse;
 
 export interface HardwareBenchmarkEntry {
   hardware_id: string;

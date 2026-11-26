@@ -1362,6 +1362,97 @@ def test_noise_error_budget_and_2q_linear_xeb() -> None:
     assert len(xeb_noisy["sample_operations"]) > 0
 
 
+def test_rabi_drive_hierarchy_rise_fall_edges_and_basic_calibrations() -> None:
+    """
+    Verify v2.7 features:
+      1. 3-tier Rabi frequency inheritance (hardware -> per-qubit -> per-gate) & fixed_rabi vs fixed_duration
+      2. Flat-top & linear-trapezoid rise/fall edges (`rise_ns`, `fall_ns`) reaching >99.99% ideal fidelity in QuTiP
+      3. Basic calibration experiments (`rabi`, `ramsey`, `t1`) fitting Ω_R, T2*, frequency offset, and T1
+    """
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        GateBenchmarkRequest,
+        SweepRequest,
+        build_preset_projects,
+        execute_gate_benchmark,
+        execute_project_simulation,
+        execute_project_sweep,
+    )
+
+    p = build_preset_projects()[0].model_copy(deep=True)
+    p.qubits = p.qubits[:2]
+    p.sim_settings.backend = "qutip"
+    p.sim_settings.enable_t1_t2 = False
+    p.sim_settings.enable_depol = False
+    p.sim_settings.enable_zz = False
+    p.sim_settings.enable_readout = False
+
+    # 1. Fixed Rabi mode + Flat-top raised-cosine edges (rise_ns=15, fall_ns=15) + 3-tier override
+    for hp in p.hardware_profiles:
+        hp.drive_mode = "fixed_rabi"
+        hp.rabi_mhz = 2.0  # t_pi = 250 + 15 = 265 ns
+        hp.pulse_shape = "rectangular"
+        hp.rise_ns = 15.0
+        hp.fall_ns = 15.0
+
+    p.qubits[1].rabi_mhz = 4.0  # q1 override: t_pi = 125 + 15 = 140 ns
+    p.operations = [
+        CircuitOpModel(id="g0", step=0, kind="gate", name="X", qubits=[0]),
+        CircuitOpModel(id="g1", step=1, kind="gate", name="X", qubits=[1]),
+        CircuitOpModel(id="g2", step=2, kind="gate", name="SX", qubits=[0], rabi_mhz=5.0),  # gate override: t_pi/2 = 50 + 15 = 65 ns
+    ]
+    sim = execute_project_simulation(p)["results"]["qutip"]
+    # Total duration = 265 + 140 + 65 = 470 ns, and state should be |+1> with F > 0.9999
+    assert abs(sim["total_duration_ns"] - 470.0) < 0.5
+    assert sim["final_fidelity"] > 0.9999
+
+    # Also verify trapezoid linear ramp edges integrate cleanly
+    for hp in p.hardware_profiles:
+        hp.pulse_shape = "trapezoid"
+    sim_trap = execute_project_simulation(p)["results"]["qutip"]
+    assert sim_trap["final_fidelity"] > 0.9999
+
+    # 2. Rabi / Ramsey / T1 calibration protocols
+    p_cal = build_preset_projects()[0]
+    r_rabi = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_cal, protocol="rabi", amp_error_pct=4.0, shots=0)
+    )
+    omega_fit = next(x["value"] for x in r_rabi["params"] if x["key"] == "omega_fit")
+    assert abs(omega_fit - 2.5 * 1.04) < 0.03
+    assert len(r_rabi["writeback"]) >= 2
+
+    r_ramsey = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_cal, protocol="ramsey", ramsey_detuning_mhz=0.5, detuning_mhz=0.12, shots=0
+        )
+    )
+    t2_fit = next(x["value"] for x in r_ramsey["params"] if x["key"] == "t2_star")
+    freq_off = next(x["value"] for x in r_ramsey["params"] if x["key"] == "freq_offset")
+    assert abs(t2_fit - 800.0) < 25.0
+    assert abs(freq_off - 0.12) < 0.02
+
+    r_t1 = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_cal, protocol="t1", shots=0)
+    )
+    t1_fit = next(x["value"] for x in r_t1["params"] if x["key"] == "t1")
+    assert abs(t1_fit - 1000.0) < 25.0
+
+    # 3. Sweeping hw:rabi_mhz works end-to-end
+    sw = execute_project_sweep(
+        SweepRequest(
+            project=p,
+            mode="1d",
+            param_x="hw:rabi_mhz",
+            x_start=1.0,
+            x_stop=5.0,
+            x_points=5,
+            backend="kraus",
+        )
+    )
+    assert len(sw["fidelities"]) == 5
+
+
+
 
 
 

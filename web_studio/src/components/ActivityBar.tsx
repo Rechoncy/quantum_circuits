@@ -1,21 +1,19 @@
 import React from 'react';
 import {
-  Activity,
   Bot,
   CircuitBoard,
   Cpu,
   Gauge,
-  LineChart,
   Moon,
   PanelLeft,
   PanelRight,
   Sun,
 } from 'lucide-react';
-import type { WorkMode } from '../types';
+import type { PrimaryDomain } from '../types';
 
 interface ActivityBarProps {
-  mode: WorkMode;
-  onModeChange: (m: WorkMode) => void;
+  domain: PrimaryDomain;
+  onDomainChange: (d: PrimaryDomain) => void;
   showLeft: boolean;
   showRight: boolean;
   onToggleLeft: () => void;
@@ -25,22 +23,39 @@ interface ActivityBarProps {
   onOpenNlModal: () => void;
 }
 
-const NAV_ITEMS: {
-  id: WorkMode;
+const DOMAIN_ITEMS: {
+  id: PrimaryDomain;
   code: string;
+  zh: string;
   title: string;
   icon: React.FC<{ className?: string }>;
 }[] = [
-  { id: 'design', code: 'SCH', title: '原理图设计 (Design)', icon: CircuitBoard },
-  { id: 'simulate', code: 'SIM', title: '量子演化仿真 (Simulate)', icon: Activity },
-  { id: 'optimize', code: 'SYN', title: '硬件编译综合 (Optimize)', icon: Cpu },
-  { id: 'sweep', code: 'SWP', title: '参数扫描 & VQE (Sweep)', icon: LineChart },
-  { id: 'benchmark', code: 'CAL', title: '门标定基准 RB / AllXY / GST (Benchmark)', icon: Gauge },
+  {
+    id: 'circuits',
+    code: 'CIR',
+    zh: '线路',
+    title: '量子线路工作区 (设计 / 仿真 / 综合 / 扫描)',
+    icon: CircuitBoard,
+  },
+  {
+    id: 'characterization',
+    code: 'CAL',
+    zh: '表征',
+    title: '比特与门表征工作区 (Rabi / Ramsey / T1 / RB / AllXY / GST / XEB)',
+    icon: Gauge,
+  },
+  {
+    id: 'device',
+    code: 'DEV',
+    zh: '器件',
+    title: '器件与硬件参数工作区 (拉比频率 / 上升下降沿 / 寄存器 / 拓扑)',
+    icon: Cpu,
+  },
 ];
 
 export const ActivityBar: React.FC<ActivityBarProps> = ({
-  mode,
-  onModeChange,
+  domain,
+  onDomainChange,
   showLeft,
   showRight,
   onToggleLeft,
@@ -51,43 +66,43 @@ export const ActivityBar: React.FC<ActivityBarProps> = ({
 }) => {
   return (
     <nav
-      aria-label="IDE 主工作模式活动栏"
-      className="w-[48px] shrink-0 bg-[var(--bg-activity)] border-r border-[var(--border-hairline)] flex flex-col items-center justify-between py-1 select-none z-20"
+      aria-label="IDE 三大平行主工作区导航栏"
+      className="w-[52px] shrink-0 bg-[var(--bg-activity)] border-r border-[var(--border-hairline)] flex flex-col items-center justify-between py-1.5 select-none z-20"
     >
-      {/* Top Primary Workbench Modes */}
-      <div className="w-full flex flex-col items-center">
-        {NAV_ITEMS.map((item) => {
+      {/* Top 3 Parallel First-Class Domains */}
+      <div className="w-full flex flex-col items-center gap-0.5">
+        {DOMAIN_ITEMS.map((item) => {
           const Icon = item.icon;
-          const active = mode === item.id;
+          const active = domain === item.id;
           return (
             <button
               key={item.id}
-              onClick={() => onModeChange(item.id)}
+              onClick={() => onDomainChange(item.id)}
               title={item.title}
-              className={`relative w-full h-[46px] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${
+              className={`relative w-full h-[52px] flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer ${
                 active
                   ? 'text-[var(--accent)] bg-[var(--bg-sidebar)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.04]'
               }`}
             >
               {active && (
-                <span className="absolute left-0 top-0 bottom-0 w-[2.5px] bg-[var(--accent)]" />
+                <span className="absolute left-0 top-1 bottom-1 w-[3px] rounded-r-[1px] bg-[var(--accent)]" />
               )}
-              <Icon className="w-[17px] h-[17px] stroke-[1.8]" />
-              <span className="text-[9px] font-mono-num font-bold tracking-wider leading-none">
-                {item.code}
+              <Icon className="w-[18px] h-[18px] stroke-[1.85]" />
+              <span className="text-[10px] font-semibold leading-none tracking-tight">
+                {item.zh}
               </span>
             </button>
           );
         })}
 
-        <div className="w-6 my-1.5 border-t border-[var(--border-hairline)]" />
+        <div className="w-7 my-1.5 border-t border-[var(--border-hairline)]" />
 
         {/* AI Circuit Synthesis Assistant */}
         <button
           onClick={onOpenNlModal}
           title="AI 量子线路综合助手 (Ctrl+K)"
-          className="w-[36px] h-[36px] rounded-[3px] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--accent-soft)] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer"
+          className="w-[38px] h-[38px] rounded-[3px] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--accent-soft)] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer"
         >
           <Bot className="w-[16px] h-[16px] stroke-[1.8]" />
           <span className="text-[8.5px] font-mono-num font-bold leading-none">AI</span>
@@ -96,29 +111,33 @@ export const ActivityBar: React.FC<ActivityBarProps> = ({
 
       {/* Bottom Panel & Theme Controls */}
       <div className="w-full flex flex-col items-center gap-1 pb-1">
-        <button
-          onClick={onToggleLeft}
-          title={showLeft ? '折叠左侧工程资源栏' : '展开左侧工程资源栏'}
-          className={`w-[34px] h-[30px] rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
-            showLeft
-              ? 'text-[var(--text-primary)] bg-black/[0.06] dark:bg-white/[0.08]'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <PanelLeft className="w-4 h-4" />
-        </button>
+        {domain === 'circuits' && (
+          <button
+            onClick={onToggleLeft}
+            title={showLeft ? '折叠左侧工程资源栏' : '展开左侧工程资源栏'}
+            className={`w-[34px] h-[30px] rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
+              showLeft
+                ? 'text-[var(--text-primary)] bg-black/[0.06] dark:bg-white/[0.08]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+        )}
 
-        <button
-          onClick={onToggleRight}
-          title={showRight ? '折叠右侧属性检查器' : '展开右侧属性检查器'}
-          className={`w-[34px] h-[30px] rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
-            showRight
-              ? 'text-[var(--text-primary)] bg-black/[0.06] dark:bg-white/[0.08]'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <PanelRight className="w-4 h-4" />
-        </button>
+        {domain !== 'device' && (
+          <button
+            onClick={onToggleRight}
+            title={showRight ? '折叠右侧属性检查器' : '展开右侧属性检查器'}
+            className={`w-[34px] h-[30px] rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
+              showRight
+                ? 'text-[var(--text-primary)] bg-black/[0.06] dark:bg-white/[0.08]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+        )}
 
         <button
           onClick={onToggleDark}

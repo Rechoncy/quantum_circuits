@@ -161,13 +161,47 @@ def _build_drift_hamiltonian(
     return H_qobj
 
 
-def _make_pulse_envelope(pulse_shape: str, gate_dt: float):
+def _make_pulse_envelope(pulse_shape: str, gate_dt: float, rise_ns: float = 0.0, fall_ns: float = 0.0):
     """
     Build a smooth pulse envelope f(t) supported on [0, gate_dt] with integral_0^{gate_dt} f(t) dt = 1.
     Returns 0 for t > gate_dt so faster gates in a parallel layer naturally idle while longer gates finish.
+    Rectangular envelopes support raised-cosine rise / fall edges (flat-top pulses).
     """
     shape = (pulse_shape or "cosine").lower()
-    if shape == "rectangular":
+    if shape in ("rectangular", "trapezoid") and (rise_ns > 0.0 or fall_ns > 0.0):
+        r = max(0.0, rise_ns)
+        f = max(0.0, fall_ns)
+        if r + f > gate_dt:
+            s = gate_dt / (r + f)
+            r, f = r * s, f * s
+        area = gate_dt - 0.5 * (r + f)
+        amp_ft = 1.0 / max(area, 1e-12)
+        t_fall0 = gate_dt - f
+
+        if shape == "trapezoid":
+            def trap_fn(t: float, _args: dict = {}) -> float:
+                if t < 0.0 or t > gate_dt:
+                    return 0.0
+                if r > 0.0 and t < r:
+                    return amp_ft * (t / r)
+                if f > 0.0 and t > t_fall0:
+                    return amp_ft * ((gate_dt - t) / f)
+                return amp_ft
+
+            return trap_fn
+
+        def flattop_fn(t: float, _args: dict = {}) -> float:
+            if t < 0.0 or t > gate_dt:
+                return 0.0
+            if r > 0.0 and t < r:
+                return amp_ft * 0.5 * (1.0 - math.cos(math.pi * t / r))
+            if f > 0.0 and t > t_fall0:
+                return amp_ft * 0.5 * (1.0 - math.cos(math.pi * (gate_dt - t) / f))
+            return amp_ft
+
+        return flattop_fn
+
+    if shape in ("rectangular", "trapezoid"):
         amp = 1.0 / gate_dt
 
         def rect_fn(t: float, _args: dict = {}) -> float:
@@ -248,6 +282,9 @@ class QuTiPBackend:
         c_ops = _build_qutip_collapse_operators(hardware, n)
         H_drift = _build_drift_hamiltonian(hardware, n)
         pulse_shape = hardware.pulse_shape if hardware is not None else "cosine"
+        rise_ns = float(getattr(hardware, "rise_ns", 0.0) or 0.0) if hardware is not None else 0.0
+        fall_ns = float(getattr(hardware, "fall_ns", 0.0) or 0.0) if hardware is not None else 0.0
+        has_edges = rise_ns > 0.0 or fall_ns > 0.0
 
         steps: List[StepSnapshot] = []
         elapsed_ns = 0.0
@@ -340,12 +377,14 @@ class QuTiPBackend:
                             H_gen_local, theta = gate_hamiltonian_generator(g.name, g.params, g.custom_matrix)
                             H_gen_qobj = _embed_sparse_qobj(0.5 * theta * H_gen_local, g.qubits, n)
 
-                        if pulse_shape == "rectangular" and abs(dt_g - dt_layer) <= 1e-9:
+                        if pulse_shape == "rectangular" and not has_edges and abs(dt_g - dt_layer) <= 1e-9:
                             term = (1.0 / dt_g) * H_gen_qobj
                             static_ctrl_qobj = term if static_ctrl_qobj is None else (static_ctrl_qobj + term)
                         else:
                             has_td = True
-                            H_td_list.append([H_gen_qobj, _make_pulse_envelope(pulse_shape, dt_g)])
+                            H_td_list.append(
+                                [H_gen_qobj, _make_pulse_envelope(pulse_shape, dt_g, rise_ns, fall_ns)]
+                            )
 
                     if static_ctrl_qobj is not None:
                         H_td_list[0] = layer_drift + static_ctrl_qobj

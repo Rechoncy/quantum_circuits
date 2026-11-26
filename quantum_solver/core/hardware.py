@@ -66,6 +66,8 @@ class HardwareModel:
     qubit_params: Dict[int, QubitPhysicalParams] = field(default_factory=dict)
     coupler_params: Dict[Tuple[int, int], CouplerPhysicalParams] = field(default_factory=dict)
     pulse_shape: str = "cosine"  # 'rectangular' or 'cosine' (smooth Hann window)
+    rise_ns: float = 0.0  # rectangular (flat-top) envelope rise edge
+    fall_ns: float = 0.0  # rectangular (flat-top) envelope fall edge
     include_idle_noise: bool = True
 
     def __post_init__(self) -> None:

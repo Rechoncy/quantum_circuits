@@ -26,6 +26,7 @@ import type {
 import { PlotlyChart } from './PlotlyChart';
 import { BlochSphere3D } from './BlochSphere3D';
 import { downloadTextFile } from '../utils/exportCircuitSvg';
+import { impliedRabiMhz, samplePeakNormalizedEnvelope } from '../utils/drivePhysics';
 
 interface SimulateResultsProps {
   project: ProjectModel;
@@ -409,19 +410,17 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
     const nLanes = Math.max(1, visibleQ.length);
     const laneStep = 2.35;
     const pulseShape = activeHw?.pulse_shape || 'cosine';
-    const shapeFn = (u: number): number => {
-      if (pulseShape === 'gaussian') {
-        const z = (u - 0.5) / 0.19;
-        const g0 = Math.exp(-0.5 * Math.pow(0.5 / 0.19, 2));
-        return Math.max(0, (Math.exp(-0.5 * z * z) - g0) / (1 - g0));
-      }
-      if (pulseShape === 'rectangular') {
-        if (u < 0.04) return u / 0.04;
-        if (u > 0.96) return (1 - u) / 0.04;
-        return 1.0;
-      }
-      return 0.5 * (1 - Math.cos(2 * Math.PI * u));
-    };
+    const riseNs = activeHw?.rise_ns ?? 0;
+    const fallNs = activeHw?.fall_ns ?? 0;
+    const hwRabi = activeHw?.rabi_mhz ?? 2.5;
+    const refMaxRabi = Math.max(
+      0.5,
+      hwRabi,
+      ...visibleQ.map((q) => q.rabi_mhz ?? 0),
+      impliedRabiMhz(Math.PI, activeHw?.t_1q_ns || 40, pulseShape, riseNs, fallNs)
+    );
+    const shapeAt = (tRel: number, dur: number): number =>
+      samplePeakNormalizedEnvelope(tRel, dur, pulseShape, riseNs, fallNs);
 
     const resolveNumParam = (val: number | string | undefined, fallback: number): number => {
       if (typeof val === 'number') return val;
@@ -526,14 +525,19 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
             theta = Math.PI / 2;
             phi = 0.35;
           }
-          const normAmp = Math.max(-1, Math.min(1, theta / Math.PI)) * 0.85;
+          const durGate = Math.max(1e-6, t1 - t0);
+          const peakRabiMhz =
+            op.rabi_mhz ??
+            visibleQ[q]?.rabi_mhz ??
+            impliedRabiMhz(Math.abs(theta), durGate, pulseShape, riseNs, fallNs);
+          const signDir = theta >= 0 ? 1 : -1;
+          const normAmp = signDir * Math.min(1.0, (peakRabiMhz / refMaxRabi) * 0.88);
           const ampI = normAmp * Math.cos(phi);
           const ampQ = normAmp * Math.sin(phi);
           for (let i = 0; i < nPts; i++) {
             const t = ts[i];
             if (t >= t0 && t <= t1) {
-              const u = (t - t0) / Math.max(1e-6, t1 - t0);
-              const env = shapeFn(u);
+              const env = shapeAt(t - t0, durGate);
               iDrive[q][i] += ampI * env;
               qDrive[q][i] += ampQ * env;
             }
@@ -542,6 +546,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
           const qA = op.qubits[0];
           const qB = op.qubits[1];
           const spanEnd = t1 > t0 + 1e-3 ? t1 : t0 + (activeHw?.t_2q_ns || 120);
+          const spanDur = Math.max(1e-6, spanEnd - t0);
           couplerSpans.push({
             t0,
             t1: spanEnd,
@@ -556,8 +561,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
             for (let i = 0; i < nPts; i++) {
               const t = ts[i];
               if (t >= t0 && t <= spanEnd) {
-                const u = (t - t0) / Math.max(1e-6, spanEnd - t0);
-                qDrive[q][i] += sign * shapeFn(u);
+                qDrive[q][i] += sign * shapeAt(t - t0, spanDur);
               }
             }
           }

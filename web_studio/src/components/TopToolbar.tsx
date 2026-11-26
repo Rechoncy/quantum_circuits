@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Activity,
   Atom,
   Bot,
   ChevronDown,
@@ -10,7 +9,6 @@ import {
   FolderOpen,
   Gauge,
   Keyboard,
-  LineChart,
   Loader2,
   Moon,
   PanelLeft,
@@ -22,14 +20,15 @@ import {
   Undo2,
   Upload,
 } from 'lucide-react';
-import type { ProjectModel, SolverBackendType, WorkMode } from '../types';
+import type { CircuitSubMode, PrimaryDomain, ProjectModel, SolverBackendType } from '../types';
 import { BACKEND_LABELS } from '../constants';
 
 interface TopToolbarProps {
   project: ProjectModel;
   presets: ProjectModel[];
-  mode: WorkMode;
-  onModeChange: (m: WorkMode) => void;
+  domain: PrimaryDomain;
+  circuitSubMode: CircuitSubMode;
+  onDomainChange: (d: PrimaryDomain) => void;
   onSelectPreset: (p: ProjectModel) => void;
   onRenameProject: (name: string) => void;
   onBackendChange: (b: SolverBackendType) => void;
@@ -55,25 +54,23 @@ interface TopToolbarProps {
   isDirty?: boolean;
 }
 
-const MODES: {
-  id: WorkMode;
+const DOMAINS: {
+  id: PrimaryDomain;
   zh: string;
-  short: string;
-  code: string;
+  badge: string;
   icon: React.FC<{ className?: string }>;
 }[] = [
-  { id: 'design', zh: '原理图设计', short: '设计', code: 'SCH', icon: CircuitBoard },
-  { id: 'simulate', zh: '演化仿真', short: '仿真', code: 'SIM', icon: Activity },
-  { id: 'optimize', zh: '编译综合', short: '综合', code: 'SYN', icon: Cpu },
-  { id: 'sweep', zh: '扫描 / VQE', short: '扫描', code: 'SWP', icon: LineChart },
-  { id: 'benchmark', zh: '门标定基准', short: '标定', code: 'CAL', icon: Gauge },
+  { id: 'circuits', zh: '量子线路', badge: 'CIR', icon: CircuitBoard },
+  { id: 'characterization', zh: '比特门表征', badge: 'CAL', icon: Gauge },
+  { id: 'device', zh: '器件与硬件', badge: 'DEV', icon: Cpu },
 ];
 
 export const TopToolbar: React.FC<TopToolbarProps> = ({
   project,
   presets,
-  mode,
-  onModeChange,
+  domain,
+  circuitSubMode,
+  onDomainChange,
   onSelectPreset,
   onRenameProject,
   onBackendChange,
@@ -125,9 +122,20 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
   const formatShots = (s: number) => (s >= 1000 ? `${Math.round(s / 1000)}k` : String(s));
 
+  const runButtonLabel =
+    domain === 'characterization'
+      ? '运行表征'
+      : domain === 'device'
+      ? '验证仿真'
+      : circuitSubMode === 'optimize'
+      ? '编译综合'
+      : circuitSubMode === 'sweep'
+      ? '执行扫描'
+      : '运行仿真';
+
   return (
-    <header className="h-[40px] shrink-0 bg-[var(--bg-header)] border-b border-[var(--border-hairline)] px-2 flex items-center justify-between gap-2 select-none z-30">
-      {/* Left: Brand Emblem + Project File Selector + Undo/Redo + IDE Workbench Tabs */}
+    <header className="h-[42px] shrink-0 bg-[var(--bg-header)] border-b border-[var(--border-hairline)] px-2 flex items-center justify-between gap-2 select-none z-30">
+      {/* Left: Brand Emblem + Project File Selector + Undo/Redo + 3 Parallel Domain Switcher */}
       <div className="flex items-center h-full min-w-0 overflow-hidden">
         {/* Industrial Brand Badge */}
         <div className="flex items-center gap-2 px-2 h-full border-r border-[var(--border-hairline)] shrink-0">
@@ -171,7 +179,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 setMenuOpen(false);
                 setEditingName(true);
               }}
-              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[200px] cursor-pointer transition-colors"
+              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[196px] cursor-pointer transition-colors"
               title="点击切换预设工程或导入/导出文件，双击重命名当前工程"
             >
               <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
@@ -180,9 +188,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             </button>
           )}
 
-          {/* Preset / File Menu */}
           {menuOpen && (
-            <div className="absolute left-2 top-[38px] w-80 studio-card shadow-xl py-1 z-50">
+            <div className="absolute left-2 top-[40px] w-80 studio-card shadow-xl py-1 z-50">
               <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
                 工程模板库 PRESETS ({presets.length})
               </div>
@@ -271,7 +278,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </div>
 
         {/* Undo / Redo */}
-        <div className="hidden xl:flex items-center gap-0.5 px-1.5 h-full border-r border-[var(--border-hairline)]">
+        <div className="hidden lg:flex items-center gap-0.5 px-1.5 h-full border-r border-[var(--border-hairline)]">
           <button
             onClick={onUndo}
             disabled={!canUndo}
@@ -290,27 +297,35 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </button>
         </div>
 
-        {/* Flush IDE Workbench Mode Tabs (auto-collapses on narrow screens where left ActivityBar handles switching) */}
-        <div className="hidden xl:flex items-center h-full shrink-0">
-          {MODES.map((m) => {
-            const Icon = m.icon;
-            const active = mode === m.id;
+        {/* 3 First-Class Parallel Domain Tabs: 量子线路 | 比特门表征 | 器件与硬件 */}
+        <div className="hidden md:flex items-center h-full shrink-0">
+          {DOMAINS.map((d) => {
+            const Icon = d.icon;
+            const active = domain === d.id;
             return (
               <button
-                key={m.id}
-                onClick={() => onModeChange(m.id)}
-                className={`relative h-full px-2.5 2xl:px-3 border-r border-[var(--border-hairline)] flex items-center gap-1.5 text-[12px] transition-colors cursor-pointer whitespace-nowrap ${
+                key={d.id}
+                onClick={() => onDomainChange(d.id)}
+                className={`relative h-full px-3.5 border-r border-[var(--border-hairline)] flex items-center gap-1.5 text-[12.5px] transition-colors cursor-pointer whitespace-nowrap ${
                   active
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.03] dark:hover:bg-white/[0.03]'
                 }`}
               >
                 {active && (
-                  <span className="absolute top-0 left-0 right-0 h-[2px] bg-[var(--accent)]" />
+                  <span className="absolute top-0 left-0 right-0 h-[2.5px] bg-[var(--accent)]" />
                 )}
                 <Icon className={`w-3.5 h-3.5 ${active ? 'text-[var(--accent)]' : 'opacity-75'}`} />
-                <span className="hidden 2xl:inline">{m.zh}</span>
-                <span className="2xl:hidden">{m.short}</span>
+                <span>{d.zh}</span>
+                <span
+                  className={`text-[9.5px] font-mono-num px-1 py-0 rounded-[2px] border ${
+                    active
+                      ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : 'border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[var(--text-tertiary)]'
+                  }`}
+                >
+                  {d.badge}
+                </span>
               </button>
             );
           })}
@@ -331,40 +346,44 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </kbd>
         </button>
 
-        <div className="relative flex items-center">
-          <select
-            value={project.sim_settings.backend}
-            onChange={(e) => onBackendChange(e.target.value as SolverBackendType)}
-            className="h-7 appearance-none bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] rounded-[3px] pl-2 pr-6 text-[11.5px] font-mono-num font-medium text-[var(--text-primary)] outline-none focus:border-[var(--accent)] cursor-pointer transition-colors"
-          >
-            {Object.entries(BACKEND_LABELS).map(([k, lbl]) => (
-              <option key={k} value={k}>
-                {lbl}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="w-3 h-3 text-[var(--text-secondary)] pointer-events-none absolute right-1.5" />
-        </div>
+        {domain === 'circuits' && (
+          <>
+            <div className="relative flex items-center">
+              <select
+                value={project.sim_settings.backend}
+                onChange={(e) => onBackendChange(e.target.value as SolverBackendType)}
+                className="h-7 appearance-none bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] rounded-[3px] pl-2 pr-6 text-[11.5px] font-mono-num font-medium text-[var(--text-primary)] outline-none focus:border-[var(--accent)] cursor-pointer transition-colors"
+              >
+                {Object.entries(BACKEND_LABELS).map(([k, lbl]) => (
+                  <option key={k} value={k}>
+                    {lbl}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-3 h-3 text-[var(--text-secondary)] pointer-events-none absolute right-1.5" />
+            </div>
 
-        <div
-          className="hidden md:flex h-7 items-center gap-1 bg-[var(--bg-panel)] border border-[var(--border-hairline)] rounded-[3px] px-2"
-          title="测量采样次数 Shots"
-        >
-          <span className="text-[9.5px] font-mono-num text-[var(--text-tertiary)] uppercase font-bold">
-            SHOTS
-          </span>
-          <select
-            value={project.sim_settings.shots}
-            onChange={(e) => onShotsChange(Number(e.target.value))}
-            className="bg-[var(--bg-panel)] text-[11.5px] font-semibold font-mono-num text-[var(--text-primary)] outline-none cursor-pointer"
-          >
-            {[1000, 4096, 10000, 20000, 50000, 100000].map((v) => (
-              <option key={v} value={v}>
-                {formatShots(v)}
-              </option>
-            ))}
-          </select>
-        </div>
+            <div
+              className="hidden xl:flex h-7 items-center gap-1 bg-[var(--bg-panel)] border border-[var(--border-hairline)] rounded-[3px] px-2"
+              title="测量采样次数 Shots"
+            >
+              <span className="text-[9.5px] font-mono-num text-[var(--text-tertiary)] uppercase font-bold">
+                SHOTS
+              </span>
+              <select
+                value={project.sim_settings.shots}
+                onChange={(e) => onShotsChange(Number(e.target.value))}
+                className="bg-[var(--bg-panel)] text-[11.5px] font-semibold font-mono-num text-[var(--text-primary)] outline-none cursor-pointer"
+              >
+                {[1000, 4096, 10000, 20000, 50000, 100000].map((v) => (
+                  <option key={v} value={v}>
+                    {formatShots(v)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
 
         {isBusy && onStop ? (
           <button
@@ -380,7 +399,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             onClick={onRun}
             disabled={isBusy}
-            title={isDirty ? '线路或参数已变更，点击或按 Ctrl+Enter 重新求解' : '运行当前工作区任务 (Ctrl+Enter)'}
+            title={isDirty ? '线路或硬件参数已变更，点击或按 Ctrl+Enter 执行' : '运行当前工作区任务 (Ctrl+Enter)'}
             className="relative h-7 px-3.5 rounded-[3px] bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/25 text-[12px] font-semibold flex items-center gap-1.5 disabled:opacity-60 cursor-pointer transition-colors"
           >
             {isBusy ? (
@@ -388,19 +407,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             ) : (
               <Play className="w-3 h-3 fill-current" />
             )}
-            <span>
-              {mode === 'optimize'
-                ? '编译综合'
-                : mode === 'sweep'
-                ? '执行扫描'
-                : mode === 'benchmark'
-                ? '运行标定'
-                : '运行仿真'}
-            </span>
+            <span>{runButtonLabel}</span>
             {isDirty && !isBusy && (
               <span
                 className="w-2 h-2 rounded-full bg-amber-300"
-                title="线路或参数已变更，待重新运行"
+                title="线路或硬件参数已变更，待重新运行"
               />
             )}
           </button>
@@ -422,15 +433,16 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </button>
 
           {shortcutsOpen && (
-            <div className="absolute right-0 top-9 w-72 studio-card shadow-xl p-2.5 z-50 space-y-2">
+            <div className="absolute right-0 top-9 w-76 studio-card shadow-xl p-2.5 z-50 space-y-2">
               <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-1.5">
                 <span className="text-[11.5px] font-bold text-[var(--text-primary)]">
                   EDA 工作台快捷键
                 </span>
-                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.6</span>
+                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.7</span>
               </div>
               <div className="space-y-1.5 text-[11px]">
                 {[
+                  ['Alt + 1 / 2 / 3', '切换 量子线路 / 比特门表征 / 器件硬件'],
                   ['V / 右键空白', '切换选择指针 / 释放放置工具'],
                   ['空白拖拽框选', '批量框选门（删除 / 封装宏门）'],
                   ['Ctrl + 滚轮', '原理图画布无级缩放 (60%–150%)'],
@@ -439,7 +451,6 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                   ['Ctrl + K', '唤起 / 关闭 AI 线路综合助手'],
                   ['Ctrl + Enter', '执行当前工作区任务'],
                   ['Ctrl + Z / Y', '撤销 / 重做编辑'],
-                  ['Ctrl + D / Del', '复制 / 删除选中量子门'],
                 ].map(([keyStr, desc]) => (
                   <div key={keyStr} className="flex items-center justify-between gap-2">
                     <span className="text-[var(--text-secondary)] truncate">{desc}</span>
@@ -453,29 +464,33 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           )}
         </div>
 
-        <button
-          onClick={onToggleLeft}
-          title={showLeft ? '隐藏左侧资源管理器' : '显示左侧资源管理器'}
-          className={`w-7 h-7 rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
-            showLeft
-              ? 'text-[var(--text-primary)] bg-black/[0.05] dark:bg-white/[0.08]'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <PanelLeft className="w-3.5 h-3.5" />
-        </button>
+        {domain === 'circuits' && (
+          <button
+            onClick={onToggleLeft}
+            title={showLeft ? '隐藏左侧资源管理器' : '显示左侧资源管理器'}
+            className={`w-7 h-7 rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
+              showLeft
+                ? 'text-[var(--text-primary)] bg-black/[0.05] dark:bg-white/[0.08]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <PanelLeft className="w-3.5 h-3.5" />
+          </button>
+        )}
 
-        <button
-          onClick={onToggleRight}
-          title={showRight ? '隐藏右侧属性检查器' : '显示右侧属性检查器'}
-          className={`w-7 h-7 rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
-            showRight
-              ? 'text-[var(--text-primary)] bg-black/[0.05] dark:bg-white/[0.08]'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <PanelRight className="w-3.5 h-3.5" />
-        </button>
+        {domain !== 'device' && (
+          <button
+            onClick={onToggleRight}
+            title={showRight ? '隐藏右侧属性检查器' : '显示右侧属性检查器'}
+            className={`w-7 h-7 rounded-[3px] flex items-center justify-center transition-colors cursor-pointer ${
+              showRight
+                ? 'text-[var(--text-primary)] bg-black/[0.05] dark:bg-white/[0.08]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+          </button>
+        )}
 
         <button
           onClick={onToggleDark}

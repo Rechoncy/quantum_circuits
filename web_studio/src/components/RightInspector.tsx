@@ -12,6 +12,7 @@ import {
   Square,
 } from 'lucide-react';
 import type {
+  BenchmarkProtocol,
   CircuitOpModel,
   CustomGateDef,
   HardwareProfileModel,
@@ -25,6 +26,12 @@ import type {
 } from '../types';
 import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from '../constants';
 import { TopologyEditor } from './TopologyEditor';
+import {
+  impliedRabiMhz,
+  isVirtual1QGate,
+  rabiPulseDurationNs,
+  singleQubitRotationAngle,
+} from '../utils/drivePhysics';
 
 export interface SweepConfigState {
   mode: '1d' | '2d' | 'vqe';
@@ -45,7 +52,7 @@ export interface SweepConfigState {
 }
 
 export interface BenchmarkConfigState {
-  protocol: 'rb' | 'allxy' | 'gst' | 'xeb';
+  protocol: BenchmarkProtocol;
   target_qubit: number;
   second_qubit: number;
   rb_num_qubits: 1 | 2;
@@ -54,6 +61,9 @@ export interface BenchmarkConfigState {
   interleaved_gate: string;
   xeb_entangler: string;
   gst_max_length: number;
+  cal_points: number;
+  cal_max_ns: number | null;
+  ramsey_detuning_mhz: number;
   shots: number;
   amp_error_pct: number;
   detuning_mhz: number;
@@ -107,6 +117,8 @@ export function buildPresetHamiltonian(
 
 function defaultSweepRange(paramKey: string): [number, number] {
   if (paramKey === 'hw:t1_us' || paramKey === 'hw:t2_us') return [5, 200];
+  if (paramKey === 'hw:rabi_mhz') return [0.5, 25];
+  if (paramKey === 'hw:rise_ns' || paramKey === 'hw:fall_ns') return [0, 80];
   if (paramKey.includes('depol') || paramKey.includes('readout') || paramKey.startsWith('p_')) {
     return [0, 0.08];
   }
@@ -151,6 +163,7 @@ interface RightInspectorProps {
   benchmarkConfig?: BenchmarkConfigState;
   onBenchmarkConfigChange?: (patch: Partial<BenchmarkConfigState>) => void;
   onRunGateBenchmark?: () => void;
+  onOpenDeviceWorkspace?: () => void;
   isBusy: boolean;
 }
 
@@ -217,6 +230,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   benchmarkConfig,
   onBenchmarkConfigChange,
   onRunGateBenchmark,
+  onOpenDeviceWorkspace,
   isBusy,
 }) => {
   const activeHw =
@@ -850,9 +864,32 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           量子门标定与层析配置
         </div>
 
-        {/* Protocol Switcher */}
+        {/* Protocol Switcher: Basic Calibrations + Gate Benchmarks */}
         <div className="space-y-2">
-          <SectionTitle>标定协议选择</SectionTitle>
+          <SectionTitle>基础物理标定实验</SectionTitle>
+          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-3 gap-0.5">
+            {(
+              [
+                ['rabi', 'Rabi 振荡'],
+                ['ramsey', 'Ramsey'],
+                ['t1', 'T1 弛豫'],
+              ] as const
+            ).map(([pid, lbl]) => (
+              <button
+                key={pid}
+                onClick={() => onBenchmarkConfigChange({ protocol: pid })}
+                className={`py-1.5 rounded-[2px] text-[11px] font-mono-num font-medium cursor-pointer ${
+                  bc.protocol === pid
+                    ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold border border-[var(--border-hairline)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+
+          <SectionTitle>门保真度与层析基准</SectionTitle>
           <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-4 gap-0.5">
             {(
               [
@@ -914,6 +951,62 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </select>
             </div>
           </div>
+
+          {(bc.protocol === 'rabi' || bc.protocol === 'ramsey' || bc.protocol === 't1') && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    扫描采样点数
+                  </label>
+                  <input
+                    type="number"
+                    min={15}
+                    max={251}
+                    step={10}
+                    value={bc.cal_points}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({ cal_points: Math.max(15, Number(e.target.value)) })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    最大扫描时长 (ns)
+                  </label>
+                  <input
+                    type="number"
+                    min={10}
+                    placeholder="自动推算"
+                    value={bc.cal_max_ns ?? ''}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({
+                        cal_max_ns: e.target.value === '' ? null : Math.max(5, Number(e.target.value)),
+                      })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  />
+                </div>
+              </div>
+              {bc.protocol === 'ramsey' && (
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    Ramsey 人工注入条纹频率 δ_art (MHz)
+                  </label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    value={bc.ramsey_detuning_mhz}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({ ramsey_detuning_mhz: Number(e.target.value) })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  />
+                </div>
+              )}
+            </>
+          )}
 
           {bc.protocol === 'rb' && (
             <>
@@ -1390,9 +1483,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </div>
           )}
 
-          {/* Timing & Noise Section */}
+          {/* Timing, Rabi Frequency & Noise Section */}
           <div className="pt-4 border-t border-[var(--border-hairline)] space-y-3">
-            <SectionTitle>时序与噪声</SectionTitle>
+            <SectionTitle>驱动拉比、时序与噪声</SectionTitle>
             <div className="flex items-center justify-between">
               <span className="text-[12.5px]">时间列 Step</span>
               <div className="flex items-center gap-1">
@@ -1414,8 +1507,73 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </div>
             </div>
 
+            {op.kind === 'gate' && op.qubits.length === 1 && !isVirtual1QGate(op.name) && (() => {
+              const qObj = project.qubits[op.qubits[0]];
+              const inheritedRabi = qObj?.rabi_mhz ?? activeHw.rabi_mhz ?? 2.5;
+              const theta = singleQubitRotationAngle(op.name, op.params, project.variables);
+              const effRabi = op.rabi_mhz ?? inheritedRabi;
+              const usesRabiDur =
+                op.duration_ns == null &&
+                (op.rabi_mhz != null ||
+                  qObj?.rabi_mhz != null ||
+                  activeHw.drive_mode === 'fixed_rabi');
+              const derivedDur = usesRabiDur
+                ? rabiPulseDurationNs(
+                    theta,
+                    effRabi,
+                    activeHw.pulse_shape,
+                    activeHw.rise_ns ?? 0,
+                    activeHw.fall_ns ?? 0
+                  )
+                : op.duration_ns ?? defaultDur;
+              const effPeakRabi =
+                op.duration_ns != null
+                  ? impliedRabiMhz(
+                      theta,
+                      op.duration_ns,
+                      activeHw.pulse_shape,
+                      activeHw.rise_ns ?? 0,
+                      activeHw.fall_ns ?? 0
+                    )
+                  : effRabi;
+
+              return (
+                <div className="p-2.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] font-medium">拉比频率 Ω_R/2π</span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={0.01}
+                        step={0.25}
+                        placeholder={`继承 ${inheritedRabi}`}
+                        value={op.rabi_mhz ?? ''}
+                        onChange={(e) =>
+                          onUpdateOp(op.id, {
+                            rabi_mhz:
+                              e.target.value === '' ? null : Math.max(0.01, Number(e.target.value)),
+                            ...(e.target.value !== '' ? { duration_ns: null } : {}),
+                          })
+                        }
+                        className={`w-22 px-2 py-0.5 rounded-[2px] border text-right font-mono-num text-[12px] outline-none focus:border-[var(--accent)] ${
+                          op.rabi_mhz != null
+                            ? 'bg-amber-500/12 border-amber-500/60 text-amber-400 font-semibold'
+                            : 'bg-[var(--bg-panel)] border-[var(--border-input)]'
+                        }`}
+                      />
+                      <span className="text-[11px] font-mono-num text-[var(--text-secondary)]">MHz</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-[10.5px] font-mono-num text-[var(--text-secondary)]">
+                    <span>实际脉冲宽度: {derivedDur.toFixed(1)} ns</span>
+                    <span>峰值 Ω_R: {effPeakRabi.toFixed(2)} MHz</span>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="flex items-center justify-between">
-              <span className="text-[12.5px]">时长</span>
+              <span className="text-[12.5px]">强制门时长覆盖</span>
               <div className="flex items-center gap-1">
                 <input
                   type="number"
@@ -1535,6 +1693,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <button
                 onClick={() =>
                   onUpdateQubit(q.id, {
+                    rabi_mhz: null,
                     t1_us: null,
                     t2_us: null,
                     depol_1q: null,
@@ -1550,13 +1709,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </div>
             {(
               [
+                ['拉比频率 Ω_R (MHz)', 'rabi_mhz', activeHw.rabi_mhz ?? 2.5],
                 ['T1 (μs)', 't1_us', activeHw.t1_us],
                 ['T2* (μs)', 't2_us', activeHw.t2_us],
                 ['1Q 退极化', 'depol_1q', activeHw.depol_1q],
                 ['读出误差', 'readout_err', activeHw.readout_err],
               ] as const
             ).map(([label, field, inherited]) => {
-              const val = q[field];
+              const val = q[field] ?? null;
               const isOverridden = val !== null;
               return (
                 <div key={field} className="flex items-center justify-between gap-2">
@@ -1686,15 +1846,23 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
   return (
     <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
-      <div>
-        <div className="text-[14px] font-semibold text-[var(--text-primary)]">{hw.name}</div>
-        <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-          {hw.platform === 'neutral_atom'
-            ? '光镊原子阵列 · 拉曼 RXY + 里德堡阻塞 CZ'
-            : hw.platform === 'trapped_ion'
-            ? '线性保罗阱 · 赤道旋转 RXY + Mølmer-Sørensen'
-            : '超导 Transmon · Virtual-Z + 微波脉冲'}
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-[14px] font-semibold text-[var(--text-primary)]">{hw.name}</div>
+          <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+            Ω_R = {hw.rabi_mhz ?? 2.5} MHz ·{' '}
+            {(hw.drive_mode || 'fixed_duration') === 'fixed_rabi' ? '固定拉比频率' : '固定门时长'}
+          </div>
         </div>
+        {onOpenDeviceWorkspace && (
+          <button
+            type="button"
+            onClick={onOpenDeviceWorkspace}
+            className="px-2 py-1 rounded-[3px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[11px] font-semibold shrink-0 cursor-pointer"
+          >
+            器件工作区 →
+          </button>
+        )}
       </div>
 
       {/* Topology & Neutral Atom 2D Coordinates Map */}
@@ -1764,12 +1932,47 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           >
             <option value="cosine">余弦脉冲 (Hann)</option>
             <option value="gaussian">高斯脉冲 (Gaussian)</option>
-            <option value="rectangular">矩形脉冲 (Rect)</option>
+            <option value="rectangular">平顶余弦边沿 (Flat-Top)</option>
+            <option value="trapezoid">平顶线性梯形 (Trapezoid)</option>
           </select>
         </div>
         <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+              驱动模式
+            </label>
+            <select
+              value={hw.drive_mode || 'fixed_duration'}
+              onChange={(e) =>
+                onUpdateHardware(hw.id, {
+                  drive_mode: e.target.value as HardwareProfileModel['drive_mode'],
+                })
+              }
+              className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[11.5px] outline-none"
+            >
+              <option value="fixed_rabi">固定 Ω_R</option>
+              <option value="fixed_duration">固定 t_1q</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+              拉比 Ω_R (MHz)
+            </label>
+            <input
+              type="number"
+              step={0.25}
+              min={0.01}
+              value={hw.rabi_mhz ?? 2.5}
+              onChange={(e) =>
+                onUpdateHardware(hw.id, { rabi_mhz: Math.max(0.01, Number(e.target.value)) })
+              }
+              className="w-full px-2 py-1 rounded-md bg-[var(--bg-subtle)] border border-[var(--border-input)] font-mono-num text-[12px] outline-none focus:border-[#0A84FF]"
+            />
+          </div>
           {(
             [
+              ['上升沿 (ns)', 'rise_ns', 1],
+              ['下降沿 (ns)', 'fall_ns', 1],
               ['T1 (μs)', 't1_us', 10],
               ['T2* (μs)', 't2_us', 10],
               ['1Q 时长 (ns)', 't_1q_ns', 10],

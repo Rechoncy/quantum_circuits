@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
+  Check,
   CheckCircle2,
   Download,
   FileText,
@@ -12,6 +13,9 @@ import {
 } from 'lucide-react';
 import type {
   AllXyBenchmarkResponse,
+  BasicCalibrationResponse,
+  BenchmarkProtocol,
+  CalibrationWritebackItem,
   CircuitOpModel,
   GateBenchmarkResponse,
   GstBenchmarkResponse,
@@ -22,12 +26,13 @@ import { PlotlyChart } from './PlotlyChart';
 import { downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface BenchmarkWorkspaceProps {
-  activeProtocol: 'rb' | 'allxy' | 'gst' | 'xeb';
-  onSwitchProtocol: (p: 'rb' | 'allxy' | 'gst' | 'xeb') => void;
+  activeProtocol: BenchmarkProtocol;
+  onSwitchProtocol: (p: BenchmarkProtocol) => void;
   response: GateBenchmarkResponse | null;
   darkMode: boolean;
   onRunBenchmark: () => void;
   onLoadCircuitToDesign: (ops: CircuitOpModel[], label: string) => void;
+  onApplyWriteback?: (item: CalibrationWritebackItem) => void;
   isBusy: boolean;
 }
 
@@ -38,10 +43,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
   darkMode,
   onRunBenchmark,
   onLoadCircuitToDesign,
+  onApplyWriteback,
   isBusy,
 }) => {
   const [allxyUnit, setAllxyUnit] = useState<'z' | 'p1'>('z');
   const [selectedGstGateIdx, setSelectedGstGateIdx] = useState(1); // default Gx90
+  const [appliedWbKey, setAppliedWbKey] = useState<string | null>(null);
 
   const textColor = darkMode ? '#E6EDF3' : '#0F172A';
   const mutedColor = darkMode ? '#8B96A5' : '#475569';
@@ -103,17 +110,26 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         ].join(',')
       );
       downloadTextFile(`gst_${r.target_label}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
-    } else {
+    } else if (matchingResp.protocol === 'xeb') {
       const r = matchingResp;
       const header = 'cycle_depth_m,mean_xeb,stderr_xeb';
       const rows = r.lengths.map((m, i) => [m, r.mean_xeb[i], r.std_xeb[i]].join(','));
       downloadTextFile(`xeb_${r.entangler_name}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
+    } else {
+      const r = matchingResp;
+      const header = 'x_ns,measured_p1,ideal_p1';
+      const rows = r.x.map((xv, i) => [xv, r.measured[i], r.ideal[i]].join(','));
+      downloadTextFile(
+        `${r.protocol}_${r.target_label}.csv`,
+        '\uFEFF' + [header, ...rows].join('\n'),
+        'text/csv;charset=utf-8'
+      );
     }
   };
 
   const handleExportReport = () => {
     if (!matchingResp) return;
-    let md = `# Quantum Studio EDA 量子门标定报告 (${matchingResp.protocol.toUpperCase()})\n\n`;
+    let md = `# Quantum Studio EDA 量子比特与门表征报告 (${matchingResp.protocol.toUpperCase()})\n\n`;
     md += `- **硬件平台**: ${matchingResp.hardware_name}\n`;
     md += `- **标定对象**: ${matchingResp.target_label}\n\n`;
     if (matchingResp.protocol === 'rb') {
@@ -141,27 +157,64 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
       matchingResp.gates.forEach((g) => {
         md += `| ${g.gate_id} | ${g.label} | ${(g.avg_gate_fidelity * 100).toFixed(3)}% | ${(g.process_fidelity * 100).toFixed(3)}% | ${g.diamond_distance.toFixed(5)} | ${g.unitarity.toFixed(5)} | ${(g.coherent_ratio * 100).toFixed(1)}% |\n`;
       });
-    } else {
+    } else if (matchingResp.protocol === 'xeb') {
       md += `## 双比特线性交叉熵基准 (2Q Linear XEB)\n`;
       md += `- 待测纠缠门: **${matchingResp.entangler_name}**\n`;
       md += `- 单周期极化度 $f_{\\text{cycle}}$: **${(matchingResp.cycle_polarization * 100).toFixed(4)}%**\n`;
       md += `- 单周期泡利错误率 $e_{\\text{cycle}}$: **${(matchingResp.cycle_pauli_error * 100).toFixed(4)}%**\n`;
       md += `- 剥离单比特层后纠缠门保真度: **${(matchingResp.entangler_fidelity * 100).toFixed(4)}%**\n`;
+    } else {
+      md += `## 基础物理标定拟合结论\n`;
+      md += `- ${matchingResp.summary}\n\n`;
+      matchingResp.params.forEach((p) => {
+        md += `- **${p.label}**: ${p.value} ${p.unit}\n`;
+      });
     }
     downloadTextFile(`calibration_report_${matchingResp.protocol}.md`, md, 'text/markdown;charset=utf-8');
   };
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-[var(--bg-app)] overflow-hidden">
-      {/* Top Protocol Tab Bar (Concise labels so all 3 tabs + action buttons always fit without scrolling!) */}
+      {/* Level-2 Sub-Tab Bar: Basic Calibrations (Rabi / Ramsey / T1) | Gate Benchmarks (RB / AllXY / GST / XEB) */}
       <div className="h-9 px-3 bg-[var(--bg-panel)] border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0 select-none">
-        <div className="flex items-center gap-3.5 h-full overflow-x-auto min-w-0">
+        <div className="flex items-center gap-3 h-full overflow-x-auto min-w-0">
+          <span className="text-[10px] font-mono-num uppercase text-[var(--text-tertiary)] font-bold shrink-0">
+            基础标定
+          </span>
+          {(
+            [
+              { id: 'rabi', label: 'Rabi 拉比振荡' },
+              { id: 'ramsey', label: 'Ramsey 相干条纹' },
+              { id: 't1', label: 'T1 能量弛豫' },
+            ] as const
+          ).map((t) => {
+            const active = activeProtocol === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => onSwitchProtocol(t.id)}
+                className={`h-full text-[12px] border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'border-[var(--accent)] text-[var(--text-primary)] font-semibold'
+                    : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+
+          <div className="h-4 w-[1px] bg-[var(--border-hairline)] shrink-0 mx-0.5" />
+
+          <span className="text-[10px] font-mono-num uppercase text-[var(--text-tertiary)] font-bold shrink-0">
+            门基准层析
+          </span>
           {(
             [
               { id: 'rb', label: 'RB 随机基准' },
               { id: 'allxy', label: 'AllXY 脉冲诊断' },
               { id: 'gst', label: 'GST 门集层析' },
-              { id: 'xeb', label: 'XEB 交叉熵基准' },
+              { id: 'xeb', label: 'XEB 交叉熵' },
             ] as const
           ).map((t) => {
             const active = activeProtocol === t.id;
@@ -206,7 +259,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
             className="h-6 px-2.5 rounded-[3px] studio-btn-primary text-[11px] font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-60"
           >
             <Play className="w-3 h-3 fill-current" />
-            运行标定
+            运行实验
           </button>
         </div>
       </div>
@@ -219,7 +272,13 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               <Gauge className="w-5 h-5" />
             </div>
             <div className="text-[14px] font-bold text-[var(--text-primary)]">
-              {activeProtocol === 'rb'
+              {activeProtocol === 'rabi'
+                ? 'Rabi 时间域拉比振荡标定 (拟合实测 Ω_R 与 π / π/2 脉冲宽度)'
+                : activeProtocol === 'ramsey'
+                ? 'Ramsey 自由演化干涉条纹标定 (拟合相干时间 T2* 与频率失谐 Δ)'
+                : activeProtocol === 't1'
+                ? 'T1 能量弛豫衰减标定 (π 激发后测量自发辐射寿命 T1)'
+                : activeProtocol === 'rb'
                 ? 'Clifford 随机基准与交织门保真度标定 (RB & Interleaved RB)'
                 : activeProtocol === 'allxy'
                 ? 'AllXY 21 序列相干过旋转 / 失谐 / 正交偏斜脉冲诊断'
@@ -228,7 +287,13 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 : '双比特线性交叉熵基准 Linear XEB (支持 √iSWAP 等非 Clifford 原生纠缠门)'}
             </div>
             <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
-              {activeProtocol === 'rb'
+              {activeProtocol === 'rabi'
+                ? '扫描共振驱动脉冲时长 t，通过阻尼余弦最小二乘拟合精确提取真实拉比频率 Ω_R 及当前包络下的 π / π/2 脉冲时长，支持一键写回器件或逐比特参数表。'
+                : activeProtocol === 'ramsey'
+                ? '执行 π/2 − τ − π/2 序列并引入人工失谐条纹，同时拟合纯退相干包络 T2* 与本振频率偏移 Δ。'
+                : activeProtocol === 't1'
+                ? '执行 π 翻转脉冲制备 |1⟩ 态并扫描自由等待时间 τ，拟合指数弛豫曲线提取能量弛豫寿命 T1。'
+                : activeProtocol === 'rb'
                 ? '在右侧检查器选择 1Q (C₁=24) 或 2Q (C₂=11,520) Clifford 序列深度及待测交织门（如 SX、CZ、CNOT），通过指数衰减拟合剥离 SPAM 读出误差，精确提取单门平均失真度与相干极限。'
                 : activeProtocol === 'allxy'
                 ? '依次执行 21 组 {I, X, Y, X90, Y90} 双脉冲组合，对照 (+1, 0, -1) 理想三阶平台自动鉴别拉比幅度过/欠旋转锯齿、本振失谐分裂与 T1/T2 退相干压缩。'
@@ -242,11 +307,208 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               className="mx-auto h-8 px-4 rounded-[3px] studio-btn-primary text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              立即启动 {activeProtocol.toUpperCase()} 门标定实验
+              立即启动 {activeProtocol.toUpperCase()} 表征实验
             </button>
           </div>
         </div>
       )}
+
+      {/* =================================================================== */}
+      {/* VIEW 0: BASIC CALIBRATIONS (RABI / RAMSEY / T1 + WRITE-BACK)        */}
+      {/* =================================================================== */}
+      {matchingResp &&
+        (matchingResp.protocol === 'rabi' ||
+          matchingResp.protocol === 'ramsey' ||
+          matchingResp.protocol === 't1') &&
+        (() => {
+          const cal: BasicCalibrationResponse = matchingResp;
+          const topKpis = cal.params.slice(0, 4);
+          const tPiParam = cal.params.find((p) => p.key === 't_pi');
+          const rabiShapes =
+            cal.protocol === 'rabi' && tPiParam && Number.isFinite(tPiParam.value)
+              ? [
+                  {
+                    type: 'line',
+                    x0: 0.5 * tPiParam.value,
+                    x1: 0.5 * tPiParam.value,
+                    y0: -0.02,
+                    y1: 1.04,
+                    line: { color: '#10B981', width: 1.3, dash: 'dot' },
+                  },
+                  {
+                    type: 'line',
+                    x0: tPiParam.value,
+                    x1: tPiParam.value,
+                    y0: -0.02,
+                    y1: 1.04,
+                    line: { color: '#F59E0B', width: 1.4, dash: 'dash' },
+                  },
+                ]
+              : [];
+
+          return (
+            <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
+              {/* Summary + One-Click Write-Back Banner */}
+              <div className="studio-card px-3.5 py-2.5 border-l-2 border-l-[var(--accent)] flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[12px] text-[var(--text-primary)] font-medium">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                  <span>{cal.summary}</span>
+                </div>
+                {onApplyWriteback && cal.writeback.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {cal.writeback.map((wb, idx) => {
+                      const wbKey = `${wb.scope}_${wb.qubit ?? 'hw'}_${wb.field}_${wb.value}`;
+                      const done = appliedWbKey === wbKey;
+                      return (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => {
+                            onApplyWriteback(wb);
+                            setAppliedWbKey(wbKey);
+                          }}
+                          className={`px-2.5 py-1 rounded-[3px] text-[11px] font-mono-num font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                            done
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-[var(--accent-soft)] hover:bg-[var(--accent)] hover:text-white text-[var(--accent)] border border-[var(--accent)]/40'
+                          }`}
+                        >
+                          {done ? <Check className="w-3 h-3" /> : <ArrowRightLeft className="w-3 h-3" />}
+                          <span>{done ? `已写回: ${wb.label}` : wb.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Top KPI Strip */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+                {topKpis.map((p) => (
+                  <div key={p.key} className="studio-kpi p-2.5 flex flex-col justify-between">
+                    <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                      {p.label}
+                    </div>
+                    <div className="text-[18px] font-bold font-mono-num text-[var(--accent)] mt-0.5 leading-tight">
+                      {Number.isFinite(p.value) ? p.value : '—'}{' '}
+                      <span className="text-[11px] font-normal text-[var(--text-secondary)]">
+                        {p.unit}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Curve Plot + Fitted Parameter Table */}
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+                <div className="xl:col-span-8 studio-card flex flex-col overflow-hidden h-[340px]">
+                  <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                      {cal.protocol === 'rabi'
+                        ? `Rabi 拉比振荡拟合曲线 (${cal.target_label})`
+                        : cal.protocol === 'ramsey'
+                        ? `Ramsey 自由进动干涉条纹 (${cal.target_label})`
+                        : `T1 能量弛豫指数衰减曲线 (${cal.target_label})`}
+                    </span>
+                    <div className="flex items-center gap-3 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-[#2F81F7]" />
+                        实测采样点
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-[2px] bg-[#10B981]" />
+                        最小二乘拟合
+                      </span>
+                      {cal.protocol === 'rabi' && (
+                        <span className="text-amber-500">虚线: t_π/2 与 t_π</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex-1 min-h-0 px-1.5 pb-1">
+                    <PlotlyChart
+                      data={[
+                        {
+                          x: cal.x,
+                          y: cal.ideal,
+                          type: 'scatter',
+                          mode: 'lines',
+                          name: '无读出混淆真值',
+                          line: { color: 'rgba(148, 163, 184, 0.5)', width: 1.4, dash: 'dot' },
+                        },
+                        {
+                          x: cal.fit_x,
+                          y: cal.fit_y,
+                          type: 'scatter',
+                          mode: 'lines',
+                          name: '拟合模型曲线',
+                          line: { color: '#10B981', width: 2.4 },
+                        },
+                        {
+                          x: cal.x,
+                          y: cal.measured,
+                          type: 'scatter',
+                          mode: 'markers',
+                          name: '实测 P(|1⟩)',
+                          marker: { color: '#2F81F7', size: 6.5 },
+                          hovertemplate: 't=%{x:.1f} ns · P(|1⟩)=%{y:.4f}<extra></extra>',
+                        },
+                      ]}
+                      layout={{
+                        paper_bgcolor: plotBg,
+                        plot_bgcolor: plotBg,
+                        showlegend: false,
+                        hovermode: 'closest',
+                        margin: { l: 52, r: 18, t: 14, b: 40 },
+                        xaxis: {
+                          title: { text: cal.x_label, font: { size: 11, color: mutedColor } },
+                          gridcolor: gridColor,
+                          tickfont: { color: mutedColor, size: 10.5 },
+                        },
+                        yaxis: {
+                          title: { text: cal.y_label, font: { size: 11, color: mutedColor } },
+                          range: [-0.04, 1.06],
+                          gridcolor: gridColor,
+                          tickfont: { color: mutedColor, size: 10.5 },
+                        },
+                        shapes: rabiShapes,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="xl:col-span-4 studio-card flex flex-col overflow-hidden max-h-[340px]">
+                  <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                    <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                      标定参数拟合明细表
+                    </span>
+                    <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
+                      {cal.shots > 0 ? `${cal.shots} Shots` : '精确主方程'}
+                    </span>
+                  </div>
+                  <div className="flex-1 overflow-auto">
+                    <table className="w-full text-[11.5px] font-mono-num border-collapse">
+                      <tbody className="divide-y divide-[var(--border-hairline)]">
+                        {cal.params.map((p) => (
+                          <tr key={p.key} className="hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
+                            <td className="py-2 px-3 font-sans text-[var(--text-secondary)]">
+                              {p.label}
+                            </td>
+                            <td className="py-2 px-3 text-right font-semibold text-[var(--text-primary)]">
+                              {Number.isFinite(p.value) ? p.value : '—'}{' '}
+                              <span className="text-[10.5px] font-normal text-[var(--text-secondary)]">
+                                {p.unit}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {/* =================================================================== */}
       {/* VIEW 1: RANDOMIZED BENCHMARKING (1Q / 2Q RB + INTERLEAVED RB)       */}

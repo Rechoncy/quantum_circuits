@@ -85,6 +85,11 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             readout_err=0.008,
             topology_mode="rydberg_radius",
             blockade_radius_um=6.5,
+            pulse_shape="cosine",
+            drive_mode="fixed_duration",
+            rabi_mhz=2.5,
+            rise_ns=20.0,
+            fall_ns=20.0,
         ),
         HardwareProfileModel(
             id="hw_sc_cz",
@@ -99,6 +104,11 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             zz_khz=50.0,
             readout_err=0.01,
             topology_mode="all",
+            pulse_shape="cosine",
+            drive_mode="fixed_duration",
+            rabi_mhz=50.0,
+            rise_ns=2.0,
+            fall_ns=2.0,
         ),
         HardwareProfileModel(
             id="hw_sc_iswap",
@@ -113,6 +123,11 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             zz_khz=35.0,
             readout_err=0.01,
             topology_mode="all",
+            pulse_shape="cosine",
+            drive_mode="fixed_duration",
+            rabi_mhz=50.0,
+            rise_ns=2.0,
+            fall_ns=2.0,
         ),
         HardwareProfileModel(
             id="hw_trapped_ion",
@@ -127,6 +142,11 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             zz_khz=0.1,
             readout_err=0.003,
             topology_mode="all",
+            pulse_shape="cosine",
+            drive_mode="fixed_duration",
+            rabi_mhz=0.5,
+            rise_ns=80.0,
+            fall_ns=80.0,
         ),
     ]
 
@@ -557,6 +577,106 @@ def get_active_hardware_profile(project: ProjectModel) -> HardwareProfileModel:
     return _default_hardware_profiles()[0]
 
 
+# ---------------------------------------------------------------------------
+# Single-qubit drive physics: Rabi frequency <-> pulse duration
+# ---------------------------------------------------------------------------
+
+_VIRTUAL_1Q_GATES = {"RZ", "Z", "S", "SDG", "T", "TDG", "P", "PHASE", "I", "ID"}
+
+
+def envelope_area_factor(pulse_shape: str, duration_ns: float, rise_ns: float = 0.0, fall_ns: float = 0.0) -> float:
+    """
+    Ratio kappa = (integral of peak-normalized envelope) / duration.
+    A pulse with peak Rabi frequency Omega (MHz) and length T (ns) rotates by
+        theta = 2*pi * Omega * 1e-3 * kappa * T.
+    """
+    shape = (pulse_shape or "cosine").lower()
+    if shape in ("rectangular", "trapezoid"):
+        if duration_ns <= 0:
+            return 1.0
+        r = max(0.0, rise_ns)
+        f = max(0.0, fall_ns)
+        if r + f > duration_ns:
+            s = duration_ns / (r + f)
+            r, f = r * s, f * s
+        return max(1e-6, (duration_ns - 0.5 * (r + f)) / duration_ns)
+    if shape == "gaussian":
+        sigma_frac = 1.0 / 4.5
+        mid = 0.5
+        edge = math.exp(-0.5 * (mid / sigma_frac) ** 2)
+        area = math.sqrt(2.0 * math.pi) * sigma_frac * math.erf(mid / (math.sqrt(2.0) * sigma_frac)) - edge
+        return area / (1.0 - edge)
+    return 0.5  # Hann / raised cosine
+
+
+def rabi_pulse_duration_ns(
+    theta: float, rabi_mhz: float, pulse_shape: str, rise_ns: float = 0.0, fall_ns: float = 0.0
+) -> float:
+    """Pulse length required to rotate by |theta| with peak Rabi frequency rabi_mhz."""
+    theta = abs(float(theta))
+    if theta < 1e-9 or rabi_mhz <= 0:
+        return 0.0
+    w = 2.0 * math.pi * rabi_mhz * 1e-3  # rad / ns at peak
+    if (pulse_shape or "").lower() in ("rectangular", "trapezoid"):
+        return theta / w + 0.5 * (max(0.0, rise_ns) + max(0.0, fall_ns))
+    return theta / (w * envelope_area_factor(pulse_shape, 1.0))
+
+
+def implied_rabi_mhz(theta: float, duration_ns: float, pulse_shape: str, rise_ns: float = 0.0, fall_ns: float = 0.0) -> float:
+    """Peak Rabi frequency needed to rotate by theta within duration_ns (fixed-duration mode)."""
+    if duration_ns <= 0:
+        return 0.0
+    kappa = envelope_area_factor(pulse_shape, duration_ns, rise_ns, fall_ns)
+    return abs(theta) / (2.0 * math.pi * 1e-3 * kappa * duration_ns)
+
+
+def single_qubit_rotation_angle(name: str, params: Sequence[float]) -> float:
+    """Physical drive rotation angle for a single-qubit gate (virtual-Z gates return 0)."""
+    from ..core.gates import gate_unitary
+
+    uname = name.upper()
+    if uname in _VIRTUAL_1Q_GATES:
+        return 0.0
+    if uname == "H":
+        return 0.5 * math.pi  # Y90 pulse + virtual Z
+    if uname in ("RX", "RY") and params:
+        return abs(float(params[0]))
+    if uname == "RXY" and params:
+        return abs(float(params[0]))
+    try:
+        u = gate_unitary(uname, tuple(params))
+        if u.shape != (2, 2):
+            return math.pi
+        c = min(1.0, abs(np.trace(u)) / 2.0)
+        return 2.0 * math.acos(c)
+    except Exception:
+        return math.pi
+
+
+def resolve_1q_drive_duration(
+    project: ProjectModel,
+    hp: HardwareProfileModel,
+    gate_name: str,
+    qubit: int,
+    params: Sequence[float],
+    op_rabi_mhz: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Return the physical duration (ns) for a single-qubit gate under the Rabi-frequency drive model,
+    or None to fall back to the hardware default (fixed-duration mode without any override).
+    Inheritance: gate override > qubit override > hardware default.
+    """
+    q_rabi = project.qubits[qubit].rabi_mhz if 0 <= qubit < len(project.qubits) else None
+    use_rabi = hp.drive_mode == "fixed_rabi" or op_rabi_mhz is not None or q_rabi is not None
+    if not use_rabi:
+        return None
+    theta = single_qubit_rotation_angle(gate_name, params)
+    if theta < 1e-9:
+        return 0.0
+    omega = op_rabi_mhz if op_rabi_mhz is not None else (q_rabi if q_rabi is not None else hp.rabi_mhz)
+    return rabi_pulse_duration_ns(theta, float(omega), hp.pulse_shape, hp.rise_ns, hp.fall_ns)
+
+
 def build_hardware_model(
     project: ProjectModel,
     preferred_native_2q: Optional[str] = None,
@@ -614,6 +734,8 @@ def build_hardware_model(
 
     hw.name = hp.name
     hw.pulse_shape = hp.pulse_shape
+    hw.rise_ns = float(hp.rise_ns)
+    hw.fall_ns = float(hp.fall_ns)
 
     # Apply per-qubit overrides from Quantum Register
     for idx, qspec in enumerate(project.qubits):
@@ -690,6 +812,8 @@ def compile_project_circuit(
     }
 
     circ = QuantumCircuit(num_qubits=n, name=project.name)
+    drive_hp = get_active_hardware_profile(project)
+    op_rabi_ctx: Dict[str, Optional[float]] = {"rabi": None}
     # Sort operations deterministically by (step, index)
     ordered_ops = [
         op for _, op in sorted(enumerate(project.operations), key=lambda pair: (pair[1].step, pair[0]))
@@ -804,17 +928,24 @@ def compile_project_circuit(
                         custom_hamiltonian=direct_h,
                     )
             else:
+                eff_dur = g_dur
+                if eff_dur is None and len(g_qubits) == 1:
+                    eff_dur = resolve_1q_drive_duration(
+                        project, drive_hp, g_uname, g_qubits[0], g_params, op_rabi_ctx["rabi"]
+                    )
                 circ.add_gate(
                     name=g_uname,
                     qubits=g_qubits,
                     params=g_params,
-                    duration_ns=g_dur,
+                    duration_ns=eff_dur,
                     noise_after=g_noise,
                     layer=g_layer,
                     skip_hw_noise=g_skip_hw,
                 )
 
+        op_rabi_ctx["rabi"] = op.rabi_mhz
         _emit_gate(uname, valid_q, p_vals, op.duration_ns, noise_after, op.step, skip_hw)
+        op_rabi_ctx["rabi"] = None
 
     return circ
 
@@ -2006,11 +2137,23 @@ def execute_project_sweep(req: SweepRequest) -> Dict[str, Any]:
             idx, xv = args
             curr_vars = dict(project.variables)
             curr_hw = base_hw
-            if req.param_x.startswith("hw:"):
+            curr_proj = project
+            if req.param_x in ("hw:rabi_mhz", "hw:rise_ns", "hw:fall_ns"):
+                curr_proj = project.model_copy(deep=True)
+                for hp_it in curr_proj.hardware_profiles:
+                    if req.param_x == "hw:rabi_mhz":
+                        hp_it.drive_mode = "fixed_rabi"
+                        hp_it.rabi_mhz = max(0.01, float(xv))
+                    elif req.param_x == "hw:rise_ns":
+                        hp_it.rise_ns = max(0.0, float(xv))
+                    elif req.param_x == "hw:fall_ns":
+                        hp_it.fall_ns = max(0.0, float(xv))
+                curr_hw = build_hardware_model(curr_proj)
+            elif req.param_x.startswith("hw:"):
                 curr_hw = apply_hardware_param(base_hw, req.param_x, float(xv))
             else:
                 curr_vars[req.param_x] = float(xv)
-            circ = compile_project_circuit(project, variables_override=curr_vars)
+            circ = compile_project_circuit(curr_proj, variables_override=curr_vars)
             local_solver = QuantumSolver(hardware=curr_hw, intra_gate_steps=8)
             res = local_solver.solve(
                 circ,

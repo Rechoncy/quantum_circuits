@@ -207,6 +207,7 @@ export const LeftNavigator: React.FC<LeftNavigatorProps> = ({
                 .map(({ q, idx }) => {
                   const isSelected = selection.type === 'qubit' && selection.qubitId === q.id;
                   const hasOverride =
+                    q.rabi_mhz != null ||
                     q.t1_us !== null ||
                     q.t2_us !== null ||
                     q.depol_1q !== null ||

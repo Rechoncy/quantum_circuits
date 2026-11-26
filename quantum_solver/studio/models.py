@@ -26,6 +26,7 @@ class QubitSpec(BaseModel):
     freq_ghz: Optional[float] = None
     depol_1q: Optional[float] = None
     readout_err: Optional[float] = None
+    rabi_mhz: Optional[float] = None  # Per-qubit Rabi frequency override (MHz)
     # 2D spatial position (in micrometers, used for Neutral Atom Rydberg blockade map & topology)
     pos_x: float = 0.0
     pos_y: float = 0.0
@@ -44,6 +45,7 @@ class CircuitOpModel(BaseModel):
     duration_ns: Optional[float] = None
     noise_mode: Literal["inherit", "none", "custom"] = "inherit"
     custom_depol: Optional[float] = None
+    rabi_mhz: Optional[float] = None  # Per-gate Rabi frequency override (single-qubit drive gates)
 
 
 class CustomGateDef(BaseModel):
@@ -69,7 +71,7 @@ class CustomGateDef(BaseModel):
     # Mode 3: Pauli-string Hamiltonian + pulse
     hamiltonian_str: Optional[str] = None
     hamiltonian_scale: float = 1.0  # angle or strength factor (rad)
-    pulse_shape: Literal["cosine", "gaussian", "rectangular"] = "cosine"
+    pulse_shape: Literal["cosine", "gaussian", "rectangular", "trapezoid"] = "cosine"
     # Mode 4: composite macro
     sub_operations: List[CircuitOpModel] = Field(default_factory=list)
     # Hardware & visual metadata
@@ -103,7 +105,15 @@ class HardwareProfileModel(BaseModel):
     topology_mode: Literal["all", "linear", "custom", "rydberg_radius"] = "rydberg_radius"
     edges: List[Tuple[int, int]] = Field(default_factory=list)
     blockade_radius_um: float = 6.5  # Neutral atom Rydberg blockade radius in μm
-    pulse_shape: Literal["cosine", "gaussian", "rectangular"] = "cosine"
+    pulse_shape: Literal["cosine", "gaussian", "rectangular", "trapezoid"] = "cosine"
+    # Single-qubit drive model
+    #   fixed_duration: every physical 1Q pulse lasts t_1q_ns, amplitude scales with rotation angle
+    #   fixed_rabi:     peak Rabi frequency fixed at rabi_mhz, pulse length scales with rotation angle
+    drive_mode: Literal["fixed_duration", "fixed_rabi"] = "fixed_duration"
+    rabi_mhz: float = 1.25
+    # Rise / fall edges of the rectangular (flat-top) envelope, ns
+    rise_ns: float = 0.0
+    fall_ns: float = 0.0
 
 
 class SimulationSettingsModel(BaseModel):
@@ -221,7 +231,11 @@ class GateBenchmarkRequest(BaseModel):
     """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST, XEB)."""
 
     project: ProjectModel
-    protocol: Literal["rb", "allxy", "gst", "xeb"] = "rb"
+    protocol: Literal["rb", "allxy", "gst", "xeb", "rabi", "ramsey", "t1"] = "rb"
+    # Basic calibration experiments (Rabi / Ramsey / T1)
+    cal_points: int = 61
+    cal_max_ns: Optional[float] = None
+    ramsey_detuning_mhz: float = 0.5
     target_qubit: int = 0
     second_qubit: int = 1
     rb_num_qubits: Literal[1, 2] = 1
