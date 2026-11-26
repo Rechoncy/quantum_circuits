@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
   Check,
   CheckCircle2,
+  CircuitBoard,
+  Code2,
   Download,
   FileText,
   Gauge,
@@ -16,16 +18,229 @@ import type {
   BasicCalibrationResponse,
   BenchmarkProtocol,
   CalibrationWritebackItem,
+  CharacterizationCircuitSample,
   CircuitOpModel,
   GateBenchmarkResponse,
   GstBenchmarkResponse,
+  ProjectModel,
   RbBenchmarkResponse,
   XebBenchmarkResponse,
 } from '../types';
+import { CircuitCanvas } from './CircuitCanvas';
 import { PlotlyChart } from './PlotlyChart';
-import { downloadTextFile } from '../utils/exportCircuitSvg';
+import { buildCircuitSvg, buildQuantikzLatex, downloadTextFile } from '../utils/exportCircuitSvg';
+
+interface CharacterizationCircuitPanelProps {
+  project: ProjectModel;
+  protocolCode: string;
+  title: string;
+  samples: CharacterizationCircuitSample[];
+  selectedSampleId?: string | null;
+  onSelectSample?: (sample: CharacterizationCircuitSample) => void;
+  onLoadCircuitToDesign: (ops: CircuitOpModel[], label: string) => void;
+}
+
+const CharacterizationCircuitPanel: React.FC<CharacterizationCircuitPanelProps> = ({
+  project,
+  protocolCode,
+  title,
+  samples,
+  selectedSampleId,
+  onSelectSample,
+  onLoadCircuitToDesign,
+}) => {
+  const [localId, setLocalId] = useState<string>('');
+
+  const activeSample = useMemo(() => {
+    if (samples.length === 0) return null;
+    if (selectedSampleId) {
+      const ext = samples.find((s) => s.id === selectedSampleId);
+      if (ext) return ext;
+    }
+    if (localId) {
+      const loc = samples.find((s) => s.id === localId);
+      if (loc) return loc;
+    }
+    return samples[0];
+  }, [samples, selectedSampleId, localId]);
+
+  const { focusedProject, remappedOps, usedQubitNames, gateCount, depthCols } = useMemo(() => {
+    if (!activeSample) {
+      return {
+        focusedProject: project,
+        remappedOps: [] as CircuitOpModel[],
+        usedQubitNames: 'q0',
+        gateCount: 0,
+        depthCols: 1,
+      };
+    }
+    const rawSet = new Set<number>();
+    activeSample.operations.forEach((op) => {
+      op.qubits.forEach((q) => {
+        if (q >= 0 && q < project.qubits.length) rawSet.add(q);
+      });
+    });
+    if (rawSet.size === 0 && project.qubits.length > 0) {
+      rawSet.add(0);
+    }
+    const sortedQ = Array.from(rawSet).sort((a, b) => a - b);
+    const qIndexMap = new Map<number, number>();
+    const subQubits = sortedQ.map((origIdx, compactIdx) => {
+      qIndexMap.set(origIdx, compactIdx);
+      const spec = project.qubits[origIdx];
+      return {
+        ...(spec || {
+          id: compactIdx,
+          name: `q${origIdx}`,
+          color: '#2F81F7',
+          init_state: '|0>' as const,
+          init_theta: 0,
+          init_phi: 0,
+          t1_us: null,
+          t2_us: null,
+          freq_ghz: null,
+          depol_1q: null,
+          readout_err: null,
+          pos_x: 0,
+          pos_y: 0,
+        }),
+        id: compactIdx,
+      };
+    });
+
+    const mapped = activeSample.operations.map((op) => ({
+      ...op,
+      qubits: op.qubits.map((q) => qIndexMap.get(q) ?? 0),
+    }));
+    const gCnt = mapped.filter((o) => o.kind === 'gate').length;
+    const maxS = mapped.reduce((m, o) => Math.max(m, o.step), 0);
+
+    return {
+      focusedProject: {
+        ...project,
+        qubits: subQubits,
+        operations: mapped,
+      },
+      remappedOps: mapped,
+      usedQubitNames: subQubits.map((q) => q.name).join(', '),
+      gateCount: gCnt,
+      depthCols: maxS + 1,
+    };
+  }, [activeSample, project]);
+
+  if (!activeSample || samples.length === 0) return null;
+
+  const safeSlug = `${protocolCode}_${activeSample.id}`.replace(/[^a-zA-Z0-9_-]+/g, '_');
+
+  const handleExportSampleSvg = () => {
+    const svg = buildCircuitSvg(focusedProject, remappedOps, `${title} · ${activeSample.label}`);
+    downloadTextFile(`${safeSlug}.svg`, svg, 'image/svg+xml;charset=utf-8');
+  };
+
+  const handleExportSampleTex = () => {
+    const tex = buildQuantikzLatex(focusedProject);
+    downloadTextFile(`${safeSlug}_quantikz.tex`, tex, 'text/plain;charset=utf-8');
+  };
+
+  const canvasHeightCls = focusedProject.qubits.length >= 2 ? 'h-[126px]' : 'h-[92px]';
+
+  return (
+    <div className="studio-card flex flex-col overflow-hidden">
+      {/* Header + Sequence Switcher Pills + Export Actions */}
+      <div className="px-3 py-1.5 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[var(--text-primary)] shrink-0">
+            <CircuitBoard className="w-3.5 h-3.5 text-[var(--accent)]" />
+            <span>{title}</span>
+          </span>
+
+          <div className="flex items-center gap-1 overflow-x-auto py-0.5 min-w-0">
+            {samples.map((s) => {
+              const isAct = s.id === activeSample.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => {
+                    setLocalId(s.id);
+                    onSelectSample?.(s);
+                  }}
+                  className={`px-2 py-0.5 rounded-[3px] text-[10.5px] font-mono-num whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    isAct
+                      ? 'bg-[var(--accent)] text-white font-semibold'
+                      : 'bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-hairline)]'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleExportSampleSvg}
+            title="导出当前标定门序列矢量原理图 (.svg)"
+            className="h-6 px-2 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[10.5px] font-mono-num text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <Download className="w-3 h-3" />
+            <span>线路 SVG</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportSampleTex}
+            title="导出当前标定序列的论文级 LaTeX Quantikz 源码 (.tex)"
+            className="h-6 px-2 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[10.5px] font-mono-num text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <Code2 className="w-3 h-3" />
+            <span>Quantikz .tex</span>
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              onLoadCircuitToDesign(activeSample.operations, `${safeSlug}.qproj`)
+            }
+            title="将此标定门序列发送到「量子线路」工作区进行脉冲级仿真或编辑"
+            className="h-6 px-2 rounded-[3px] bg-[var(--accent-soft)] hover:bg-[var(--accent)] hover:text-white text-[var(--accent)] border border-[var(--accent)]/35 text-[10.5px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <ArrowRightLeft className="w-3 h-3" />
+            <span>发送到量子线路</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Subtitle + Gate Count Telemetry */}
+      <div className="px-3 py-1 bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-mono-num text-[var(--text-secondary)]">
+        <span className="truncate">{activeSample.subtitle || activeSample.label}</span>
+        <span className="shrink-0">
+          目标比特: <strong className="text-[var(--text-primary)]">{usedQubitNames}</strong> · {gateCount} 门 · {depthCols} 时间步
+        </span>
+      </div>
+
+      {/* Compact Read-Only Circuit Schematic Canvas */}
+      <div className={`${canvasHeightCls} flex flex-col overflow-hidden`}>
+        <CircuitCanvas
+          project={focusedProject}
+          operationsOverride={remappedOps}
+          readOnly
+          compact
+          selection={{ type: 'none' }}
+          activeToolGate={null}
+          onSelect={() => {}}
+          onPickGateTool={() => {}}
+          onPlaceGate={() => {}}
+          onDeleteOp={() => {}}
+          onAddQubit={() => {}}
+        />
+      </div>
+    </div>
+  );
+};
 
 interface BenchmarkWorkspaceProps {
+  project: ProjectModel;
   activeProtocol: BenchmarkProtocol;
   onSwitchProtocol: (p: BenchmarkProtocol) => void;
   response: GateBenchmarkResponse | null;
@@ -37,6 +252,7 @@ interface BenchmarkWorkspaceProps {
 }
 
 export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
+  project,
   activeProtocol,
   onSwitchProtocol,
   response,
@@ -47,7 +263,9 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
   isBusy,
 }) => {
   const [allxyUnit, setAllxyUnit] = useState<'z' | 'p1'>('z');
+  const [selectedAllxyIdx, setSelectedAllxyIdx] = useState<number>(7); // default #8 X90·Y90
   const [selectedGstGateIdx, setSelectedGstGateIdx] = useState(1); // default Gx90
+  const [selectedGstSampleId, setSelectedGstSampleId] = useState<string | null>('gst_Gx90_l1');
   const [appliedWbKey, setAppliedWbKey] = useState<string | null>(null);
 
   const textColor = darkMode ? '#E6EDF3' : '#0F172A';
@@ -239,6 +457,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
             <>
               <button
                 onClick={handleExportCsv}
+                title="导出当前标定实验数据表 (.csv)"
                 className="h-6 px-2 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11px] font-mono-num text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
               >
                 <Download className="w-3 h-3" />
@@ -246,6 +465,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </button>
               <button
                 onClick={handleExportReport}
+                title="导出 Markdown 标定报告 (.md)"
                 className="h-6 px-2 rounded-[3px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11px] font-mono-num text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
               >
                 <FileText className="w-3 h-3" />
@@ -345,6 +565,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                   },
                 ]
               : [];
+          const calSamples: CharacterizationCircuitSample[] = cal.circuit_samples ?? [];
 
           return (
             <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
@@ -399,9 +620,26 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 ))}
               </div>
 
+              {/* Inline Calibration Pulse Sequence Schematic */}
+              {calSamples.length > 0 && (
+                <CharacterizationCircuitPanel
+                  project={project}
+                  protocolCode={cal.protocol.toUpperCase()}
+                  title={
+                    cal.protocol === 'rabi'
+                      ? 'Rabi 驱动标定与 π/2 · π 门等效线路'
+                      : cal.protocol === 'ramsey'
+                      ? 'Ramsey π/2 − τ − π/2 自由演化线路'
+                      : 'T1 π 激发与弛豫等待测量线路'
+                  }
+                  samples={calSamples}
+                  onLoadCircuitToDesign={onLoadCircuitToDesign}
+                />
+              )}
+
               {/* Curve Plot + Fitted Parameter Table */}
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-                <div className="xl:col-span-8 studio-card flex flex-col overflow-hidden h-[340px]">
+                <div className="xl:col-span-8 studio-card flex flex-col overflow-hidden h-[315px]">
                   <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                       {cal.protocol === 'rabi'
@@ -410,7 +648,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                         ? `Ramsey 自由进动干涉条纹 (${cal.target_label})`
                         : `T1 能量弛豫指数衰减曲线 (${cal.target_label})`}
                     </span>
-                    <div className="flex items-center gap-3 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                    <div className="flex items-center gap-3 text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
                       <span className="flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-[#2F81F7]" />
                         实测采样点
@@ -476,7 +714,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                   </div>
                 </div>
 
-                <div className="xl:col-span-4 studio-card flex flex-col overflow-hidden max-h-[340px]">
+                <div className="xl:col-span-4 studio-card flex flex-col overflow-hidden max-h-[315px]">
                   <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                     <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                       标定参数拟合明细表
@@ -524,10 +762,21 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
             rawY.push(val);
           });
         });
+        const rbSamples: CharacterizationCircuitSample[] =
+          rb.circuit_samples && rb.circuit_samples.length > 0
+            ? rb.circuit_samples
+            : [
+                {
+                  id: 'rb_fallback',
+                  label: `参考 RB (${rb.num_qubits}Q)`,
+                  subtitle: '随机 Clifford 门序列 + 逆恢复门 C_inv → 测量',
+                  operations: rb.sample_operations,
+                },
+              ];
 
         return (
           <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
-            {/* 4 KPI Strip (Stacked Value + Sub-label so narrow viewports never wrap vertically!) */}
+            {/* 4 KPI Strip */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
               <div className="studio-kpi p-2.5 flex flex-col justify-between">
                 <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
@@ -579,25 +828,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
 
               <div className="studio-kpi p-2.5 flex flex-col justify-between">
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
-                    标定目标 · {rb.target_label}
-                  </span>
-                  <button
-                    onClick={() =>
-                      onLoadCircuitToDesign(
-                        rb.sample_operations,
-                        `RB_${rb.num_qubits}Q_Sample.qproj`
-                      )
-                    }
-                    title="将一条随机 Clifford + 逆恢复门序列导入原理图画布"
-                    className="px-1.5 py-0.5 rounded-[2px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[10px] font-semibold flex items-center gap-0.5 shrink-0 cursor-pointer"
-                  >
-                    <ArrowRightLeft className="w-2.5 h-2.5" />
-                    导入序列
-                  </button>
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  标定目标 · {rb.target_label}
                 </div>
-                <div className="text-[15px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight truncate">
+                <div className="text-[16px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight truncate">
                   {rb.num_seeds} Seeds × {rb.lengths.length} 深度
                 </div>
                 <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
@@ -606,14 +840,23 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Decay Plot + Per-Depth Table (xl:grid-cols-12 so <1280px stacks full-width without clipping!) */}
+            {/* Inline RB / Interleaved IRB Quantum Circuit Schematic */}
+            <CharacterizationCircuitPanel
+              project={project}
+              protocolCode={`RB_${rb.num_qubits}Q`}
+              title="RB / 交织 IRB 随机 Clifford 标定线路原理图"
+              samples={rbSamples}
+              onLoadCircuitToDesign={onLoadCircuitToDesign}
+            />
+
+            {/* Decay Plot + Per-Depth Table */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-              <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[320px]">
+              <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[305px]">
                 <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
                   <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                     随机基准存活率衰减曲线 P(|0⟩) = A · p^m + B
                   </span>
-                  <div className="flex flex-wrap items-center gap-2.5 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                  <div className="flex flex-wrap items-center gap-2.5 text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
                     <span className="flex items-center gap-1">
                       <span className="w-2.5 h-[2px] bg-[#2F81F7]" />
                       参考 RB
@@ -723,7 +966,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 </div>
               </div>
 
-              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden max-h-[320px]">
+              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden max-h-[305px]">
                 <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                   <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                     各深度存活概率明细
@@ -785,6 +1028,13 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         const residuals = axy.sequences.map((s) =>
           allxyUnit === 'z' ? s.residual_z : -0.5 * s.residual_z
         );
+        const safeAxyIdx = Math.min(Math.max(0, selectedAllxyIdx), axy.sequences.length - 1);
+        const allxySamples: CharacterizationCircuitSample[] = axy.sequences.map((s) => ({
+          id: `allxy_${s.index}`,
+          label: `#${s.index} ${s.label}`,
+          subtitle: `平台 ${s.plateau} · 理想 ⟨Z⟩=${s.ideal_z.toFixed(1)} · 实测 ⟨Z⟩=${s.measured_z.toFixed(4)} (残差 Δ=${s.residual_z >= 0 ? '+' : ''}${s.residual_z.toFixed(4)})`,
+          operations: s.operations,
+        }));
 
         const bannerCls =
           axy.severity === 'good'
@@ -816,15 +1066,29 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
             </div>
 
+            {/* Inline AllXY Dual-Pulse Sequence Schematic */}
+            <CharacterizationCircuitPanel
+              project={project}
+              protocolCode="AllXY"
+              title="AllXY 双脉冲诊断线路原理图"
+              samples={allxySamples}
+              selectedSampleId={`allxy_${axy.sequences[safeAxyIdx]?.index ?? 1}`}
+              onSelectSample={(smp) => {
+                const idx = axy.sequences.findIndex((s) => `allxy_${s.index}` === smp.id);
+                if (idx >= 0) setSelectedAllxyIdx(idx);
+              }}
+              onLoadCircuitToDesign={onLoadCircuitToDesign}
+            />
+
             {/* Staircase + Residuals + Table */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
               <div className="xl:col-span-7 flex flex-col gap-3">
-                <div className="studio-card h-[255px] flex flex-col overflow-hidden">
+                <div className="studio-card h-[245px] flex flex-col overflow-hidden">
                   <div className="px-3.5 py-1.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
                     <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                       AllXY 21 序列三阶标定阶梯图 ({axy.target_label})
                     </span>
-                    <div className="p-0.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] flex text-[10px] font-mono-num">
+                    <div className="p-0.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] flex text-[10px] font-mono-num mr-12">
                       <button
                         onClick={() => setAllxyUnit('z')}
                         className={`px-2 py-0.5 rounded-[2px] cursor-pointer ${
@@ -915,7 +1179,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 </div>
 
                 {/* Residual Sawtooth Bar Chart */}
-                <div className="studio-card h-[140px] flex flex-col overflow-hidden shrink-0">
+                <div className="studio-card h-[135px] flex flex-col overflow-hidden shrink-0">
                   <div className="h-7 px-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between text-[11px]">
                     <span className="font-semibold text-[var(--text-primary)]">
                       序列残差偏离 Δ = 实测 − 理想（锯齿极性指示幅度/相位偏差符号）
@@ -955,11 +1219,11 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 </div>
               </div>
 
-              {/* Right 5 Cols: Clickable 21-Sequence Table */}
-              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden max-h-[407px]">
+              {/* Right 5 Cols: Clickable 21-Sequence Table (Selects Inline Schematic!) */}
+              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden max-h-[392px]">
                 <div className="h-8 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                   <span className="text-[12px] font-semibold text-[var(--text-primary)]">
-                    21 组脉冲序列明细 (点击导入画布)
+                    21 组脉冲序列明细 (点击行查看对应线路)
                   </span>
                 </div>
                 <div className="flex-1 overflow-auto">
@@ -974,14 +1238,16 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-hairline)]">
-                      {axy.sequences.map((s) => (
+                      {axy.sequences.map((s, idx) => (
                         <tr
                           key={s.index}
-                          onClick={() =>
-                            onLoadCircuitToDesign(s.operations, `AllXY_${s.index}_${s.label}.qproj`)
-                          }
-                          title={`点击将 AllXY #${s.index} (${s.label}) 加载到设计原理图`}
-                          className="hover:bg-[var(--accent-soft)] cursor-pointer transition-colors"
+                          onClick={() => setSelectedAllxyIdx(idx)}
+                          title={`点击在上方内联画布查看 AllXY #${s.index} (${s.label}) 脉冲序列`}
+                          className={`cursor-pointer transition-colors ${
+                            idx === safeAxyIdx
+                              ? 'bg-[var(--accent-soft)] font-semibold'
+                              : 'hover:bg-black/[0.025] dark:hover:bg-white/[0.04]'
+                          }`}
                         >
                           <td className="py-1 px-2 text-[var(--text-secondary)]">{s.index}</td>
                           <td className="py-1 px-2 font-semibold text-[var(--accent)]">{s.label}</td>
@@ -1016,8 +1282,23 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         const safeIdx = Math.min(selectedGstGateIdx, gst.gates.length - 1);
         const activeGate = gst.gates[safeIdx] || gst.gates[0];
         const pLabels = gst.pauli_labels;
+        const gstSamples: CharacterizationCircuitSample[] =
+          gst.circuit_samples && gst.circuit_samples.length > 0
+            ? gst.circuit_samples
+            : [
+                {
+                  id: 'gst_fallback',
+                  label: 'GST 完备层析电路',
+                  subtitle: '态制备 Fiducial F_j → 待测门 Germ G^L → 测量基准 M_i',
+                  operations: gst.sample_operations,
+                },
+              ];
 
-        // Compact numeric annotations for spacious 2-up 4x4 PTM heatmaps
+        const maxAbsErr = Math.max(
+          0.02,
+          ...activeGate.ptm_error.flat().map((v) => Math.abs(v))
+        );
+
         const makeHeatmapAnnotations = (mat: number[][], isError: boolean) => {
           const anns: any[] = [];
           for (let r = 0; r < 4; r++) {
@@ -1045,14 +1326,9 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
           return anns;
         };
 
-        const maxAbsErr = Math.max(
-          0.02,
-          ...activeGate.ptm_error.flat().map((v) => Math.abs(v))
-        );
-
         return (
           <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
-            {/* Top 4 KPI Cards (Stacked lines — never wraps characters vertically!) */}
+            {/* Top 4 KPI Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
               <div className="studio-kpi p-2.5 flex flex-col justify-between">
                 <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
@@ -1091,20 +1367,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
 
               <div className="studio-kpi p-2.5 flex flex-col justify-between">
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
-                    SPAM 态制备 / 读出
-                  </span>
-                  <button
-                    onClick={() =>
-                      onLoadCircuitToDesign(gst.sample_operations, `GST_Fiducial_${gst.target_label}.qproj`)
-                    }
-                    className="px-1.5 py-0.5 rounded-[2px] bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-semibold shrink-0 cursor-pointer"
-                  >
-                    导入电路
-                  </button>
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  SPAM 态制备 / 读出保真度
                 </div>
-                <div className="text-[16px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight">
+                <div className="text-[17px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight">
                   {(gst.spam_prep_fidelity * 100).toFixed(1)}% / {(gst.spam_readout_fidelity * 100).toFixed(1)}%
                 </div>
                 <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
@@ -1122,7 +1388,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 {gst.gates.map((g, idx) => (
                   <button
                     key={g.gate_id}
-                    onClick={() => setSelectedGstGateIdx(idx)}
+                    onClick={() => {
+                      setSelectedGstGateIdx(idx);
+                      setSelectedGstSampleId(`gst_${g.gate_id}_l1`);
+                    }}
                     className={`px-2 py-0.5 rounded-[3px] text-[11px] font-mono-num transition-colors cursor-pointer ${
                       idx === safeIdx
                         ? 'bg-[var(--accent)] text-white font-semibold'
@@ -1146,14 +1415,31 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Spacious 2-Column 4x4 PTM Heatmaps (Each gets 50% width so cell numbers NEVER collide!) */}
+            {/* Inline GST Fiducial + Germ Tomography Circuit Schematic (Synced with Selected Gate!) */}
+            <CharacterizationCircuitPanel
+              project={project}
+              protocolCode="GST"
+              title="GST 态制备 F_j · 胚门放大 G^L · 测量基准 M_i 线路原理图"
+              samples={gstSamples}
+              selectedSampleId={selectedGstSampleId}
+              onSelectSample={(smp) => {
+                setSelectedGstSampleId(smp.id);
+                if (smp.gate_id) {
+                  const gIdx = gst.gates.findIndex((g) => g.gate_id === smp.gate_id);
+                  if (gIdx >= 0) setSelectedGstGateIdx(gIdx);
+                }
+              }}
+              onLoadCircuitToDesign={onLoadCircuitToDesign}
+            />
+
+            {/* Spacious 2-Column 4x4 PTM Heatmaps */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="studio-card flex flex-col overflow-hidden h-[265px]">
+              <div className="studio-card flex flex-col overflow-hidden h-[255px]">
                 <div className="h-8 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between">
                   <span className="text-[11.5px] font-semibold text-[var(--text-primary)]">
                     实测泡利转移矩阵 R_meas ({activeGate.gate_id})
                   </span>
-                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
+                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
                     基组 &#123;I, X, Y, Z&#125; ∈ [-1, +1]
                   </span>
                 </div>
@@ -1188,12 +1474,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 </div>
               </div>
 
-              <div className="studio-card flex flex-col overflow-hidden h-[265px]">
+              <div className="studio-card flex flex-col overflow-hidden h-[255px]">
                 <div className="h-8 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between">
                   <span className="text-[11.5px] font-semibold text-[var(--text-primary)]">
                     过程误差矩阵 ΔR = R_meas − R_ideal
                   </span>
-                  <span className="text-[10px] font-mono-num text-amber-500">
+                  <span className="text-[10px] font-mono-num text-amber-500 mr-12">
                     量程 ±{maxAbsErr.toFixed(3)}
                   </span>
                 </div>
@@ -1231,12 +1517,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
 
             {/* Bottom Row: Bar Comparison + Full Gate Set Summary Table */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[230px]">
+              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[225px]">
                 <div className="h-8 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
                   <span className="text-[11.5px] font-semibold text-[var(--text-primary)] truncate">
                     失真度 (1−F) vs 半钻石距离
                   </span>
-                  <div className="flex items-center gap-2 text-[10px] font-mono-num shrink-0">
+                  <div className="flex items-center gap-2 text-[10px] font-mono-num shrink-0 mr-12">
                     <span className="text-[#2F81F7]">■ 1−F_avg</span>
                     <span className="text-[#F59E0B]">■ ½‖Δℰ‖_⋄</span>
                   </div>
@@ -1278,7 +1564,7 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               <div className="xl:col-span-7 studio-card overflow-hidden flex flex-col">
                 <div className="h-8 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
                   <span className="text-[11.5px] font-semibold text-[var(--text-primary)] truncate">
-                    GST 门集层析指标表 (点击行切换 PTM)
+                    GST 门集层析指标表 (点击行切换 PTM 与层析线路)
                   </span>
                   <span className="text-[10px] font-mono-num text-[var(--text-secondary)] flex items-center gap-1 shrink-0">
                     <ShieldCheck className="w-3 h-3 text-emerald-500" />
@@ -1301,7 +1587,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                       {gst.gates.map((g, idx) => (
                         <tr
                           key={g.gate_id}
-                          onClick={() => setSelectedGstGateIdx(idx)}
+                          onClick={() => {
+                            setSelectedGstGateIdx(idx);
+                            setSelectedGstSampleId(`gst_${g.gate_id}_l1`);
+                          }}
                           className={`cursor-pointer transition-colors ${
                             idx === safeIdx
                               ? 'bg-[var(--accent-soft)] font-semibold'
@@ -1335,6 +1624,18 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
       {matchingResp && matchingResp.protocol === 'xeb' && (() => {
         const xeb: XebBenchmarkResponse = matchingResp;
         const maxSpk = Math.max(0.55, ...xeb.speckle_ideal, ...xeb.speckle_measured) * 1.06;
+        const xebSamples: CharacterizationCircuitSample[] =
+          xeb.circuit_samples && xeb.circuit_samples.length > 0
+            ? xeb.circuit_samples
+            : [
+                {
+                  id: 'xeb_fallback',
+                  label: `Sycamore 周期 (${xeb.entangler_name})`,
+                  subtitle: `随机单比特 {√X, √Y, √W} 层 + ${xeb.entangler_name} 纠缠门`,
+                  operations: xeb.sample_operations,
+                },
+              ];
+
         return (
           <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3">
             {/* 4 KPI Strip */}
@@ -1376,25 +1677,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
 
               <div className="studio-kpi p-2.5 flex flex-col justify-between">
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
-                    标定对 · {xeb.target_label}
-                  </span>
-                  <button
-                    onClick={() =>
-                      onLoadCircuitToDesign(
-                        xeb.sample_operations,
-                        `XEB_${xeb.entangler_name}_Sample.qproj`
-                      )
-                    }
-                    title="将一条随机 Sycamore 周期标定电路导入设计画布"
-                    className="px-1.5 py-0.5 rounded-[2px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[10px] font-semibold flex items-center gap-0.5 shrink-0 cursor-pointer"
-                  >
-                    <ArrowRightLeft className="w-2.5 h-2.5" />
-                    导入序列
-                  </button>
+                <div className="text-[10px] font-mono-num uppercase text-[var(--text-secondary)] truncate">
+                  标定对 · {xeb.target_label}
                 </div>
-                <div className="text-[15px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight truncate">
+                <div className="text-[16px] font-bold font-mono-num text-[var(--text-primary)] mt-0.5 leading-tight truncate">
                   {xeb.num_seeds} 随机电路 × {xeb.lengths.length} 深度
                 </div>
                 <div className="text-[10px] font-mono-num text-[var(--text-secondary)] truncate mt-0.5">
@@ -1403,14 +1689,23 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
             </div>
 
+            {/* Inline 2Q XEB Sycamore Cycle Circuit Schematic */}
+            <CharacterizationCircuitPanel
+              project={project}
+              protocolCode={`XEB_${xeb.entangler_name}`}
+              title={`2Q 线性交叉熵 (XEB) 随机单比特 + ${xeb.entangler_name} 交变周期线路`}
+              samples={xebSamples}
+              onLoadCircuitToDesign={onLoadCircuitToDesign}
+            />
+
             {/* XEB Decay Curve + Porter-Thomas Speckle Scatter */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-              <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[325px]">
+              <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[305px]">
                 <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
                   <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                     线性交叉熵保真度衰减曲线 F_XEB(m) = A · f_cycle^m
                   </span>
-                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
+                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
                     随机 &#123;√X, √Y, √W&#125; + {xeb.entangler_name}
                   </span>
                 </div>
@@ -1470,12 +1765,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 </div>
               </div>
 
-              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[325px]">
+              <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[305px]">
                 <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
                   <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
                     Porter-Thomas 散斑概率相关性
                   </span>
-                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)] shrink-0">
+                  <span className="text-[10px] font-mono-num text-[var(--text-secondary)] shrink-0 mr-12">
                     p_meas vs p_ideal
                   </span>
                 </div>

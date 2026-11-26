@@ -245,7 +245,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const sim = project.sim_settings;
 
     return (
-      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
+      <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">模拟设置</div>
 
         {/* Solver Segmented Control */}
@@ -437,7 +437,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     ];
 
     return (
-      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
+      <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">最优门综合配置</div>
 
         <div className="space-y-2.5">
@@ -520,7 +520,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     ];
 
     return (
-      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
+      <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-5">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">
           参数扫描与变分寻优
         </div>
@@ -859,7 +859,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           ];
 
     return (
-      <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
+      <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-4">
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">
           量子门标定与层析配置
         </div>
@@ -1325,7 +1325,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         customG?.duration_ns ?? (op.qubits.length >= 2 ? activeHw.t_2q_ns : activeHw.t_1q_ns);
 
       return (
-        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
+        <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-5">
           <div className="flex items-center justify-between">
             <div className="text-[14px] font-semibold text-[var(--text-primary)] font-mono-num truncate">
               选中: {customG?.display_label || op.name} · {qNames}
@@ -1632,7 +1632,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const q = project.qubits.find((item) => item.id === selection.qubitId);
     if (q) {
       return (
-        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-5">
+        <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: q.color }} />
@@ -1782,7 +1782,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     const cg = project.custom_gates.find((g) => g.id === selection.gateId);
     if (cg) {
       return (
-        <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
+        <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-4">
           <div className="flex items-center justify-between">
             <div className="text-[14px] font-semibold font-mono-num">
               自定义门 · {cg.display_label || cg.name}
@@ -1845,7 +1845,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     activeHw;
 
   return (
-    <aside className="w-[288px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto p-3.5 space-y-4">
+    <aside className="w-[274px] shrink-0 bg-[var(--bg-sidebar)] border-l border-[var(--border-hairline)] overflow-y-auto overflow-x-hidden p-3 space-y-4">
       <div className="flex items-center justify-between gap-2">
         <div>
           <div className="text-[14px] font-semibold text-[var(--text-primary)]">{hw.name}</div>

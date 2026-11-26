@@ -299,6 +299,14 @@ export interface RbInterleavedResult {
   systematic_bound: number;
 }
 
+export interface CharacterizationCircuitSample {
+  id: string;
+  label: string;
+  subtitle?: string;
+  gate_id?: string;
+  operations: CircuitOpModel[];
+}
+
 export interface RbBenchmarkResponse {
   protocol: 'rb';
   hardware_name: string;
@@ -321,6 +329,7 @@ export interface RbBenchmarkResponse {
   coherence_epc_floor: number;
   interleaved: RbInterleavedResult | null;
   sample_operations: CircuitOpModel[];
+  circuit_samples?: CharacterizationCircuitSample[];
 }
 
 export interface AllXySequenceRow {
@@ -386,6 +395,7 @@ export interface GstBenchmarkResponse {
   gram_matrix: number[][];
   gates: GstGateReport[];
   sample_operations: CircuitOpModel[];
+  circuit_samples?: CharacterizationCircuitSample[];
 }
 
 export interface XebBenchmarkResponse {
@@ -407,6 +417,7 @@ export interface XebBenchmarkResponse {
   speckle_ideal: number[];
   speckle_measured: number[];
   sample_operations: CircuitOpModel[];
+  circuit_samples?: CharacterizationCircuitSample[];
 }
 
 export interface BasicCalibrationParam {
@@ -439,6 +450,7 @@ export interface BasicCalibrationResponse {
   y_label: string;
   params: BasicCalibrationParam[];
   writeback: CalibrationWritebackItem[];
+  circuit_samples?: CharacterizationCircuitSample[];
   summary: string;
 }
 

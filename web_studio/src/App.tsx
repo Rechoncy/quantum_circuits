@@ -184,6 +184,7 @@ export default function App() {
   const [editingCustomGate, setEditingCustomGate] = useState<CustomGateDef | null>(null);
   const [macroSeedOps, setMacroSeedOps] = useState<CircuitOpModel[] | null>(null);
   const [macroSeedQubits, setMacroSeedQubits] = useState<number>(2);
+  const [exportToast, setExportToast] = useState<string | null>(null);
 
   const runCounterRef = useRef(1);
 
@@ -192,6 +193,25 @@ export default function App() {
     const t = now.toTimeString().slice(0, 8);
     setLogs((prev) => [{ time: t, level, text }, ...prev].slice(0, 60));
   }, []);
+
+  useEffect(() => {
+    let timer: number | undefined;
+    const onExport = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ filename?: string; path?: string }>).detail;
+      const target = detail?.path || detail?.filename || '文件';
+      const msg = `文件已导出: ${target}`;
+      setExportToast(msg);
+      setStatusMsg(msg);
+      addLog(msg, 'info');
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => setExportToast(null), 3800);
+    };
+    window.addEventListener('qstudio:export-toast', onExport);
+    return () => {
+      window.removeEventListener('qstudio:export-toast', onExport);
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [addLog]);
 
   // Toggle dark class on root HTML element
   useEffect(() => {
@@ -1306,13 +1326,8 @@ export default function App() {
   // ---- Project Import / Export ----
   const handleExportJson = () => {
     if (!project) return;
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = project.name.endsWith('.json') ? project.name : `${project.name}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const fname = project.name.endsWith('.json') ? project.name : `${project.name}.json`;
+    downloadTextFile(fname, JSON.stringify(project, null, 2), 'application/json;charset=utf-8');
   };
 
   const handleApplyNlResult = (res: NlCircuitResponse, runImmediately: boolean) => {
@@ -1958,6 +1973,7 @@ export default function App() {
 
           {domain === 'characterization' && (
             <BenchmarkWorkspace
+              project={project}
               activeProtocol={benchmarkConfig.protocol}
               onSwitchProtocol={(proto) => {
                 setBenchmarkConfig((prev) => ({ ...prev, protocol: proto }));
@@ -2218,6 +2234,14 @@ export default function App() {
           <span className="pl-2.5">{project.custom_gates.length} MACRO</span>
         </div>
       </footer>
+
+      {/* Export / Save-As Confirmation Toast */}
+      {exportToast && (
+        <div className="fixed bottom-8 right-4 z-50 max-w-md px-3.5 py-2 rounded-[4px] bg-[var(--bg-panel)] border border-emerald-500/60 shadow-xl flex items-center gap-2 text-[11.5px] font-mono-num text-[var(--text-primary)] pointer-events-none">
+          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+          <span className="truncate">{exportToast}</span>
+        </div>
+      )}
 
       {/* Custom Gate Builder Sheet Modal */}
       <CustomGateModal

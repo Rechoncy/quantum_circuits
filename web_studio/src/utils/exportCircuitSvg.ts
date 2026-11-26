@@ -346,12 +346,81 @@ export function buildQuantikzLatex(project: ProjectModel): string {
   return lines.join('\n');
 }
 
-export function downloadTextFile(filename: string, content: string, mime = 'image/svg+xml;charset=utf-8'): void {
-  const blob = new Blob([content], { type: mime });
+function notifyExportSuccess(filename: string, savedPath?: string): void {
+  try {
+    window.dispatchEvent(
+      new CustomEvent('qstudio:export-toast', {
+        detail: { filename, path: savedPath || filename },
+      })
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function downloadTextFile(
+  filename: string,
+  content: string,
+  mime = 'image/svg+xml;charset=utf-8'
+): void {
+  const pyApi = (window as unknown as { pywebview?: { api?: { save_file?: (fn: string, body: string, isB64?: boolean) => Promise<{ saved?: boolean; path?: string; cancelled?: boolean }> } } }).pywebview?.api;
+  if (pyApi && typeof pyApi.save_file === 'function') {
+    pyApi
+      .save_file(filename, content, false)
+      .then((res) => {
+        if (res?.saved) {
+          notifyExportSuccess(filename, res.path);
+        }
+      })
+      .catch(() => {
+        // Fallback to DOM download if bridge fails
+        triggerBrowserBlobDownload(filename, new Blob([content], { type: mime }));
+      });
+    return;
+  }
+
+  triggerBrowserBlobDownload(filename, new Blob([content], { type: mime }));
+}
+
+export function downloadBase64File(
+  filename: string,
+  base64Content: string,
+  mime = 'image/png'
+): void {
+  const pyApi = (window as unknown as { pywebview?: { api?: { save_file?: (fn: string, body: string, isB64?: boolean) => Promise<{ saved?: boolean; path?: string; cancelled?: boolean }> } } }).pywebview?.api;
+  if (pyApi && typeof pyApi.save_file === 'function') {
+    pyApi
+      .save_file(filename, base64Content, true)
+      .then((res) => {
+        if (res?.saved) {
+          notifyExportSuccess(filename, res.path);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+
+  const bin = atob(base64Content);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  triggerBrowserBlobDownload(filename, new Blob([bytes], { type: mime }));
+}
+
+function triggerBrowserBlobDownload(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
+  a.style.display = 'none';
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  notifyExportSuccess(filename);
+  window.setTimeout(() => {
+    try {
+      document.body.removeChild(a);
+    } catch {
+      // ignore
+    }
+    URL.revokeObjectURL(url);
+  }, 15000);
 }

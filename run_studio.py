@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import os
 import shutil
@@ -206,14 +207,57 @@ def main() -> int:
 
         edgechromium.EdgeChrome.on_webview_ready = _checked_webview_ready
 
-        webview.create_window(
+        webview.settings["ALLOW_DOWNLOADS"] = True
+
+        class DesktopBridge:
+            def __init__(self) -> None:
+                self.window: object = None
+
+            def save_file(self, filename: str, content: str, is_base64: bool = False) -> dict:
+                if self.window is None:
+                    return {"saved": False, "error": "window_not_ready"}
+                ext = Path(filename).suffix.lower()
+                type_map = {
+                    ".svg": ("SVG 矢量图 (*.svg)", "All files (*.*)"),
+                    ".csv": ("CSV 数据表 (*.csv)", "All files (*.*)"),
+                    ".json": ("JSON 工程文件 (*.json)", "All files (*.*)"),
+                    ".md": ("Markdown 报告 (*.md)", "All files (*.*)"),
+                    ".qasm": ("OpenQASM 量子代码 (*.qasm)", "All files (*.*)"),
+                    ".tex": ("LaTeX Quantikz 代码 (*.tex)", "All files (*.*)"),
+                    ".png": ("PNG 图像 (*.png)", "All files (*.*)"),
+                }
+                ftypes = type_map.get(ext, ("All files (*.*)",))
+                res = self.window.create_file_dialog(  # type: ignore[attr-defined]
+                    webview.SAVE_DIALOG,
+                    save_filename=filename,
+                    file_types=ftypes,
+                )
+                if not res:
+                    return {"saved": False, "cancelled": True}
+                chosen = res[0] if isinstance(res, (list, tuple)) else str(res)
+                if not chosen:
+                    return {"saved": False, "cancelled": True}
+                out_path = Path(chosen)
+                if ext and not out_path.suffix:
+                    out_path = out_path.with_suffix(ext)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if is_base64:
+                    out_path.write_bytes(base64.b64decode(content))
+                else:
+                    out_path.write_text(content, encoding="utf-8")
+                return {"saved": True, "path": str(out_path)}
+
+        bridge = DesktopBridge()
+        win = webview.create_window(
             title=win_title,
             url=url,
+            js_api=bridge,
             width=1480,
             height=920,
             min_size=(1100, 700),
-            background_color="#F5F5F7",
+            background_color="#0E1116",
         )
+        bridge.window = win
         if ICON_ICO_PATH.is_file():
             threading.Thread(
                 target=_apply_win32_window_icon,

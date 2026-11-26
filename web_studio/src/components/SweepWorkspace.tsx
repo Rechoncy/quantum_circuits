@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRightLeft, CheckCircle2, Download, Maximize2, Minimize2, Play, Sparkles } from 'lucide-react';
 import type { SweepResponse, VariationalOptimizeResponse } from '../types';
 import { PlotlyChart } from './PlotlyChart';
+import { downloadTextFile } from '../utils/exportCircuitSvg';
 
 interface SweepWorkspaceProps {
   activeSubMode?: '1d' | '2d' | 'vqe';
@@ -76,13 +77,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
         ...basis.map((b) => sweepResponse.populations[b][i]),
       ].join(',')
     );
-    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `sweep_${sweepResponse.param_x}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadTextFile(`sweep_${sweepResponse.param_x}.csv`, '\uFEFF' + [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
   };
 
   // =========================================================================
@@ -121,13 +116,7 @@ export const SweepWorkspace: React.FC<SweepWorkspaceProps> = ({
           (e, i) => `${i + 1},${e},${vqeResponse.best_so_far_trace[i] ?? e}`
         ),
       ];
-      const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `vqe_convergence_${vqeResponse.method}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadTextFile(`vqe_convergence_${vqeResponse.method}.csv`, '\uFEFF' + lines.join('\n'), 'text/csv;charset=utf-8');
     };
 
     return (

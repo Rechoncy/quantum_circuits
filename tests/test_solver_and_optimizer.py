@@ -1262,6 +1262,7 @@ def test_gate_benchmarking_rb_irb_allxy_and_gst() -> None:
     assert rb_2q["num_qubits"] == 2
     assert 0.96 < rb_2q["clifford_fidelity"] < 0.999
     assert 0.985 < rb_2q["interleaved"]["gate_fidelity"] < 0.9995
+    assert len(rb_2q["circuit_samples"]) >= 2
 
     # 2. AllXY 21-sequence coherent pulse diagnostic
     p_clean = p_base.model_copy(deep=True)
@@ -1302,6 +1303,7 @@ def test_gate_benchmarking_rb_irb_allxy_and_gst() -> None:
     assert gst_coh["spam_prep_fidelity"] > 0.98
     assert gst_coh["spam_readout_fidelity"] < 0.95  # GST simultaneously catches the 8% readout SPAM!
     assert any(g["gate_id"] == "Gh" for g in gst_coh["gates"]), "GST should include 6th gate Gh (Hadamard)"
+    assert len(gst_coh["circuit_samples"]) >= 12, "GST should expose inline circuits for all 6 gates (L=1 & germ) + SPAM"
 
 
 def test_noise_error_budget_and_2q_linear_xeb() -> None:
@@ -1360,6 +1362,7 @@ def test_noise_error_budget_and_2q_linear_xeb() -> None:
     assert 0.95 < xeb_noisy["cycle_polarization"] < 0.9995
     assert 0.96 < xeb_noisy["entangler_fidelity"] < 1.0
     assert len(xeb_noisy["sample_operations"]) > 0
+    assert len(xeb_noisy["circuit_samples"]) >= 2
 
 
 def test_rabi_drive_hierarchy_rise_fall_edges_and_basic_calibrations() -> None:
@@ -1420,6 +1423,7 @@ def test_rabi_drive_hierarchy_rise_fall_edges_and_basic_calibrations() -> None:
     omega_fit = next(x["value"] for x in r_rabi["params"] if x["key"] == "omega_fit")
     assert abs(omega_fit - 2.5 * 1.04) < 0.03
     assert len(r_rabi["writeback"]) >= 2
+    assert len(r_rabi["circuit_samples"]) >= 3
 
     r_ramsey = execute_gate_benchmark(
         GateBenchmarkRequest(

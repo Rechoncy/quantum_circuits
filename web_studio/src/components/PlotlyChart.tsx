@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import Plotly from 'plotly.js-dist-min';
+import { Download } from 'lucide-react';
+import { downloadBase64File, downloadTextFile } from '../utils/exportCircuitSvg';
 
 export interface CursorTipPoint {
   y: number;
@@ -233,8 +235,8 @@ export const PlotlyChart: React.FC<PlotlyChartProps> = ({
   // Interactive click-and-drag waveform scrubbing when `onScrubX` is enabled
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!onScrubXRef.current || e.button !== 0) return;
-    // Ignore clicks on the top-right Plotly modebar buttons
-    if ((e.target as HTMLElement)?.closest?.('.modebar')) return;
+    // Ignore clicks on the top-right Plotly modebar or chart export buttons
+    if ((e.target as HTMLElement)?.closest?.('.modebar, [data-chart-export]')) return;
     const el = containerRef.current as any;
     const sz = el?._fullLayout?._size;
     if (sz) {
@@ -266,15 +268,62 @@ export const PlotlyChart: React.FC<PlotlyChartProps> = ({
     window.addEventListener('pointerup', onUp);
   };
 
+  const handleExportChartSvg = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const el = containerRef.current as any;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const w = Math.max(640, Math.round(rect.width || 720));
+    const h = Math.max(320, Math.round(rect.height || 360));
+    try {
+      const dataUrl: string = await (Plotly as any).toImage(el, {
+        format: 'svg',
+        width: w,
+        height: h,
+      });
+      const commaIdx = dataUrl.indexOf(',');
+      if (commaIdx > 0) {
+        const meta = dataUrl.slice(0, commaIdx);
+        const raw = dataUrl.slice(commaIdx + 1);
+        const svgXml = meta.includes(';base64') ? atob(raw) : decodeURIComponent(raw);
+        downloadTextFile('quantum_plot.svg', svgXml, 'image/svg+xml;charset=utf-8');
+      }
+    } catch {
+      try {
+        const pngUrl: string = await (Plotly as any).toImage(el, {
+          format: 'png',
+          width: w * 2,
+          height: h * 2,
+        });
+        const b64 = pngUrl.split(',')[1];
+        if (b64) downloadBase64File('quantum_plot.png', b64, 'image/png');
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   return (
     <div
       ref={wrapRef}
       onPointerDown={onScrubX ? handlePointerDown : undefined}
-      className={`relative ${className} ${
+      className={`group relative ${className} ${
         onScrubX ? (isScrubbing ? 'cursor-ew-resize select-none' : 'cursor-crosshair') : ''
       }`}
     >
       <div ref={containerRef} className="w-full h-full" />
+
+      {/* Subtle Hover Vector SVG Export Button */}
+      <button
+        type="button"
+        data-chart-export="true"
+        onClick={handleExportChartSvg}
+        title="导出当前图表为高清矢量图 (.svg)"
+        className="opacity-0 group-hover:opacity-100 transition-opacity absolute top-1 right-1.5 z-30 h-5 px-1.5 rounded-[2px] bg-[var(--bg-panel)]/90 border border-[var(--border-hairline)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[9.5px] font-mono-num text-[var(--text-secondary)] flex items-center gap-0.5 cursor-pointer shadow-2xs"
+      >
+        <Download className="w-2.5 h-2.5" />
+        <span>SVG</span>
+      </button>
 
       {/* Oscilloscope Probe Cursor Line + Triangle Probe Head + Optional Live Readout Tag */}
       <div

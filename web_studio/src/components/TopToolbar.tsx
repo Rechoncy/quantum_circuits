@@ -179,7 +179,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 setMenuOpen(false);
                 setEditingName(true);
               }}
-              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[196px] cursor-pointer transition-colors"
+              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[164px] xl:max-w-[196px] cursor-pointer transition-colors"
               title="点击切换预设工程或导入/导出文件，双击重命名当前工程"
             >
               <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
@@ -306,7 +306,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
               <button
                 key={d.id}
                 onClick={() => onDomainChange(d.id)}
-                className={`relative h-full px-3.5 border-r border-[var(--border-hairline)] flex items-center gap-1.5 text-[12.5px] transition-colors cursor-pointer whitespace-nowrap ${
+                className={`relative h-full px-2.5 xl:px-3.5 border-r border-[var(--border-hairline)] flex items-center gap-1.5 text-[12px] xl:text-[12.5px] transition-colors cursor-pointer whitespace-nowrap ${
                   active
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] font-semibold'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.03] dark:hover:bg-white/[0.03]'
@@ -318,7 +318,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 <Icon className={`w-3.5 h-3.5 ${active ? 'text-[var(--accent)]' : 'opacity-75'}`} />
                 <span>{d.zh}</span>
                 <span
-                  className={`text-[9.5px] font-mono-num px-1 py-0 rounded-[2px] border ${
+                  className={`hidden lg:inline text-[9.5px] font-mono-num px-1 py-0 rounded-[2px] border ${
                     active
                       ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
                       : 'border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[var(--text-tertiary)]'
@@ -333,11 +333,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       </div>
 
       {/* Right: AI Synthesis + Solver Engine + Shots + Industrial Run/Stop + Quick Toggles */}
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         <button
           onClick={onOpenNlModal}
           title="用自然语言对话综合与精调量子线路 (Ctrl+K)"
-          className="h-7 px-2.5 rounded-[3px] border border-[var(--accent)]/40 bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[11.5px] font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
+          className="h-7 px-2 rounded-[3px] border border-[var(--accent)]/40 bg-[var(--accent-soft)] hover:bg-[var(--accent)]/25 text-[var(--accent)] text-[11.5px] font-semibold flex items-center gap-1 cursor-pointer transition-colors shrink-0"
         >
           <Bot className="w-3.5 h-3.5 shrink-0" />
           <span className="hidden lg:inline">AI 综合</span>

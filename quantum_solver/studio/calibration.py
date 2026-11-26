@@ -21,7 +21,7 @@ import numpy as np
 from scipy.linalg import expm
 from scipy.optimize import curve_fit
 
-from .models import GateBenchmarkRequest
+from .models import CircuitOpModel, GateBenchmarkRequest
 from .project_engine import get_active_hardware_profile, rabi_pulse_duration_ns
 
 _I2 = np.eye(2, dtype=np.complex128)
@@ -259,6 +259,66 @@ def run_basic_calibration(req: GateBenchmarkRequest, noise: Dict[str, Any]) -> D
         summary = f"{q_name} 拟合 T1 = {t1f / 1000.0:.2f} μs（读出基线 {c:.3f}，激发幅度 {a:.3f}）。"
         x_label, y_label = "π 脉冲后等待时间 τ (ns)", "激发态概率 P(|1⟩)"
 
+    circuit_samples: List[Dict[str, Any]] = []
+    if req.protocol == "rabi":
+        circuit_samples = [
+            {
+                "id": "rabi_var",
+                "label": "Rabi 变宽共振驱动序列",
+                "subtitle": f"{q_name}: RXY(Ω_R·t, 0) → M",
+                "operations": [
+                    CircuitOpModel(id="cal_r0", step=0, kind="gate", name="RXY", qubits=[q], params=["theta", 0.0], rabi_mhz=round(omega_set, 4)).model_dump(),
+                    CircuitOpModel(id="cal_rm", step=1, kind="measure", name="MEASURE", qubits=[q], params=[]).model_dump(),
+                ],
+            },
+            {
+                "id": "rabi_pi2",
+                "label": "校准后 π/2 脉冲 (SX)",
+                "subtitle": f"Ω_R = {params[0]['value']} MHz",
+                "operations": [
+                    CircuitOpModel(id="cal_p2", step=0, kind="gate", name="SX", qubits=[q], params=[], rabi_mhz=params[0]["value"]).model_dump(),
+                    CircuitOpModel(id="cal_p2m", step=1, kind="measure", name="MEASURE", qubits=[q], params=[]).model_dump(),
+                ],
+            },
+            {
+                "id": "rabi_pi",
+                "label": "校准后 π 翻转脉冲 (X)",
+                "subtitle": f"Ω_R = {params[0]['value']} MHz",
+                "operations": [
+                    CircuitOpModel(id="cal_pi", step=0, kind="gate", name="X", qubits=[q], params=[], rabi_mhz=params[0]["value"]).model_dump(),
+                    CircuitOpModel(id="cal_pim", step=1, kind="measure", name="MEASURE", qubits=[q], params=[]).model_dump(),
+                ],
+            },
+        ]
+    elif req.protocol == "ramsey":
+        circuit_samples = [
+            {
+                "id": "ramsey_seq",
+                "label": "Ramsey π/2 − τ − π/2 干涉序列",
+                "subtitle": f"{q_name}: SX → 自由进动 τ (δ={req.ramsey_detuning_mhz:g}MHz) → SX → M",
+                "operations": [
+                    CircuitOpModel(id="ram_0", step=0, kind="gate", name="SX", qubits=[q], params=[]).model_dump(),
+                    CircuitOpModel(id="ram_idle", step=1, kind="gate", name="RZ", qubits=[q], params=[round(0.5 * math.pi, 4)]).model_dump(),
+                    CircuitOpModel(id="ram_deph", step=2, kind="noise", name="PHASE_DAMPING", qubits=[q], params=[0.05]).model_dump(),
+                    CircuitOpModel(id="ram_1", step=3, kind="gate", name="SX", qubits=[q], params=[]).model_dump(),
+                    CircuitOpModel(id="ram_m", step=4, kind="measure", name="MEASURE", qubits=[q], params=[]).model_dump(),
+                ],
+            }
+        ]
+    else:
+        circuit_samples = [
+            {
+                "id": "t1_seq",
+                "label": "T1 激发态弛豫测量序列",
+                "subtitle": f"{q_name}: X(π) → 自由弛豫等待 τ → M",
+                "operations": [
+                    CircuitOpModel(id="t1_x", step=0, kind="gate", name="X", qubits=[q], params=[]).model_dump(),
+                    CircuitOpModel(id="t1_ad", step=1, kind="noise", name="AMPLITUDE_DAMPING", qubits=[q], params=[0.1]).model_dump(),
+                    CircuitOpModel(id="t1_m", step=2, kind="measure", name="MEASURE", qubits=[q], params=[]).model_dump(),
+                ],
+            }
+        ]
+
     return {
         "protocol": req.protocol,
         "hardware_name": str(noise.get("hardware_name", hp.name)),
@@ -274,5 +334,6 @@ def run_basic_calibration(req: GateBenchmarkRequest, noise: Dict[str, Any]) -> D
         "y_label": y_label,
         "params": params,
         "writeback": writeback,
+        "circuit_samples": circuit_samples,
         "summary": summary,
     }

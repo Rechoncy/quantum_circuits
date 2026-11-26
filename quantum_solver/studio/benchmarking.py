@@ -448,7 +448,8 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
             means: List[float] = []
             stds: List[float] = []
             raw_samples: List[List[float]] = []
-            first_seq_indices: List[int] = []
+            sampled_seqs: List[Tuple[int, List[int], int]] = []
+            sample_m_targets = {0, min(1, len(raw_lens) - 1), min(2, len(raw_lens) - 1)}
             for m_idx, m_len in enumerate(raw_lens):
                 seq_probs: List[float] = []
                 for k in range(num_seeds):
@@ -467,24 +468,24 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
                     if shots > 0:
                         p_surv = float(rng.binomial(shots, p_surv)) / float(shots)
                     seq_probs.append(round(p_surv, 6))
-                    if not use_interleaved and m_idx == min(2, len(raw_lens) - 1) and k == 0:
-                        first_seq_indices = [int(x) for x in picks] + [inv_idx]
+                    if m_idx in sample_m_targets and k == 0:
+                        sampled_seqs.append((m_len, [int(x) for x in picks], int(inv_idx)))
                 arr = np.array(seq_probs, dtype=np.float64)
                 means.append(float(np.mean(arr)))
                 stds.append(float(np.std(arr, ddof=1) / math.sqrt(len(arr))) if len(arr) > 1 else 0.0)
                 raw_samples.append(seq_probs)
-            return means, stds, raw_samples, first_seq_indices
+            return means, stds, raw_samples, sampled_seqs
 
-        ref_means, ref_stds, ref_raw, sample_c_idx = eval_1q_rb_curves(False)
+        ref_means, ref_stds, ref_raw, ref_seq_samples = eval_1q_rb_curves(False)
         irb_means: Optional[List[float]] = None
         irb_stds: Optional[List[float]] = None
         irb_raw: Optional[List[List[float]]] = None
+        irb_seq_samples: List[Tuple[int, List[int], int]] = []
         if inter_super is not None:
-            irb_means, irb_stds, irb_raw, _ = eval_1q_rb_curves(True)
+            irb_means, irb_stds, irb_raw, irb_seq_samples = eval_1q_rb_curves(True)
 
-        # Build sample CircuitOpModel sequence for "Load into Schematic"
-        step_cursor = 0
-        dsl_map = {
+        # Build multi-depth Standard RB + Interleaved IRB CircuitOpModel samples for inline schematic & SVG export
+        dsl_map: Dict[str, Tuple[str, List[float]]] = {
             "I": ("I", []),
             "X": ("X", []),
             "Y": ("Y", []),
@@ -494,25 +495,95 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
             "Y90": ("RY", [round(0.5 * math.pi, 4)]),
             "Ym90": ("RY", [-round(0.5 * math.pi, 4)]),
         }
-        for ci in sample_c_idx:
-            for p_tok in _CLIFFORD_1Q_PULSE_SEQS[ci]:
+        inter_dsl_map: Dict[str, Tuple[str, List[float]]] = {
+            "SX": ("SX", []),
+            "X90": ("SX", []),
+            "X": ("X", []),
+            "Y": ("Y", []),
+            "Z": ("Z", []),
+            "H": ("H", []),
+            "S": ("S", []),
+            "Y90": ("RY", [round(0.5 * math.pi, 4)]),
+        }
+
+        def build_1q_rb_ops(
+            tag: str, rand_c: List[int], inv_c: int, inter_gate_nm: Optional[str]
+        ) -> List[CircuitOpModel]:
+            ops_out: List[CircuitOpModel] = []
+            sc = 0
+            for ci in rand_c:
+                for p_tok in _CLIFFORD_1Q_PULSE_SEQS[ci]:
+                    g_nm, g_pr = dsl_map[p_tok]
+                    if g_nm == "I" and len(_CLIFFORD_1Q_PULSE_SEQS[ci]) > 1:
+                        continue
+                    ops_out.append(
+                        CircuitOpModel(
+                            id=f"{tag}_{sc}",
+                            step=sc,
+                            kind="gate",
+                            name=g_nm,
+                            qubits=[q0],
+                            params=list(g_pr),
+                        )
+                    )
+                    sc += 1
+                if inter_gate_nm:
+                    ig_nm, ig_pr = inter_dsl_map.get(inter_gate_nm, (inter_gate_nm, []))
+                    ops_out.append(
+                        CircuitOpModel(
+                            id=f"{tag}_ir_{sc}",
+                            step=sc,
+                            kind="gate",
+                            name=ig_nm,
+                            qubits=[q0],
+                            params=list(ig_pr),
+                        )
+                    )
+                    sc += 1
+            for p_tok in _CLIFFORD_1Q_PULSE_SEQS[inv_c]:
                 g_nm, g_pr = dsl_map[p_tok]
-                if g_nm == "I" and len(_CLIFFORD_1Q_PULSE_SEQS[ci]) > 1:
+                if g_nm == "I" and len(_CLIFFORD_1Q_PULSE_SEQS[inv_c]) > 1:
                     continue
-                sample_ops.append(
+                ops_out.append(
                     CircuitOpModel(
-                        id=f"rb_{step_cursor}",
-                        step=step_cursor,
+                        id=f"{tag}_inv_{sc}",
+                        step=sc,
                         kind="gate",
                         name=g_nm,
                         qubits=[q0],
-                        params=g_pr,
+                        params=list(g_pr),
                     )
                 )
-                step_cursor += 1
-        sample_ops.append(
-            CircuitOpModel(id="rb_m", step=step_cursor, kind="measure", name="MEASURE", qubits=[q0], params=[])
-        )
+                sc += 1
+            ops_out.append(
+                CircuitOpModel(id=f"{tag}_m", step=sc, kind="measure", name="MEASURE", qubits=[q0], params=[])
+            )
+            return ops_out
+
+        rb_circuit_samples: List[Dict[str, Any]] = []
+        for m_val, c_list, inv_c in ref_seq_samples:
+            ops_m = build_1q_rb_ops(f"rb_m{m_val}", c_list, inv_c, None)
+            rb_circuit_samples.append(
+                {
+                    "id": f"rb_ref_m{m_val}",
+                    "label": f"参考 RB (m={m_val})",
+                    "subtitle": f"{m_val} 个随机 C₁ Clifford 脉冲分解 + 逆恢复门 C_inv → 测量",
+                    "operations": [op.model_dump() for op in ops_m],
+                }
+            )
+            if not sample_ops or m_val == ref_seq_samples[-1][0]:
+                sample_ops = ops_m
+
+        for m_val, c_list, inv_c in irb_seq_samples[:2]:
+            ops_irb = build_1q_rb_ops(f"irb_m{m_val}", c_list, inv_c, interleaved_name)
+            rb_circuit_samples.append(
+                {
+                    "id": f"rb_irb_m{m_val}",
+                    "label": f"交织 [{interleaved_name}] IRB (m={m_val})",
+                    "subtitle": f"每级随机 Clifford 后插入待测门 {interleaved_name} + 总逆恢复门 C_inv → 测量",
+                    "operations": [op.model_dump() for op in ops_irb],
+                }
+            )
 
         dim = 2
         baseline_b = 0.5
@@ -733,13 +804,16 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         e0_1 = np.diag([1.0 - noise1["p1_given_0"], noise1["p0_given_1"]])
         e00_bra = np.kron(e0_0, e0_1).reshape(-1).astype(np.complex128).conj()
 
-        def eval_2q_rb(use_inter: bool) -> Tuple[List[float], List[float], List[List[float]], List[Tuple[str, List[int]]]]:
+        def eval_2q_rb(
+            use_inter: bool,
+        ) -> Tuple[List[float], List[float], List[List[float]], List[Tuple[int, List[Tuple[str, List[int]]]]]]:
             # Paired RNG seed across ref & interleaved runs for low-variance IRB comparison!
             loc_rng = np.random.default_rng(req.seed)
             means: List[float] = []
             stds: List[float] = []
             raw_samples: List[List[float]] = []
-            sample_trace: List[Tuple[str, List[int]]] = []
+            sampled_traces: List[Tuple[int, List[Tuple[str, List[int]]]]] = []
+            sample_m_set = {0, min(1, len(raw_lens) - 1)}
             for m_idx, m_len in enumerate(raw_lens):
                 seq_probs: List[float] = []
                 for k in range(num_seeds):
@@ -747,7 +821,7 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
                     s_seq = np.eye(16, dtype=np.complex128)
                     u_seq = np.eye(4, dtype=np.complex128)
                     local_trace: List[Tuple[str, List[int]]] = []
-                    rec = (not use_inter) and m_idx == 0 and k == 0
+                    rec = (m_idx in sample_m_set) and k == 0
                     for c2_i in picks:
                         s_c, u_c, tr_c = sample_canonical_2q_clifford(int(c2_i), rec)
                         s_seq = s_c @ s_seq
@@ -757,11 +831,13 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
                         if use_inter and inter_u_2q is not None and inter_super_2q is not None:
                             s_seq = inter_super_2q @ s_seq
                             u_seq = inter_u_2q @ u_seq
+                            if rec and interleaved_name:
+                                local_trace.append((interleaved_name, [q0, q1]))
                     t_inv = stim.Tableau.from_unitary_matrix(u_seq.conj().T, endian="big")
                     s_inv, tr_inv = tableau_to_superop(t_inv)
                     if rec:
                         local_trace.extend(tr_inv)
-                        sample_trace = local_trace
+                        sampled_traces.append((m_len, local_trace))
                     s_full = s_inv @ s_seq
                     p_surv = float(np.clip(np.real(e00_bra @ (s_full @ rho0_vec)), 0.0, 1.0))
                     if shots > 0:
@@ -771,14 +847,15 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
                 means.append(float(np.mean(arr)))
                 stds.append(float(np.std(arr, ddof=1) / math.sqrt(len(arr))) if len(arr) > 1 else 0.0)
                 raw_samples.append(seq_probs)
-            return means, stds, raw_samples, sample_trace
+            return means, stds, raw_samples, sampled_traces
 
-        ref_means, ref_stds, ref_raw, sample_2q_trace = eval_2q_rb(False)
+        ref_means, ref_stds, ref_raw, ref_2q_traces = eval_2q_rb(False)
         irb_means = None
         irb_stds = None
         irb_raw = None
+        irb_2q_traces: List[Tuple[int, List[Tuple[str, List[int]]]]] = []
         if inter_super_2q is not None:
-            irb_means, irb_stds, irb_raw, _ = eval_2q_rb(True)
+            irb_means, irb_stds, irb_raw, irb_2q_traces = eval_2q_rb(True)
 
         name_remap = {"X90": "SX", "Xm90": "RX", "Y90": "RY", "Ym90": "RY"}
         param_remap: Dict[str, List[float]] = {
@@ -786,27 +863,59 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
             "Y90": [round(0.5 * math.pi, 4)],
             "Ym90": [-round(0.5 * math.pi, 4)],
         }
-        for idx_op, (gnm, qlist) in enumerate(sample_2q_trace[:40]):
-            sample_ops.append(
+
+        def trace_2q_to_ops(tag: str, tr_list: List[Tuple[str, List[int]]]) -> List[CircuitOpModel]:
+            out_ops: List[CircuitOpModel] = []
+            for idx_op, (gnm, qlist) in enumerate(tr_list[:48]):
+                if gnm == "I" and len(tr_list) > 2:
+                    continue
+                step_i = len(out_ops)
+                out_ops.append(
+                    CircuitOpModel(
+                        id=f"{tag}_{step_i}",
+                        step=step_i,
+                        kind="gate",
+                        name=name_remap.get(gnm, gnm),
+                        qubits=qlist,
+                        params=list(param_remap.get(gnm, [])),
+                    )
+                )
+            out_ops.append(
                 CircuitOpModel(
-                    id=f"rb2_{idx_op}",
-                    step=idx_op,
-                    kind="gate",
-                    name=name_remap.get(gnm, gnm),
-                    qubits=qlist,
-                    params=param_remap.get(gnm, []),
+                    id=f"{tag}_m",
+                    step=len(out_ops),
+                    kind="measure",
+                    name="MEASURE",
+                    qubits=[q0, q1],
+                    params=[],
                 )
             )
-        sample_ops.append(
-            CircuitOpModel(
-                id="rb2_m",
-                step=len(sample_ops),
-                kind="measure",
-                name="MEASURE",
-                qubits=[q0, q1],
-                params=[],
+            return out_ops
+
+        rb_circuit_samples = []
+        for m_val, tr_seq in ref_2q_traces:
+            ops_2q = trace_2q_to_ops(f"rb2_m{m_val}", tr_seq)
+            rb_circuit_samples.append(
+                {
+                    "id": f"rb2_ref_m{m_val}",
+                    "label": f"参考 2Q RB (m={m_val})",
+                    "subtitle": f"{m_val} 个随机 C₂ 双比特 Clifford (Koenig-Smolin 分解) + 逆恢复门 → 联合测量",
+                    "operations": [op.model_dump() for op in ops_2q],
+                }
             )
-        )
+            if not sample_ops:
+                sample_ops = ops_2q
+
+        for m_val, tr_seq in irb_2q_traces:
+            ops_2q_irb = trace_2q_to_ops(f"irb2_m{m_val}", tr_seq)
+            rb_circuit_samples.append(
+                {
+                    "id": f"rb2_irb_m{m_val}",
+                    "label": f"交织 [{interleaved_name}] 2Q IRB (m={m_val})",
+                    "subtitle": f"每级 C₂ 随机门后交织双比特门 {interleaved_name} + Stim Tableau 逆恢复 → 测量",
+                    "operations": [op.model_dump() for op in ops_2q_irb],
+                }
+            )
 
         dim = 4
         baseline_b = 0.25
@@ -909,6 +1018,7 @@ def _run_rb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         "coherence_epc_floor": round(coherence_epc_floor, 6),
         "interleaved": irb_summary,
         "sample_operations": [op.model_dump() for op in sample_ops],
+        "circuit_samples": rb_circuit_samples,
     }
 
 
@@ -1317,13 +1427,70 @@ def _run_gst_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
     max_diam = float(np.max([g["diamond_distance"] for g in gate_reports]))
     mean_unitarity = float(np.mean([g["unitarity"] for g in gate_reports]))
 
-    # Sample GST fiducial sandwich circuit (F_2 = Y90 -> Gx90 -> M_1 = X90 -> Measure)
-    sample_gst_ops = [
-        CircuitOpModel(id="gst_f", step=0, kind="gate", name="RY", qubits=[q0], params=[round(0.5 * math.pi, 4)]).model_dump(),
-        CircuitOpModel(id="gst_g", step=1, kind="gate", name="SX", qubits=[q0], params=[]).model_dump(),
-        CircuitOpModel(id="gst_m0", step=2, kind="gate", name="SX", qubits=[q0], params=[]).model_dump(),
-        CircuitOpModel(id="gst_meas", step=3, kind="measure", name="MEASURE", qubits=[q0], params=[]).model_dump(),
-    ]
+    # Build GST Fiducial-Germ-Fiducial circuit catalog across all 6 gates + germ powers!
+    gst_tok_map: Dict[str, Tuple[str, List[float]]] = {
+        "I": ("I", []),
+        "X90": ("SX", []),
+        "Y90": ("RY", [round(0.5 * math.pi, 4)]),
+        "X": ("X", []),
+        "Y": ("Y", []),
+        "H": ("H", []),
+    }
+
+    def _build_gst_ops(tag: str, f_prep: Sequence[str], germ_tok: str, power: int, f_meas: Sequence[str]) -> List[Dict[str, Any]]:
+        ops_out: List[Dict[str, Any]] = []
+        st = 0
+        full_seq = list(f_prep) + ([germ_tok] * power) + list(f_meas)
+        for tok in full_seq:
+            gnm, gpr = gst_tok_map.get(tok, (tok, []))
+            ops_out.append(
+                CircuitOpModel(
+                    id=f"{tag}_{st}",
+                    step=st,
+                    kind="gate",
+                    name=gnm,
+                    qubits=[q0],
+                    params=gpr,
+                ).model_dump()
+            )
+            st += 1
+        ops_out.append(
+            CircuitOpModel(id=f"{tag}_m", step=st, kind="measure", name="MEASURE", qubits=[q0], params=[]).model_dump()
+        )
+        return ops_out
+
+    gst_circuit_samples: List[Dict[str, Any]] = []
+    for g_id, p_tok, g_lbl in gate_keys:
+        gst_circuit_samples.append(
+            {
+                "id": f"gst_{g_id}_l1",
+                "gate_id": g_id,
+                "label": f"{g_id} · LGST 基准三明治 (L=1)",
+                "subtitle": f"F₂(Y90) → {p_tok} → M₁(X90) → 测量 ({g_lbl})",
+                "operations": _build_gst_ops(f"gst_{g_id}_1", ("Y90",), p_tok, 1, ("X90",)),
+            }
+        )
+        if l_max > 1 and p_tok != "I":
+            cap_l = min(l_max, 8)
+            gst_circuit_samples.append(
+                {
+                    "id": f"gst_{g_id}_lmax",
+                    "gate_id": g_id,
+                    "label": f"{g_id} · 长胚相干放大 (L={cap_l})",
+                    "subtitle": f"F₁(X90) → ({p_tok})^{cap_l} → M₂(Y90) → 测量 (放大过旋转误差)",
+                    "operations": _build_gst_ops(f"gst_{g_id}_L", ("X90",), p_tok, cap_l, ("Y90",)),
+                }
+            )
+    gst_circuit_samples.append(
+        {
+            "id": "gst_gram_f3_m0",
+            "gate_id": "SPAM",
+            "label": "Gram 矩阵 SPAM 标定电路",
+            "subtitle": "F₃(X90·X90) → M₀(∅) → 测量 (剥离初态与读出混淆)",
+            "operations": _build_gst_ops("gst_gram", ("X90", "X90"), "I", 0, ()),
+        }
+    )
+    sample_gst_ops = gst_circuit_samples[1]["operations"]
 
     return {
         "protocol": "gst",
@@ -1344,6 +1511,7 @@ def _run_gst_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         "gram_matrix": np.round(gram, 4).tolist(),
         "gates": gate_reports,
         "sample_operations": sample_gst_ops,
+        "circuit_samples": gst_circuit_samples,
     }
 
 
@@ -1477,6 +1645,8 @@ def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
     speckle_ideal: List[float] = []
     speckle_meas: List[float] = []
     sample_ops: List[CircuitOpModel] = []
+    xeb_circuit_samples: List[Dict[str, Any]] = []
+    xeb_sample_m_set = {0, min(1, len(raw_lens) - 1), min(2, len(raw_lens) - 1)}
 
     for m_idx, m_cyc in enumerate(raw_lens):
         num_sum = 0.0
@@ -1485,7 +1655,8 @@ def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         for k in range(num_seeds):
             psi_id = psi0.copy()
             rho_v = rho0_vec.copy()
-            rec = m_idx == min(1, len(raw_lens) - 1) and k == 0
+            rec = (m_idx in xeb_sample_m_set) and k == 0
+            cur_ops: List[CircuitOpModel] = []
             step_c = 0
             for _ in range(m_cyc):
                 i_a = int(rng.integers(0, len(g1_q0)))
@@ -1497,18 +1668,28 @@ def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
                 if rec:
                     for q_t, g_tok in ((q0, nm_a), (q1, nm_b)):
                         if g_tok == "SX":
-                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="SX", qubits=[q_t], params=[]))
+                            cur_ops.append(CircuitOpModel(id=f"xeb_m{m_cyc}_{step_c}_{q_t}", step=step_c, kind="gate", name="SX", qubits=[q_t], params=[]))
                         elif g_tok == "SY":
-                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="RY", qubits=[q_t], params=[round(0.5 * math.pi, 4)]))
+                            cur_ops.append(CircuitOpModel(id=f"xeb_m{m_cyc}_{step_c}_{q_t}", step=step_c, kind="gate", name="RY", qubits=[q_t], params=[round(0.5 * math.pi, 4)]))
                         else:
                             phi_w = 0.25 * math.pi if "W" in g_tok else 0.0
                             th_w = -0.5 * math.pi if "dg" in g_tok else 0.5 * math.pi
-                            sample_ops.append(CircuitOpModel(id=f"xeb_{step_c}_{q_t}", step=step_c, kind="gate", name="RXY", qubits=[q_t], params=[round(th_w, 4), round(phi_w, 4)]))
+                            cur_ops.append(CircuitOpModel(id=f"xeb_m{m_cyc}_{step_c}_{q_t}", step=step_c, kind="gate", name="RXY", qubits=[q_t], params=[round(th_w, 4), round(phi_w, 4)]))
                     step_c += 1
-                    sample_ops.append(CircuitOpModel(id=f"xeb_e_{step_c}", step=step_c, kind="gate", name=dsl_ent_name, qubits=[q0, q1], params=[]))
+                    cur_ops.append(CircuitOpModel(id=f"xeb_m{m_cyc}_e_{step_c}", step=step_c, kind="gate", name=dsl_ent_name, qubits=[q0, q1], params=[]))
                     step_c += 1
             if rec:
-                sample_ops.append(CircuitOpModel(id="xeb_m", step=step_c, kind="measure", name="MEASURE", qubits=[q0, q1], params=[]))
+                cur_ops.append(CircuitOpModel(id=f"xeb_m{m_cyc}_meas", step=step_c, kind="measure", name="MEASURE", qubits=[q0, q1], params=[]))
+                xeb_circuit_samples.append(
+                    {
+                        "id": f"xeb_m{m_cyc}",
+                        "label": f"Sycamore 周期 (m={m_cyc})",
+                        "subtitle": f"{m_cyc} 周期随机单比特 {{√X, √Y, √W}} 并行层 + {ent_label} 纠缠门 → 比特串采样",
+                        "operations": [op.model_dump() for op in cur_ops],
+                    }
+                )
+                if m_idx == min(1, len(raw_lens) - 1) or not sample_ops:
+                    sample_ops = cur_ops
 
             p_id = np.abs(psi_id) ** 2
             p_ns_raw = np.clip(np.real(rho_v[diag_indices]), 0.0, 1.0)
@@ -1592,6 +1773,7 @@ def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
         "speckle_ideal": speckle_ideal,
         "speckle_measured": speckle_meas,
         "sample_operations": [op.model_dump() for op in sample_ops],
+        "circuit_samples": xeb_circuit_samples,
     }
 
 
