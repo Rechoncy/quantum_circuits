@@ -720,7 +720,10 @@ export default function App() {
           if (restoredDraft) {
             addLog(`已自动恢复上次草稿 (${initial.name})`, 'info');
           }
-          await handleRunSimulation(initial, false);
+          setSimDirty(false);
+          setStatusMsg(
+            `就绪 · 当前工程 ${initial.name} (${initial.qubits.length}Q) · 点击右上角「运行仿真」或按 Ctrl+Enter 执行`
+          );
         }
       } catch (err) {
         setStatusMsg(`无法连接后端服务: ${String(err)}`);
@@ -1417,6 +1420,8 @@ export default function App() {
           setProject(importedProj);
           setPast([]);
           setFuture([]);
+          setSimResponse(null);
+          setSimDirty(false);
           setOptResponse(null);
           setBenchResponse(null);
           setSweepResponse(null);
@@ -1424,8 +1429,8 @@ export default function App() {
           setZneResponse(null);
           setSelection({ type: 'none' });
           setQasmError(null);
+          setStatusMsg(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q) · 点击右上角「运行仿真」开始求解`);
           addLog(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q)`, 'info');
-          handleRunSimulation(importedProj, false);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           setStatusMsg(`导入 OpenQASM 失败: ${msg}`);
@@ -1437,9 +1442,11 @@ export default function App() {
         const parsed = JSON.parse(rawText) as ProjectModel;
         if (parsed && Array.isArray(parsed.qubits) && Array.isArray(parsed.operations)) {
           setProject(parsed);
+          setSimResponse(null);
+          setSimDirty(false);
           setSelection({ type: 'none' });
+          setStatusMsg(`已导入项目: ${parsed.name} (${parsed.qubits.length}Q) · 点击右上角「运行仿真」开始求解`);
           addLog(`已导入项目: ${parsed.name}`, 'info');
-          handleRunSimulation(parsed, false);
         }
       } catch (err) {
         addLog(`导入项目失败: ${String(err)}`, 'error');
@@ -1466,12 +1473,6 @@ export default function App() {
 
   const handleSwitchDomain = (nextDomain: PrimaryDomain) => {
     setDomain(nextDomain);
-    if (nextDomain === 'characterization' && !gateBenchResponse) {
-      handleRunGateBenchmark();
-    } else if (nextDomain === 'circuits') {
-      if (circuitSubMode === 'optimize' && !optResponse) handleRunOptimize();
-      if (circuitSubMode === 'sweep' && !sweepResponse) handleRunSweep();
-    }
   };
 
   const handleSwitchCircuitSubMode = (sub: CircuitSubMode) => {
@@ -1484,8 +1485,6 @@ export default function App() {
         setStatusMsg(`求解完成 · ${pRes.backend_name} · ${project.qubits.length} qubits · ${pRes.total_duration_ns.toFixed(0)} ns${fStr}`);
       }
     }
-    if (sub === 'optimize' && !optResponse) handleRunOptimize();
-    if (sub === 'sweep' && !sweepResponse) handleRunSweep();
   };
 
   const handleApplyCalibrationWriteback = (wb: CalibrationWritebackItem) => {
@@ -1523,6 +1522,8 @@ export default function App() {
           setProject(clone);
           setPast([]);
           setFuture([]);
+          setSimResponse(null);
+          setSimDirty(false);
           setOptResponse(null);
           setBenchResponse(null);
           setSweepResponse(null);
@@ -1552,7 +1553,8 @@ export default function App() {
             backend: autoBackend,
           }));
           setSelection(clone.operations[0] ? { type: 'op', opId: clone.operations[0].id } : { type: 'none' });
-          handleRunSimulation(clone, false);
+          setStatusMsg(`已加载工程模板: ${clone.name} (${clone.qubits.length}Q) · 点击右上角「运行仿真」开始求解`);
+          addLog(`已切换工程模板: ${clone.name}`, 'info');
         }}
         onRenameProject={(name) => mutateProject((p) => ({ ...p, name }), false)}
         onBackendChange={(backend) =>
@@ -1975,9 +1977,13 @@ export default function App() {
             <BenchmarkWorkspace
               project={project}
               activeProtocol={benchmarkConfig.protocol}
+              targetQubit={benchmarkConfig.target_qubit}
+              secondQubit={benchmarkConfig.second_qubit}
+              rbNumQubits={benchmarkConfig.rb_num_qubits}
+              interleavedGate={benchmarkConfig.interleaved_gate}
+              xebEntangler={benchmarkConfig.xeb_entangler}
               onSwitchProtocol={(proto) => {
                 setBenchmarkConfig((prev) => ({ ...prev, protocol: proto }));
-                handleRunGateBenchmark(undefined, { protocol: proto });
               }}
               response={gateBenchResponse}
               darkMode={darkMode}
@@ -2075,7 +2081,7 @@ export default function App() {
                   target_qubit: qid,
                   protocol: proto,
                 }));
-                handleRunGateBenchmark(undefined, { target_qubit: qid, protocol: proto });
+                setStatusMsg(`已切换至 q${qid} 的 ${proto.toUpperCase()} 标定页 · 点击「运行实验」开始标定`);
               }}
             />
           )}
@@ -2147,9 +2153,7 @@ export default function App() {
                 sim_settings: { ...project.sim_settings, ...patch },
               };
               setProject(nextProj);
-              if (mode === 'simulate' && nextProj.qubits.length <= 6 && !isBusy) {
-                handleRunSimulation(nextProj, false);
-              }
+              setSimDirty(true);
             }}
             onToggleCustomGateNative={(gateId, isNative) =>
               mutateProject((p) => ({

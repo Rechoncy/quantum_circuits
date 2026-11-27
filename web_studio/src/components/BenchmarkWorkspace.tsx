@@ -239,9 +239,255 @@ const CharacterizationCircuitPanel: React.FC<CharacterizationCircuitPanelProps> 
   );
 };
 
+function buildPreviewSamples(
+  protocol: BenchmarkProtocol,
+  project: ProjectModel,
+  targetQubit = 0,
+  secondQubit = 1,
+  rbNumQubits: 1 | 2 = 1,
+  interleavedGate = 'SX',
+  xebEntangler = 'SQISWAP'
+): CharacterizationCircuitSample[] {
+  const nQ = Math.max(1, project.qubits.length);
+  const q0 = Math.min(Math.max(0, targetQubit), nQ - 1);
+  const q1Raw = Math.min(Math.max(0, secondQubit), nQ - 1);
+  const q1 = q1Raw === q0 && nQ >= 2 ? (q0 === 0 ? 1 : 0) : q1Raw;
+  const halfPi = Number((0.5 * Math.PI).toFixed(4));
+  const piVal = Number(Math.PI.toFixed(4));
+  const mk = (
+    id: string,
+    step: number,
+    kind: CircuitOpModel['kind'],
+    name: string,
+    qubits: number[],
+    params: (number | string)[] = []
+  ): CircuitOpModel => ({ id, step, kind, name, qubits, params });
+
+  if (protocol === 'rabi') {
+    return [
+      {
+        id: 'pre_rabi_scan',
+        label: 'Rabi 变脉宽扫描',
+        subtitle: '扫描共振微波/激光脉冲宽度 t: RXY(Ω_R·t, 0) → 投影测量 P(|1⟩)',
+        operations: [mk('r0', 0, 'gate', 'RXY', [q0], [piVal, 0]), mk('r1', 1, 'measure', 'MEASURE', [q0])],
+      },
+      {
+        id: 'pre_rabi_sx',
+        label: 'π/2 脉冲 (SX)',
+        subtitle: '标定半角翻转门 SX = RX(π/2) → 测量',
+        operations: [mk('s0', 0, 'gate', 'SX', [q0]), mk('s1', 1, 'measure', 'MEASURE', [q0])],
+      },
+      {
+        id: 'pre_rabi_x',
+        label: 'π 脉冲 (X)',
+        subtitle: '标定全翻转门 X = RX(π) → 测量',
+        operations: [mk('x0', 0, 'gate', 'X', [q0]), mk('x1', 1, 'measure', 'MEASURE', [q0])],
+      },
+    ];
+  }
+  if (protocol === 'ramsey') {
+    return [
+      {
+        id: 'pre_ramsey',
+        label: 'Ramsey π/2 − τ − π/2',
+        subtitle: 'SX 制备赤道叠加态 → 自由进动与纯退相干演化 τ → SX 相位读出 → 测量',
+        operations: [
+          mk('rm0', 0, 'gate', 'SX', [q0]),
+          mk('rm1', 1, 'gate', 'RZ', [q0], [halfPi]),
+          mk('rm2', 2, 'noise', 'PHASE_DAMPING', [q0], [0.05]),
+          mk('rm3', 3, 'gate', 'SX', [q0]),
+          mk('rm4', 4, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+    ];
+  }
+  if (protocol === 't1') {
+    return [
+      {
+        id: 'pre_t1',
+        label: 'T1 π 激发 − τ 弛豫',
+        subtitle: 'X 脉冲制备 |1⟩ 态 → 自由能量弛豫等待时间 τ → 测量激发态布居 P(|1⟩)',
+        operations: [
+          mk('t0', 0, 'gate', 'X', [q0]),
+          mk('t1', 1, 'noise', 'AMPLITUDE_DAMPING', [q0], [0.1]),
+          mk('t2', 2, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+    ];
+  }
+  if (protocol === 'rb') {
+    if (rbNumQubits === 2 && nQ >= 2) {
+      const ig2 = ['CZ', 'CNOT', 'ISWAP'].includes(interleavedGate.toUpperCase())
+        ? interleavedGate.toUpperCase()
+        : 'CZ';
+      return [
+        {
+          id: 'pre_rb2_ref',
+          label: '参考 2Q RB (m=2 示意)',
+          subtitle: '随机双比特 C₂ Clifford 序列 (Koenig-Smolin 分解) + 总逆恢复门 C_inv → 联合测量',
+          operations: [
+            mk('b0', 0, 'gate', 'SX', [q0]),
+            mk('b1', 0, 'gate', 'RY', [q1], [halfPi]),
+            mk('b2', 1, 'gate', 'CNOT', [q0, q1]),
+            mk('b3', 2, 'gate', 'H', [q0]),
+            mk('b4', 3, 'gate', 'CNOT', [q1, q0]),
+            mk('b5', 4, 'gate', 'SX', [q0]),
+            mk('b6', 4, 'gate', 'RY', [q1], [-halfPi]),
+            mk('b7', 5, 'measure', 'MEASURE', [q0, q1]),
+          ],
+        },
+        {
+          id: 'pre_rb2_irb',
+          label: `交织 [${ig2}] 2Q IRB`,
+          subtitle: `每级随机 C₂ 门后插入待测双比特门 ${ig2} + 总逆恢复门 C_inv → 联合测量`,
+          operations: [
+            mk('i0', 0, 'gate', 'SX', [q0]),
+            mk('i1', 1, 'gate', 'CNOT', [q0, q1]),
+            mk('i2', 2, 'gate', ig2, [q0, q1]),
+            mk('i3', 3, 'gate', 'RY', [q1], [halfPi]),
+            mk('i4', 4, 'gate', ig2, [q0, q1]),
+            mk('i5', 5, 'gate', 'CNOT', [q0, q1]),
+            mk('i6', 6, 'measure', 'MEASURE', [q0, q1]),
+          ],
+        },
+      ];
+    }
+    const ig1 = interleavedGate || 'SX';
+    return [
+      {
+        id: 'pre_rb1_ref',
+        label: '参考 1Q RB (m=3 示意)',
+        subtitle: 'm 个随机单比特 C₁ Clifford 脉冲分解 + 逆恢复门 C_inv → 测量 P(|0⟩)',
+        operations: [
+          mk('c0', 0, 'gate', 'SX', [q0]),
+          mk('c1', 1, 'gate', 'RY', [q0], [halfPi]),
+          mk('c2', 2, 'gate', 'X', [q0]),
+          mk('c3', 3, 'gate', 'RY', [q0], [-halfPi]),
+          mk('c4', 4, 'gate', 'RX', [q0], [-halfPi]),
+          mk('c5', 5, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+      {
+        id: 'pre_rb1_irb',
+        label: `交织 [${ig1}] 1Q IRB`,
+        subtitle: `每级随机 Clifford 后交织插入待测门 ${ig1} + 总逆恢复门 C_inv → 测量`,
+        operations: [
+          mk('ic0', 0, 'gate', 'SX', [q0]),
+          mk('ic1', 1, 'gate', ig1 === 'Y90' ? 'RY' : ig1, [q0], ig1 === 'Y90' ? [halfPi] : []),
+          mk('ic2', 2, 'gate', 'RY', [q0], [halfPi]),
+          mk('ic3', 3, 'gate', ig1 === 'Y90' ? 'RY' : ig1, [q0], ig1 === 'Y90' ? [halfPi] : []),
+          mk('ic4', 4, 'gate', 'RX', [q0], [-halfPi]),
+          mk('ic5', 5, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+    ];
+  }
+  if (protocol === 'allxy') {
+    return [
+      {
+        id: 'pre_axy_1',
+        label: '#2 X·X (基态 +1)',
+        subtitle: '第一阶平台 ⟨Z⟩ = +1: 连续两次 π 翻转检验幅度过/欠旋转二阶误差',
+        operations: [mk('a0', 0, 'gate', 'X', [q0]), mk('a1', 1, 'gate', 'X', [q0]), mk('a2', 2, 'measure', 'MEASURE', [q0])],
+      },
+      {
+        id: 'pre_axy_8',
+        label: '#8 X90·Y90 (赤道 0)',
+        subtitle: '第二阶平台 ⟨Z⟩ = 0: 正交双轴 π/2 脉冲检测 IQ 相位偏斜与失谐',
+        operations: [mk('b0', 0, 'gate', 'SX', [q0]), mk('b1', 1, 'gate', 'RY', [q0], [halfPi]), mk('b2', 2, 'measure', 'MEASURE', [q0])],
+      },
+      {
+        id: 'pre_axy_12',
+        label: '#12 X·Y90 (赤道 0)',
+        subtitle: '高灵敏度幅度诊断对: π 与 π/2 组合产生正负交替锯齿特征',
+        operations: [mk('c0', 0, 'gate', 'X', [q0]), mk('c1', 1, 'gate', 'RY', [q0], [halfPi]), mk('c2', 2, 'measure', 'MEASURE', [q0])],
+      },
+      {
+        id: 'pre_axy_20',
+        label: '#20 X90·X90 (激发态 -1)',
+        subtitle: '第三阶平台 ⟨Z⟩ = -1: 双 π/2 同轴叠加制备 |1⟩ 态',
+        operations: [mk('d0', 0, 'gate', 'SX', [q0]), mk('d1', 1, 'gate', 'SX', [q0]), mk('d2', 2, 'measure', 'MEASURE', [q0])],
+      },
+    ];
+  }
+  if (protocol === 'gst') {
+    const gstDefs: { id: string; label: string; gName: string; gParams: number[] }[] = [
+      { id: 'Gi', label: 'Gi (L=1)', gName: 'I', gParams: [] },
+      { id: 'Gx90', label: 'Gx90 (L=1)', gName: 'SX', gParams: [] },
+      { id: 'Gy90', label: 'Gy90 (L=1)', gName: 'RY', gParams: [halfPi] },
+      { id: 'Gx', label: 'Gx (L=1)', gName: 'X', gParams: [] },
+      { id: 'Gy', label: 'Gy (L=1)', gName: 'Y', gParams: [] },
+      { id: 'Gh', label: 'Gh (L=1)', gName: 'H', gParams: [] },
+    ];
+    const out: CharacterizationCircuitSample[] = gstDefs.map((g) => ({
+      id: `gst_${g.id}_l1`,
+      gate_id: g.id,
+      label: g.label,
+      subtitle: `LGST 完备层析三明治: 态制备 F_j(X90) → 待测门 ${g.id} → 测量基准 M_i(Y90) → 测量`,
+      operations: [
+        mk(`g_${g.id}_0`, 0, 'gate', 'SX', [q0]),
+        mk(`g_${g.id}_1`, 1, 'gate', g.gName, [q0], g.gParams),
+        mk(`g_${g.id}_2`, 2, 'gate', 'RY', [q0], [halfPi]),
+        mk(`g_${g.id}_3`, 3, 'measure', 'MEASURE', [q0]),
+      ],
+    }));
+    out.push({
+      id: 'gst_Gx90_germ',
+      gate_id: 'Gx90',
+      label: 'Gx90 (L=4 胚门放大)',
+      subtitle: '长序列胚门重复放大相干旋转角误差: F_j(X90) → (Gx90)^4 → M_i(Y90) → 测量',
+      operations: [
+        mk('gg0', 0, 'gate', 'SX', [q0]),
+        mk('gg1', 1, 'gate', 'SX', [q0]),
+        mk('gg2', 2, 'gate', 'SX', [q0]),
+        mk('gg3', 3, 'gate', 'SX', [q0]),
+        mk('gg4', 4, 'gate', 'SX', [q0]),
+        mk('gg5', 5, 'gate', 'RY', [q0], [halfPi]),
+        mk('gg6', 6, 'measure', 'MEASURE', [q0]),
+      ],
+    });
+    return out;
+  }
+  // XEB
+  const ent = xebEntangler || 'SQISWAP';
+  const pair = nQ >= 2 ? [q0, q1] : [q0];
+  if (pair.length < 2) {
+    return [
+      {
+        id: 'pre_xeb_1q',
+        label: 'XEB 周期示意',
+        subtitle: 'XEB 需要至少 2 个量子比特以执行双比特纠缠周期',
+        operations: [mk('x0', 0, 'gate', 'SX', [q0]), mk('x1', 1, 'measure', 'MEASURE', [q0])],
+      },
+    ];
+  }
+  const quarterPi = Number((0.25 * Math.PI).toFixed(4));
+  return [
+    {
+      id: 'pre_xeb_m2',
+      label: `Sycamore 周期 (m=2 · ${ent})`,
+      subtitle: `每周期并行随机单比特 {√X, √Y, √W} 层 + ${ent} 双比特纠缠门 → 联合比特串采样`,
+      operations: [
+        mk('x0', 0, 'gate', 'SX', [q0]),
+        mk('x1', 0, 'gate', 'RXY', [q1], [halfPi, quarterPi]),
+        mk('x2', 1, 'gate', ent, [q0, q1]),
+        mk('x3', 2, 'gate', 'RY', [q0], [halfPi]),
+        mk('x4', 2, 'gate', 'SX', [q1]),
+        mk('x5', 3, 'gate', ent, [q0, q1]),
+        mk('x6', 4, 'measure', 'MEASURE', [q0, q1]),
+      ],
+    },
+  ];
+}
+
 interface BenchmarkWorkspaceProps {
   project: ProjectModel;
   activeProtocol: BenchmarkProtocol;
+  targetQubit?: number;
+  secondQubit?: number;
+  rbNumQubits?: 1 | 2;
+  interleavedGate?: string;
+  xebEntangler?: string;
   onSwitchProtocol: (p: BenchmarkProtocol) => void;
   response: GateBenchmarkResponse | null;
   darkMode: boolean;
@@ -254,6 +500,11 @@ interface BenchmarkWorkspaceProps {
 export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
   project,
   activeProtocol,
+  targetQubit = 0,
+  secondQubit = 1,
+  rbNumQubits = 1,
+  interleavedGate = 'SX',
+  xebEntangler = 'SQISWAP',
   onSwitchProtocol,
   response,
   darkMode,
@@ -484,54 +735,73 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Empty State */}
-      {!matchingResp && (
-        <div className="flex-1 dot-grid-canvas flex items-center justify-center p-6">
-          <div className="studio-card max-w-lg p-6 text-center space-y-3">
-            <div className="w-10 h-10 mx-auto rounded-[4px] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center">
-              <Gauge className="w-5 h-5" />
+      {/* Pre-Run Ready State with Live Protocol Circuit Schematic Preview */}
+      {!matchingResp && (() => {
+        const previewSamples = buildPreviewSamples(
+          activeProtocol,
+          project,
+          targetQubit,
+          secondQubit,
+          rbNumQubits,
+          interleavedGate,
+          xebEntangler
+        );
+        return (
+          <div className="flex-1 min-h-0 overflow-y-auto dot-grid-canvas p-3.5 space-y-3">
+            <CharacterizationCircuitPanel
+              project={project}
+              protocolCode={`${activeProtocol.toUpperCase()}_Preview`}
+              title={`${activeProtocol.toUpperCase()} 协议标准脉冲 / 门序列原理图预览`}
+              samples={previewSamples}
+              onLoadCircuitToDesign={onLoadCircuitToDesign}
+            />
+
+            <div className="studio-card max-w-2xl mx-auto p-6 text-center space-y-3 mt-4">
+              <div className="w-10 h-10 mx-auto rounded-[4px] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center">
+                <Gauge className="w-5 h-5" />
+              </div>
+              <div className="text-[14px] font-bold text-[var(--text-primary)]">
+                {activeProtocol === 'rabi'
+                  ? 'Rabi 时间域拉比振荡标定 (拟合实测 Ω_R 与 π / π/2 脉冲宽度)'
+                  : activeProtocol === 'ramsey'
+                  ? 'Ramsey 自由演化干涉条纹标定 (拟合相干时间 T2* 与频率失谐 Δ)'
+                  : activeProtocol === 't1'
+                  ? 'T1 能量弛豫衰减标定 (π 激发后测量自发辐射寿命 T1)'
+                  : activeProtocol === 'rb'
+                  ? 'Clifford 随机基准与交织门保真度标定 (RB & Interleaved RB)'
+                  : activeProtocol === 'allxy'
+                  ? 'AllXY 21 序列相干过旋转 / 失谐 / 正交偏斜脉冲诊断'
+                  : activeProtocol === 'gst'
+                  ? '门集层析成像 Gate Set Tomography (6 门 PTM 重构与钻石范数误差)'
+                  : '双比特线性交叉熵基准 Linear XEB (支持 √iSWAP 等非 Clifford 原生纠缠门)'}
+              </div>
+              <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                {activeProtocol === 'rabi'
+                  ? '在右侧检查器确认目标比特与采样点数后，点击下方按钮扫描驱动脉冲时长 t，通过阻尼余弦拟合提取真实拉比频率 Ω_R 及 π / π/2 脉宽。'
+                  : activeProtocol === 'ramsey'
+                  ? '执行上方 π/2 − τ − π/2 序列并引入人工失谐条纹，同时拟合纯退相干包络 T2* 与本振频率偏移 Δ。'
+                  : activeProtocol === 't1'
+                  ? '执行上方 π 翻转脉冲制备 |1⟩ 态并扫描自由等待时间 τ，拟合指数弛豫曲线提取能量弛豫寿命 T1。'
+                  : activeProtocol === 'rb'
+                  ? '上方已展示当前配置的 RB / 交织 IRB 标准门序列结构。在右侧检查器设好目标比特、1Q/2Q 阶数与交织门后，点击下方按钮执行随机种子统计采样与指数拟合。'
+                  : activeProtocol === 'allxy'
+                  ? '上方可预览典型 AllXY 双脉冲组合。点击下方按钮依次执行全部 21 组 {I, X, Y, X90, Y90} 序列并自动鉴别幅度过/欠旋转与失谐。'
+                  : activeProtocol === 'gst'
+                  ? '上方可切换查看 Gi / Gx90 / Gy90 / Gx / Gy / Gh 的完备层析电路。点击下方按钮运行免 SPAM 干扰的规范对准层析并重构 4×4 泡利转移矩阵。'
+                  : '上方已展示 Sycamore 随机单比特 + 纠缠门周期结构。点击下方按钮执行多深度比特串采样与线性交叉熵拟合。'}
+              </p>
+              <button
+                onClick={onRunBenchmark}
+                disabled={isBusy}
+                className="mx-auto h-8 px-4 rounded-[3px] studio-btn-primary text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                点击运行 {activeProtocol.toUpperCase()} 表征实验
+              </button>
             </div>
-            <div className="text-[14px] font-bold text-[var(--text-primary)]">
-              {activeProtocol === 'rabi'
-                ? 'Rabi 时间域拉比振荡标定 (拟合实测 Ω_R 与 π / π/2 脉冲宽度)'
-                : activeProtocol === 'ramsey'
-                ? 'Ramsey 自由演化干涉条纹标定 (拟合相干时间 T2* 与频率失谐 Δ)'
-                : activeProtocol === 't1'
-                ? 'T1 能量弛豫衰减标定 (π 激发后测量自发辐射寿命 T1)'
-                : activeProtocol === 'rb'
-                ? 'Clifford 随机基准与交织门保真度标定 (RB & Interleaved RB)'
-                : activeProtocol === 'allxy'
-                ? 'AllXY 21 序列相干过旋转 / 失谐 / 正交偏斜脉冲诊断'
-                : activeProtocol === 'gst'
-                ? '门集层析成像 Gate Set Tomography (6 门 PTM 重构与钻石范数误差)'
-                : '双比特线性交叉熵基准 Linear XEB (支持 √iSWAP 等非 Clifford 原生纠缠门)'}
-            </div>
-            <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
-              {activeProtocol === 'rabi'
-                ? '扫描共振驱动脉冲时长 t，通过阻尼余弦最小二乘拟合精确提取真实拉比频率 Ω_R 及当前包络下的 π / π/2 脉冲时长，支持一键写回器件或逐比特参数表。'
-                : activeProtocol === 'ramsey'
-                ? '执行 π/2 − τ − π/2 序列并引入人工失谐条纹，同时拟合纯退相干包络 T2* 与本振频率偏移 Δ。'
-                : activeProtocol === 't1'
-                ? '执行 π 翻转脉冲制备 |1⟩ 态并扫描自由等待时间 τ，拟合指数弛豫曲线提取能量弛豫寿命 T1。'
-                : activeProtocol === 'rb'
-                ? '在右侧检查器选择 1Q (C₁=24) 或 2Q (C₂=11,520) Clifford 序列深度及待测交织门（如 SX、CZ、CNOT），通过指数衰减拟合剥离 SPAM 读出误差，精确提取单门平均失真度与相干极限。'
-                : activeProtocol === 'allxy'
-                ? '依次执行 21 组 {I, X, Y, X90, Y90} 双脉冲组合，对照 (+1, 0, -1) 理想三阶平台自动鉴别拉比幅度过/欠旋转锯齿、本振失谐分裂与 T1/T2 退相干压缩。'
-                : activeProtocol === 'gst'
-                ? '利用完备态制备与测量基准组（IC Fiducials）实施免 SPAM 干扰的规范对准线性反演层析，重构含 Gh (Hadamard) 在内的 6 门 4×4 泡利转移矩阵 (PTM)，定量分离相干标定误差与随机退相干误差。'
-                : '采用 Google Sycamore 随机单比特 {√X, √Y, √W} + 双比特纠缠门交替周期，无需逆恢复门即可通过 Porter-Thomas 散斑比特串分布标定任意非 Clifford 双比特原生门（如 √iSWAP、fSim 或自定义纠缠门）的周期极化度与门保真度。'}
-            </p>
-            <button
-              onClick={onRunBenchmark}
-              disabled={isBusy}
-              className="mx-auto h-8 px-4 rounded-[3px] studio-btn-primary text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              立即启动 {activeProtocol.toUpperCase()} 表征实验
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* =================================================================== */}
       {/* VIEW 0: BASIC CALIBRATIONS (RABI / RAMSEY / T1 + WRITE-BACK)        */}
