@@ -5,9 +5,15 @@ Serves both the REST API (/api/*) and the built React static bundle (web_studio/
 
 from __future__ import annotations
 
+import base64
+import ctypes
+from ctypes import wintypes
 import os
 import pathlib
-from typing import Any, Dict
+import sys
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel
 
 os.environ.setdefault("MPMATH_NOGMPY", "1")
 
@@ -57,6 +63,12 @@ from .project_engine import (
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 FRONTEND_DIST = REPO_ROOT / "web_studio" / "dist"
+
+
+class SaveFilePayload(BaseModel):
+    filename: str
+    content: str
+    is_base64: bool = False
 
 
 def create_app() -> FastAPI:
@@ -207,6 +219,90 @@ def create_app() -> FastAPI:
             return generate_circuit_from_nl(req)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/system/save-file")
+    def api_system_save_file(req: SaveFilePayload) -> Dict[str, Any]:
+        """Thread-safe native Win32 Save-As dialog for desktop mode (avoids pywebview js_api deadlocks)."""
+        if sys.platform != "win32" or os.environ.get("QUANTUM_STUDIO_DESKTOP") != "1":
+            return {"desktop": False}
+
+        safe_name = pathlib.Path(req.filename).name or "export.txt"
+        ext = pathlib.Path(safe_name).suffix.lower()
+        filter_labels = {
+            ".svg": ("SVG 矢量原理图/图表 (*.svg)", "*.svg"),
+            ".csv": ("CSV 实验数据表 (*.csv)", "*.csv"),
+            ".json": ("Quantum Studio 工程 (*.json)", "*.json"),
+            ".md": ("Markdown 标定报告 (*.md)", "*.md"),
+            ".qasm": ("OpenQASM 量子线路 (*.qasm)", "*.qasm"),
+            ".tex": ("LaTeX Quantikz 源码 (*.tex)", "*.tex"),
+            ".png": ("PNG 图像 (*.png)", "*.png"),
+        }
+        desc, pat = filter_labels.get(ext, ("导出文件 (*.*)", "*.*"))
+        raw_filter = f"{desc}\0{pat}\0所有文件 (*.*)\0*.*\0\0"
+
+        class OPENFILENAMEW(ctypes.Structure):
+            _fields_ = [
+                ("lStructSize", wintypes.DWORD),
+                ("hwndOwner", wintypes.HWND),
+                ("hInstance", wintypes.HINSTANCE),
+                ("lpstrFilter", ctypes.c_void_p),
+                ("lpstrCustomFilter", ctypes.c_void_p),
+                ("nMaxCustFilter", wintypes.DWORD),
+                ("nFilterIndex", wintypes.DWORD),
+                ("lpstrFile", ctypes.c_void_p),
+                ("nMaxFile", wintypes.DWORD),
+                ("lpstrFileTitle", ctypes.c_void_p),
+                ("nMaxFileTitle", wintypes.DWORD),
+                ("lpstrInitialDir", wintypes.LPCWSTR),
+                ("lpstrTitle", wintypes.LPCWSTR),
+                ("Flags", wintypes.DWORD),
+                ("nFileOffset", wintypes.WORD),
+                ("nFileExtension", wintypes.WORD),
+                ("lpstrDefExt", wintypes.LPCWSTR),
+                ("lCustData", wintypes.LPARAM),
+                ("lpfnHook", ctypes.c_void_p),
+                ("lpTemplateName", wintypes.LPCWSTR),
+                ("pvReserved", ctypes.c_void_p),
+                ("dwReserved", wintypes.DWORD),
+                ("FlagsEx", wintypes.DWORD),
+            ]
+
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, 2)
+        except Exception:
+            pass
+
+        file_buf = ctypes.create_unicode_buffer(safe_name, 4096)
+        flt_buf = ctypes.create_unicode_buffer(raw_filter)
+        downloads_dir = pathlib.Path.home() / "Downloads"
+        init_dir: Optional[str] = str(downloads_dir) if downloads_dir.is_dir() else None
+
+        ofn = OPENFILENAMEW()
+        ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+        ofn.hwndOwner = ctypes.windll.user32.GetForegroundWindow()
+        ofn.lpstrFilter = ctypes.cast(flt_buf, ctypes.c_void_p)
+        ofn.nFilterIndex = 1
+        ofn.lpstrFile = ctypes.cast(file_buf, ctypes.c_void_p)
+        ofn.nMaxFile = 4096
+        ofn.lpstrInitialDir = init_dir
+        ofn.lpstrTitle = "导出保存文件 — Quantum Studio EDA"
+        ofn.lpstrDefExt = ext.lstrip(".") if ext else None
+        # OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER
+        ofn.Flags = 0x00000002 | 0x00000800 | 0x00000008 | 0x00080000
+
+        ok = ctypes.windll.comdlg32.GetSaveFileNameW(ctypes.byref(ofn))
+        if not ok:
+            return {"desktop": True, "saved": False, "cancelled": True}
+
+        chosen_path = pathlib.Path(file_buf.value)
+        if ext and not chosen_path.suffix:
+            chosen_path = chosen_path.with_suffix(ext)
+        chosen_path.parent.mkdir(parents=True, exist_ok=True)
+        if req.is_base64:
+            chosen_path.write_bytes(base64.b64decode(req.content))
+        else:
+            chosen_path.write_text(req.content, encoding="utf-8")
+        return {"desktop": True, "saved": True, "path": str(chosen_path)}
 
     # Serve built React frontend if available
     if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").exists():

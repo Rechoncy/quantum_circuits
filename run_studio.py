@@ -86,14 +86,19 @@ def _apply_win32_window_icon(window_title: str, ico_path: Path) -> None:
         if not h_icon_big and not h_icon_small:
             return
 
+        SMTO_ABORTIFHUNG = 0x0002
+        res_out = ctypes.c_ulong(0)
         for _ in range(30):
             hwnd = user32.FindWindowW(None, window_title)
             if hwnd:
                 if h_icon_big:
-                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_icon_big)
+                    user32.SendMessageTimeoutW(
+                        hwnd, WM_SETICON, ICON_BIG, h_icon_big, SMTO_ABORTIFHUNG, 200, ctypes.byref(res_out)
+                    )
                 if h_icon_small:
-                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_icon_small)
-                user32.SetForegroundWindow(hwnd)
+                    user32.SendMessageTimeoutW(
+                        hwnd, WM_SETICON, ICON_SMALL, h_icon_small, SMTO_ABORTIFHUNG, 200, ctypes.byref(res_out)
+                    )
                 break
             time.sleep(0.15)
     except Exception:
@@ -102,8 +107,11 @@ def _apply_win32_window_icon(window_title: str, ico_path: Path) -> None:
 
 def _find_free_port(preferred: int = 8765) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if s.connect_ex(("127.0.0.1", preferred)) != 0:
+        try:
+            s.bind(("127.0.0.1", preferred))
             return preferred
+        except OSError:
+            pass
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
@@ -176,6 +184,9 @@ def main() -> int:
         uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", log_config=None)
         return 0
 
+    # Mark process as native desktop host so /api/system/save-file opens native Win32 Save-As dialog
+    os.environ["QUANTUM_STUDIO_DESKTOP"] = "1"
+
     # Launch FastAPI in a daemon thread
     server_config = uvicorn.Config(
         app, host="127.0.0.1", port=port, log_level="warning", log_config=None
@@ -206,58 +217,16 @@ def main() -> int:
             return orig_ready(self_ec, sender, wv_args)
 
         edgechromium.EdgeChrome.on_webview_ready = _checked_webview_ready
-
         webview.settings["ALLOW_DOWNLOADS"] = True
 
-        class DesktopBridge:
-            def __init__(self) -> None:
-                self.window: object = None
-
-            def save_file(self, filename: str, content: str, is_base64: bool = False) -> dict:
-                if self.window is None:
-                    return {"saved": False, "error": "window_not_ready"}
-                ext = Path(filename).suffix.lower()
-                type_map = {
-                    ".svg": ("SVG 矢量图 (*.svg)", "All files (*.*)"),
-                    ".csv": ("CSV 数据表 (*.csv)", "All files (*.*)"),
-                    ".json": ("JSON 工程文件 (*.json)", "All files (*.*)"),
-                    ".md": ("Markdown 报告 (*.md)", "All files (*.*)"),
-                    ".qasm": ("OpenQASM 量子代码 (*.qasm)", "All files (*.*)"),
-                    ".tex": ("LaTeX Quantikz 代码 (*.tex)", "All files (*.*)"),
-                    ".png": ("PNG 图像 (*.png)", "All files (*.*)"),
-                }
-                ftypes = type_map.get(ext, ("All files (*.*)",))
-                res = self.window.create_file_dialog(  # type: ignore[attr-defined]
-                    webview.SAVE_DIALOG,
-                    save_filename=filename,
-                    file_types=ftypes,
-                )
-                if not res:
-                    return {"saved": False, "cancelled": True}
-                chosen = res[0] if isinstance(res, (list, tuple)) else str(res)
-                if not chosen:
-                    return {"saved": False, "cancelled": True}
-                out_path = Path(chosen)
-                if ext and not out_path.suffix:
-                    out_path = out_path.with_suffix(ext)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                if is_base64:
-                    out_path.write_bytes(base64.b64decode(content))
-                else:
-                    out_path.write_text(content, encoding="utf-8")
-                return {"saved": True, "path": str(out_path)}
-
-        bridge = DesktopBridge()
-        win = webview.create_window(
+        webview.create_window(
             title=win_title,
             url=url,
-            js_api=bridge,
             width=1480,
             height=920,
             min_size=(1100, 700),
             background_color="#0E1116",
         )
-        bridge.window = win
         if ICON_ICO_PATH.is_file():
             threading.Thread(
                 target=_apply_win32_window_icon,
