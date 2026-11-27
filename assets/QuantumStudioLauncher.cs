@@ -5,11 +5,11 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Quantum Studio")]
-[assembly: AssemblyDescription("Quantum Circuit Design, Optimal Synthesis & Multi-Backend Evolution Studio")]
-[assembly: AssemblyProduct("Quantum Studio v2")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyTitle("Quantum Studio EDA")]
+[assembly: AssemblyDescription("Quantum Studio EDA v2.7 — Quantum Circuit, Gate Characterization & Device Workbench")]
+[assembly: AssemblyProduct("Quantum Studio EDA")]
+[assembly: AssemblyVersion("2.7.0.0")]
+[assembly: AssemblyFileVersion("2.7.0.0")]
 
 namespace QuantumStudioLauncher
 {

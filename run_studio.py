@@ -2,7 +2,7 @@
 Quantum Studio v2 Desktop Launcher (React + Tailwind + Plotly + FastAPI + pywebview / Edge App).
 
 Usage:
-  1. Double-click `QuantumStudio.exe` or `start_studio.bat`
+  1. Double-click `QuantumStudio.exe` (single native desktop launcher in root)
   2. Native Desktop Window (using embedded Python):
        .\\python_env\\python.exe run_studio.py
   3. Local Web Server Mode (for browser access / debugging):

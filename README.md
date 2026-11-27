@@ -38,12 +38,12 @@
 
 ### 方式二：项目目录直接运行（已内嵌 `python_env/`）
 ```powershell
-# 1. 直接双击原生桌面启动器（无命令行黑框，带专属图标）
+# 1. 直接双击根目录唯一原生桌面启动器（无命令行黑框，带专属图标）
 .\QuantumStudio.exe
 
-# 2. 或使用批处理 / 内嵌 Python 启动桌面窗口
-.\start_studio.bat
+# 2. 或使用内嵌 Python / 辅助脚本启动桌面窗口
 .\python_env\python.exe run_studio.py
+.\scripts\start_studio.bat
 
 # 3. 以本地 Web 服务模式启动（浏览器访问 http://127.0.0.1:8765）
 .\python_env\python.exe run_studio.py --web --open-browser --port 8765
@@ -51,6 +51,18 @@
 # 4. 运行全套单元测试
 .\python_env\python.exe -m pytest tests/test_solver_and_optimizer.py -v
 
-# 5. 重新打包单文件 .exe 安装程序
+# 5. 重新编译启动器并打包单文件 .exe 安装程序
 .\python_env\python.exe scripts/build_installer.py
 ```
+
+---
+
+## 目录结构说明
+
+- `QuantumStudio.exe` / `run_studio.py`：根目录唯一桌面启动器与 FastAPI + WebView2 宿主入口
+- `quantum_solver/`：四级演化后端（`solver/`）、硬件感知编译器（`optimizer/`）、门表征与脉冲标定引擎（`studio/`）
+- `web_studio/`：工业级 EDA 前端工作台（React + TypeScript + Tailwind + Plotly）
+- `scripts/`：安装程序构建脚本（`build_installer.py`）与命令行启动辅助脚本（`start_studio.bat`）
+- `assets/`：启动器/安装器 C# 源码与应用图标资源
+- `examples/` & `tests/`：物理对比示例脚本与全栈单元测试套件
+- `archive/legacy_v1_pyqt_gui/`：已归档的早期 `v1.x` PyQt6 桌面界面与旧启动器（`run_gui.py` / `start_gui.bat`）

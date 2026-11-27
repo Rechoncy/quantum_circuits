@@ -30,8 +30,20 @@ def build_installer() -> None:
     t0 = time.time()
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Compile C# WinForms Setup Stub with embedded icon
-    print("[1/3] Compiling C# InstallerStub.exe...")
+    # 1. Recompile root QuantumStudio.exe launcher + C# WinForms Setup Stub with embedded icon
+    print("[1/3] Compiling QuantumStudio.exe launcher and C# InstallerStub.exe...")
+    subprocess.run(
+        [
+            str(CSC_EXE),
+            "/nologo",
+            "/target:winexe",
+            "/optimize+",
+            f"/win32icon:{ROOT / 'assets' / 'quantum_studio.ico'}",
+            f"/out:{ROOT / 'QuantumStudio.exe'}",
+            str(ROOT / "assets" / "QuantumStudioLauncher.cs"),
+        ],
+        check=True,
+    )
     subprocess.run(
         [
             str(CSC_EXE),
@@ -52,9 +64,6 @@ def build_installer() -> None:
     include_files = [
         "QuantumStudio.exe",
         "run_studio.py",
-        "run_gui.py",
-        "start_studio.bat",
-        "start_gui.bat",
         "pyproject.toml",
         "README.md",
     ]

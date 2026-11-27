@@ -1,7 +1,5 @@
-"""PyQt6 Multi-Partition GUI Workbench for Quantum Circuit Solver & Optimizer."""
+"""Pure-Python DSL Circuit Parser & Multi-Dimensional Parameter Sweep Engine."""
 
-from .app import QuantumWorkbenchWindow, launch_gui
-from .circuit_drawer import draw_quantum_circuit
 from .circuit_parser import (
     PRESET_CIRCUIT_TEMPLATES,
     eval_math_expr,
@@ -16,9 +14,6 @@ from .sweep_engine import (
 )
 
 __all__ = [
-    "QuantumWorkbenchWindow",
-    "launch_gui",
-    "draw_quantum_circuit",
     "parse_circuit_script",
     "extract_symbolic_parameters",
     "eval_math_expr",
