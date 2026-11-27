@@ -168,7 +168,7 @@ def route_for_topology(
         return score
 
     for idx, op in enumerate(circuit.operations):
-        if isinstance(op, GateInstruction) and len(op.qubits) == 2:
+        if isinstance(op, GateInstruction) and op.name.upper() != "BARRIER" and len(op.qubits) == 2:
             lq0, lq1 = op.qubits
             pq0, pq1 = l2p[lq0], l2p[lq1]
             if not hardware.is_connected(pq0, pq1):
@@ -249,6 +249,10 @@ def route_for_topology(
     return out
 
 
+def _is_barrier_or_delay(op: object) -> bool:
+    return isinstance(op, GateInstruction) and op.name.upper() in ("BARRIER", "IDLE", "DELAY")
+
+
 def consolidate_2q_blocks(
     circuit: QuantumCircuit,
     gate_set: NativeGateSet,
@@ -257,9 +261,13 @@ def consolidate_2q_blocks(
     """
     Scan the circuit for maximal contiguous 2-qubit blocks acting on a qubit pair (qa, qb)
     and resynthesize each block into the minimum-2Q-gate hardware-native decomposition
-    using KAK / Cartan synthesis.
+    using KAK / Cartan synthesis. Respects BARRIER and IDLE/DELAY timing boundaries.
     """
-    if circuit.num_qubits == 1:
+    has_barriers = any(
+        not isinstance(op, GateInstruction) or len(op.noise_after) > 0 or _is_barrier_or_delay(op)
+        for op in circuit.operations
+    )
+    if circuit.num_qubits == 1 and not has_barriers:
         U = circuit.unitary()
         out = QuantumCircuit(1, name=circuit.name)
         for inst in synthesize_1q_for_gate_set(U, 0, gate_set, tol=tol):
@@ -270,8 +278,7 @@ def consolidate_2q_blocks(
         out.measured_qubits = list(circuit.measured_qubits)
         return out
 
-    # Special fast path for a 2-qubit circuit without intermediate noise/measurement barriers:
-    has_barriers = any(not isinstance(op, GateInstruction) or len(op.noise_after) > 0 for op in circuit.operations)
+    # Special fast path for a 2-qubit circuit without intermediate noise/measurement/timing barriers:
     if circuit.num_qubits == 2 and not has_barriers:
         U_full = circuit.unitary()
         out = QuantumCircuit(2, name=circuit.name)
@@ -292,7 +299,7 @@ def consolidate_2q_blocks(
         if consumed[i]:
             continue
         op = ops[i]
-        if not isinstance(op, GateInstruction) or len(op.noise_after) > 0:
+        if not isinstance(op, GateInstruction) or len(op.noise_after) > 0 or _is_barrier_or_delay(op):
             out.operations.append(op)
             consumed[i] = True
             continue
@@ -312,7 +319,11 @@ def consolidate_2q_blocks(
             scan_idx = len(out.operations) - 1
             while scan_idx >= 0 and pinned_back != pair_set:
                 prev_op = out.operations[scan_idx]
-                if isinstance(prev_op, GateInstruction) and len(prev_op.noise_after) == 0:
+                if (
+                    isinstance(prev_op, GateInstruction)
+                    and len(prev_op.noise_after) == 0
+                    and not _is_barrier_or_delay(prev_op)
+                ):
                     qs = set(prev_op.qubits)
                     if qs.issubset(pair_set) and qs.isdisjoint(pinned_back):
                         pulled_back.append(out.operations.pop(scan_idx))  # type: ignore[arg-type]
@@ -335,7 +346,11 @@ def consolidate_2q_blocks(
                 if consumed[j]:
                     continue
                 curr = ops[j]
-                if isinstance(curr, GateInstruction) and len(curr.noise_after) == 0:
+                if (
+                    isinstance(curr, GateInstruction)
+                    and len(curr.noise_after) == 0
+                    and not _is_barrier_or_delay(curr)
+                ):
                     qs = set(curr.qubits)
                     if qs.issubset(pair_set) and qs.isdisjoint(blocked_fwd):
                         block_gates.append(curr)
@@ -379,6 +394,7 @@ def commute_rz_through_cz(
     Commute single-qubit Z-rotations (RZ, Z, S, SDG, T, TDG) rightward across
     diagonal 2-qubit gates (CZ, RZZ) and CNOT controls, and X-rotations (RX, X, SX, SXDG)
     rightward across CNOT targets, jumping across disjoint wires so downstream 1Q fusion cancels them.
+    Never commutes across BARRIER or IDLE/DELAY operations.
     """
     z_diag_1q = {"RZ", "Z", "S", "SDG", "T", "TDG", "P"}
     x_rot_1q = {"RX", "X", "SX", "SXDG"}
@@ -391,6 +407,8 @@ def commute_rz_through_cz(
             op_a = ops[idx]
             op_b = ops[idx + 1]
             if not (isinstance(op_a, GateInstruction) and isinstance(op_b, GateInstruction)):
+                continue
+            if _is_barrier_or_delay(op_a) or _is_barrier_or_delay(op_b):
                 continue
             if op_a.noise_after or op_b.noise_after or len(op_a.qubits) != 1:
                 continue
@@ -422,7 +440,7 @@ def fuse_1q_runs(
 ) -> QuantumCircuit:
     """
     Collect maximal contiguous runs of 1-qubit gates on each individual qubit
-    (separated only by 2-qubit gates, noise, or measurements on that qubit),
+    (separated only by 2-qubit gates, BARRIER, IDLE/DELAY, noise, or measurements on that qubit),
     multiply their 2x2 matrices, and resynthesize into the minimal hardware-native
     1Q pulse sequence.
     """
@@ -445,16 +463,22 @@ def fuse_1q_runs(
             has_pending[q] = False
 
     for op in circuit.operations:
-        if isinstance(op, GateInstruction) and len(op.qubits) == 1 and not op.noise_after:
+        if (
+            isinstance(op, GateInstruction)
+            and len(op.qubits) == 1
+            and not op.noise_after
+            and not _is_barrier_or_delay(op)
+        ):
             q = op.qubits[0]
             pending_1q[q] = op.unitary() @ pending_1q[q]
             has_pending[q] = True
         elif isinstance(op, GateInstruction):
             for q in op.qubits:
                 _flush_qubit(q)
-            spec = gate_set.get_gate_spec(op.name)
-            if spec is not None and op.duration_ns is None:
-                op.duration_ns = 0.0 if spec.is_virtual else spec.duration_ns
+            if not _is_barrier_or_delay(op):
+                spec = gate_set.get_gate_spec(op.name)
+                if spec is not None and op.duration_ns is None:
+                    op.duration_ns = 0.0 if spec.is_virtual else spec.duration_ns
             out.operations.append(op)
         elif isinstance(op, NoiseInstruction):
             for q in op.channel.qubits:

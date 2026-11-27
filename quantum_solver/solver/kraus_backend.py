@@ -10,6 +10,7 @@ by orders of magnitude.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -30,6 +31,7 @@ from .base import (
     apply_readout_confusion_array,
     compute_bloch_vectors,
     compute_populations,
+    mitigate_readout_probabilities,
     probabilities_array_to_dict,
     sample_from_probabilities,
     state_fidelity_with_pure,
@@ -152,46 +154,76 @@ class KrausBackend:
 
                 step_idx += 1
                 gate_dts: List[float] = []
+                busy_ns: Dict[int, float] = {}
                 for g in layer_gates:
-                    u_small = g.unitary()
-                    psi_ideal = apply_operator_to_statevector(psi_ideal, u_small, g.qubits, n)
-                    rho = apply_operator_to_density_matrix(rho, u_small, g.qubits, n)
-                    dt_g = g.duration_ns
-                    if dt_g is None:
-                        dt_g = hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0
-                    gate_dts.append(float(dt_g))
+                    uname = g.name.upper()
+                    if uname != "BARRIER":
+                        u_small = g.unitary()
+                        psi_ideal = apply_operator_to_statevector(psi_ideal, u_small, g.qubits, n)
+                        rho = apply_operator_to_density_matrix(rho, u_small, g.qubits, n)
+                    dt_g = (
+                        0.0
+                        if uname == "BARRIER"
+                        else (
+                            float(g.params[0])
+                            if uname in ("IDLE", "DELAY") and g.params
+                            else (
+                                g.duration_ns
+                                if g.duration_ns is not None
+                                else (hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0)
+                            )
+                        )
+                    )
+                    dt_val = float(max(0.0, dt_g))
+                    gate_dts.append(dt_val)
+                    for q_u in g.qubits:
+                        busy_ns[q_u] = max(busy_ns.get(q_u, 0.0), dt_val if not g.skip_hw_noise else 0.0)
 
                 dt_layer = max(gate_dts) if gate_dts else 0.0
                 elapsed_ns += dt_layer
 
-                all_ideal_layer = all(g.skip_hw_noise for g in layer_gates)
+                all_ideal_layer = all(g.skip_hw_noise or g.name.upper() == "BARRIER" for g in layer_gates)
+                # Apply static ZZ crosstalk phase across coupled pairs over dt_layer (aligned with QuTiP H_drift)
+                if hardware is not None and dt_layer > 0 and not all_ideal_layer and hardware.coupler_params:
+                    for (qa, qb), cp in hardware.coupler_params.items():
+                        if abs(cp.zz_crosstalk_mhz) > 1e-12 and qa < n and qb < n:
+                            phi_zz = 0.5 * math.pi * cp.zz_crosstalk_mhz * 1e-3 * dt_layer
+                            if abs(phi_zz) > 1e-12:
+                                em = complex(math.cos(phi_zz), -math.sin(phi_zz))
+                                ep = complex(math.cos(phi_zz), math.sin(phi_zz))
+                                u_zz = np.diag([em, ep, ep, em])
+                                rho = apply_operator_to_density_matrix(rho, u_zz, (qa, qb), n)
+
                 for g, dt_g in zip(layer_gates, gate_dts):
                     for ch in g.noise_after:
                         rho = apply_kraus_channel(rho, ch, n)
+                    is_idle_op = g.name.upper() in ("IDLE", "DELAY", "BARRIER")
                     if hardware is not None and dt_g > 0 and not g.skip_hw_noise:
-                        if len(g.qubits) == 1:
-                            q0 = g.qubits[0]
-                            p_dep = hardware.qubit_params[q0].depol_1q
-                            if p_dep > 0:
-                                rho = apply_kraus_channel(rho, NoiseChannel.depolarizing_1q(q0, p_dep), n)
-                        elif len(g.qubits) == 2:
-                            pair = (min(g.qubits[0], g.qubits[1]), max(g.qubits[0], g.qubits[1]))
-                            if pair in hardware.coupler_params:
-                                p_dep2 = hardware.coupler_params[pair].depol_2q
-                                if p_dep2 > 0:
-                                    rho = apply_kraus_channel(
-                                        rho, NoiseChannel.depolarizing_2q(g.qubits[0], g.qubits[1], p_dep2), n
-                                    )
+                        if not is_idle_op:
+                            if len(g.qubits) == 1:
+                                q0 = g.qubits[0]
+                                p_dep = hardware.qubit_params[q0].depol_1q
+                                if p_dep > 0:
+                                    rho = apply_kraus_channel(rho, NoiseChannel.depolarizing_1q(q0, p_dep), n)
+                            elif len(g.qubits) == 2:
+                                pair = (min(g.qubits[0], g.qubits[1]), max(g.qubits[0], g.qubits[1]))
+                                if pair in hardware.coupler_params:
+                                    p_dep2 = hardware.coupler_params[pair].depol_2q
+                                    if p_dep2 > 0:
+                                        rho = apply_kraus_channel(
+                                            rho, NoiseChannel.depolarizing_2q(g.qubits[0], g.qubits[1], p_dep2), n
+                                        )
                         for q_act in g.qubits:
                             qp = hardware.qubit_params[q_act]
-                            ch_th = NoiseChannel.thermal_relaxation(q_act, qp.t1_ns, qp.t2_ns, dt_layer)
+                            ch_th = NoiseChannel.thermal_relaxation(q_act, qp.t1_ns, qp.t2_ns, dt_g)
                             rho = apply_kraus_channel(rho, ch_th, n)
 
                 if hardware is not None and dt_layer > 0 and not all_ideal_layer and hardware.include_idle_noise:
                     for q_idle in range(n):
-                        if q_idle not in used_qubits:
+                        dt_wait = dt_layer - busy_ns.get(q_idle, 0.0)
+                        if dt_wait > 1e-9:
                             qp = hardware.qubit_params[q_idle]
-                            ch_idle = NoiseChannel.thermal_relaxation(q_idle, qp.t1_ns, qp.t2_ns, dt_layer)
+                            ch_idle = NoiseChannel.thermal_relaxation(q_idle, qp.t1_ns, qp.t2_ns, dt_wait)
                             rho = apply_kraus_channel(rho, ch_idle, n)
 
                 layer_label = (
@@ -243,6 +275,8 @@ class KrausBackend:
         noisy_diag = apply_readout_confusion_array(raw_diag, n, readout_errors)
         final_probs = probabilities_array_to_dict(noisy_diag, n)
         counts = sample_from_probabilities(final_probs, shots=shots, seed=seed)
+        emp_probs = {k: v / float(shots) for k, v in counts.items()} if shots > 0 and counts else final_probs
+        mitigated_probs = mitigate_readout_probabilities(emp_probs, n, readout_errors)
 
         return EvolutionResult(
             backend_name="Kraus-DensityMatrix",
@@ -254,4 +288,5 @@ class KrausBackend:
             total_duration_ns=elapsed_ns,
             final_fidelity=steps[-1].state_fidelity,
             final_purity=steps[-1].purity,
+            metadata={"mitigated_probabilities": mitigated_probs},
         )

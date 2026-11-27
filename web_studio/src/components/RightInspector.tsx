@@ -64,6 +64,9 @@ export interface BenchmarkConfigState {
   cal_points: number;
   cal_max_ns: number | null;
   ramsey_detuning_mhz: number;
+  echo_num_pulses: number;
+  chevron_detuning_max_mhz: number;
+  chevron_freq_points: number;
   shots: number;
   amp_error_pct: number;
   detuning_mhz: number;
@@ -119,6 +122,8 @@ function defaultSweepRange(paramKey: string): [number, number] {
   if (paramKey === 'hw:t1_us' || paramKey === 'hw:t2_us') return [5, 200];
   if (paramKey === 'hw:rabi_mhz') return [0.5, 25];
   if (paramKey === 'hw:rise_ns' || paramKey === 'hw:fall_ns') return [0, 80];
+  if (paramKey === 'hw:anharmonicity_mhz') return [-320, -140];
+  if (paramKey === 'hw:drag_beta') return [0, 1.2];
   if (paramKey.includes('depol') || paramKey.includes('readout') || paramKey.startsWith('p_')) {
     return [0, 0.08];
   }
@@ -867,18 +872,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         {/* Protocol Switcher: Basic Calibrations + Gate Benchmarks */}
         <div className="space-y-2">
           <SectionTitle>基础物理标定实验</SectionTitle>
-          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-3 gap-0.5">
+          <div className="bg-[var(--bg-subtle)] border border-[var(--border-hairline)] p-0.5 rounded-[3px] grid grid-cols-5 gap-0.5">
             {(
               [
-                ['rabi', 'Rabi 振荡'],
+                ['rabi', 'Rabi'],
+                ['chevron', 'Chevron'],
                 ['ramsey', 'Ramsey'],
-                ['t1', 'T1 弛豫'],
+                ['echo', 'Echo'],
+                ['t1', 'T1'],
               ] as const
             ).map(([pid, lbl]) => (
               <button
                 key={pid}
                 onClick={() => onBenchmarkConfigChange({ protocol: pid })}
-                className={`py-1.5 rounded-[2px] text-[11px] font-mono-num font-medium cursor-pointer ${
+                className={`py-1.5 rounded-[2px] text-[10.5px] font-mono-num font-medium cursor-pointer ${
                   bc.protocol === pid
                     ? 'bg-[var(--bg-panel)] text-[var(--accent)] font-semibold border border-[var(--border-hairline)]'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -952,12 +959,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </div>
           </div>
 
-          {(bc.protocol === 'rabi' || bc.protocol === 'ramsey' || bc.protocol === 't1') && (
+          {(bc.protocol === 'rabi' ||
+            bc.protocol === 'chevron' ||
+            bc.protocol === 'ramsey' ||
+            bc.protocol === 'echo' ||
+            bc.protocol === 't1') && (
             <>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
-                    扫描采样点数
+                    时间扫描点数
                   </label>
                   <input
                     type="number"
@@ -1003,6 +1014,66 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     }
                     className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
                   />
+                </div>
+              )}
+              {bc.protocol === 'chevron' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      扫频跨度 ±Δ_max (MHz)
+                    </label>
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={50}
+                      step={0.5}
+                      value={bc.chevron_detuning_max_mhz}
+                      onChange={(e) =>
+                        onBenchmarkConfigChange({
+                          chevron_detuning_max_mhz: Math.max(0.2, Number(e.target.value)),
+                        })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      频率轴点数 N_f
+                    </label>
+                    <input
+                      type="number"
+                      min={9}
+                      max={61}
+                      step={4}
+                      value={bc.chevron_freq_points}
+                      onChange={(e) =>
+                        onBenchmarkConfigChange({
+                          chevron_freq_points: Math.max(9, Math.min(61, Number(e.target.value))),
+                        })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+              {bc.protocol === 'echo' && (
+                <div>
+                  <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                    重聚焦 π 脉冲数 N (Hahn Echo / CPMG-N)
+                  </label>
+                  <select
+                    value={bc.echo_num_pulses}
+                    onChange={(e) =>
+                      onBenchmarkConfigChange({ echo_num_pulses: Number(e.target.value) })
+                    }
+                    className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] text-[12px] font-mono-num outline-none"
+                  >
+                    <option value={1}>N = 1 · Hahn Spin Echo</option>
+                    <option value={2}>N = 2 · CPMG-2 正交双脉冲</option>
+                    <option value={4}>N = 4 · CPMG-4 动态解耦</option>
+                    <option value={8}>N = 8 · CPMG-8 高阶滤波</option>
+                    <option value={16}>N = 16 · CPMG-16 深度重聚焦</option>
+                  </select>
                 </div>
               )}
             </>
@@ -1447,14 +1518,23 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     {!isSymbolic && (
                       <input
                         type="range"
-                        min={-3.1416}
-                        max={3.1416}
-                        step={0.01}
-                        value={Math.max(-3.1416, Math.min(3.1416, numVal))}
+                        min={op.name.toUpperCase() === 'IDLE' ? 5 : -3.1416}
+                        max={op.name.toUpperCase() === 'IDLE' ? 2000 : 3.1416}
+                        step={op.name.toUpperCase() === 'IDLE' ? 5 : 0.01}
+                        value={
+                          op.name.toUpperCase() === 'IDLE'
+                            ? Math.max(5, Math.min(2000, numVal))
+                            : Math.max(-3.1416, Math.min(3.1416, numVal))
+                        }
                         onChange={(e) => {
                           const next = [...op.params];
                           next[idx] = Number(e.target.value);
-                          onUpdateOp(op.id, { params: next });
+                          onUpdateOp(
+                            op.id,
+                            op.name.toUpperCase() === 'IDLE'
+                              ? { params: next, duration_ns: Number(e.target.value) }
+                              : { params: next }
+                          );
                         }}
                         className="mac-slider w-full"
                       />

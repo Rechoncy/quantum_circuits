@@ -1,7 +1,16 @@
 export type PrimaryDomain = 'circuits' | 'characterization' | 'device';
 export type CircuitSubMode = 'design' | 'simulate' | 'optimize' | 'sweep';
 export type DeviceSubTab = 'drive' | 'qubits' | 'topology' | 'platforms';
-export type BenchmarkProtocol = 'rabi' | 'ramsey' | 't1' | 'rb' | 'allxy' | 'gst' | 'xeb';
+export type BenchmarkProtocol =
+  | 'rabi'
+  | 'chevron'
+  | 'ramsey'
+  | 'echo'
+  | 't1'
+  | 'rb'
+  | 'allxy'
+  | 'gst'
+  | 'xeb';
 
 export type WorkMode = 'design' | 'simulate' | 'optimize' | 'sweep' | 'benchmark' | 'device';
 
@@ -19,6 +28,8 @@ export interface QubitSpec {
   freq_ghz: number | null;
   depol_1q: number | null;
   readout_err: number | null;
+  readout_p1_given_0?: number | null;
+  readout_p0_given_1?: number | null;
   rabi_mhz?: number | null;
   pos_x: number;
   pos_y: number;
@@ -87,6 +98,10 @@ export interface HardwareProfileModel {
   rabi_mhz?: number;
   rise_ns?: number;
   fall_ns?: number;
+  anharmonicity_mhz?: number;
+  drag_beta?: number;
+  readout_p1_given_0?: number | null;
+  readout_p0_given_1?: number | null;
 }
 
 export type SolverBackendType = 'qutip' | 'kraus' | 'trajectory' | 'stim' | 'stim_qutip' | 'compare';
@@ -138,6 +153,8 @@ export interface EvolutionResultJson {
   bipartite_entropy?: number | null;
   mutual_information?: number[][] | null;
   final_probabilities: Record<string, number>;
+  mitigated_probabilities?: Record<string, number> | null;
+  leakage_by_qubit?: Record<string, number> | null;
   measurement_counts: Record<string, number>;
   stim_circuit_str: string | null;
   steps: StepSnapshotJson[];
@@ -436,7 +453,7 @@ export interface CalibrationWritebackItem {
 }
 
 export interface BasicCalibrationResponse {
-  protocol: 'rabi' | 'ramsey' | 't1';
+  protocol: 'rabi' | 'chevron' | 'ramsey' | 'echo' | 't1';
   hardware_name: string;
   target_label: string;
   qubit: number;
@@ -451,6 +468,11 @@ export interface BasicCalibrationResponse {
   params: BasicCalibrationParam[];
   writeback: CalibrationWritebackItem[];
   circuit_samples?: CharacterizationCircuitSample[];
+  z_grid?: number[][];
+  y_detunings?: number[];
+  y_grid_label?: string;
+  echo_ref_ramsey?: number[];
+  echo_num_pulses?: number;
   summary: string;
 }
 

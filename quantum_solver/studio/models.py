@@ -26,6 +26,8 @@ class QubitSpec(BaseModel):
     freq_ghz: Optional[float] = None
     depol_1q: Optional[float] = None
     readout_err: Optional[float] = None
+    readout_p1_given_0: Optional[float] = None  # Asymmetric P(1|0) thermal/dark false-positive rate
+    readout_p0_given_1: Optional[float] = None  # Asymmetric P(0|1) readout T1 decay error rate
     rabi_mhz: Optional[float] = None  # Per-qubit Rabi frequency override (MHz)
     # 2D spatial position (in micrometers, used for Neutral Atom Rydberg blockade map & topology)
     pos_x: float = 0.0
@@ -102,6 +104,8 @@ class HardwareProfileModel(BaseModel):
     depol_2q: float = 0.0045
     zz_khz: float = 2.0
     readout_err: float = 0.008
+    readout_p1_given_0: Optional[float] = None
+    readout_p0_given_1: Optional[float] = None
     topology_mode: Literal["all", "linear", "custom", "rydberg_radius"] = "rydberg_radius"
     edges: List[Tuple[int, int]] = Field(default_factory=list)
     blockade_radius_um: float = 6.5  # Neutral atom Rydberg blockade radius in μm
@@ -114,6 +118,9 @@ class HardwareProfileModel(BaseModel):
     # Rise / fall edges of the rectangular (flat-top) envelope, ns
     rise_ns: float = 0.0
     fall_ns: float = 0.0
+    # 3-level anharmonicity alpha/2pi (MHz, 0 = ideal 2-level) & DRAG quadrature coefficient beta
+    anharmonicity_mhz: float = 0.0
+    drag_beta: float = 0.0
 
 
 class SimulationSettingsModel(BaseModel):
@@ -228,14 +235,17 @@ class NoiseBudgetRequest(BaseModel):
 
 
 class GateBenchmarkRequest(BaseModel):
-    """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST, XEB)."""
+    """Quantum Gate Characterization & Benchmarking request (RB / Interleaved RB, AllXY, GST, XEB, Rabi, Chevron, Ramsey, Echo, T1)."""
 
     project: ProjectModel
-    protocol: Literal["rb", "allxy", "gst", "xeb", "rabi", "ramsey", "t1"] = "rb"
-    # Basic calibration experiments (Rabi / Ramsey / T1)
+    protocol: Literal["rb", "allxy", "gst", "xeb", "rabi", "chevron", "ramsey", "echo", "t1"] = "rb"
+    # Basic calibration experiments (Rabi / Chevron / Ramsey / Spin Echo / T1)
     cal_points: int = 61
     cal_max_ns: Optional[float] = None
     ramsey_detuning_mhz: float = 0.5
+    echo_num_pulses: int = 1
+    chevron_detuning_max_mhz: float = 6.0
+    chevron_freq_points: int = 25
     target_qubit: int = 0
     second_qubit: int = 1
     rb_num_qubits: Literal[1, 2] = 1

@@ -1,9 +1,9 @@
 """
-Build self-contained Windows Setup executable: `release/QuantumStudio_v2.7.0_Setup.exe`.
+Build self-contained Windows Setup executable: `release/QuantumStudio_v2.8.0_Setup.exe`.
 
 Combines:
   1. Compiled C# WinForms Setup & Uninstall stub (`InstallerStub.exe`, with custom icon & HKCU registry support)
-  2. Compressed ZIP archive of Quantum Studio v2.7 (including embedded `python_env/`, `web_studio/dist/`,
+  2. Compressed ZIP archive of Quantum Studio v2.8 (including embedded `python_env/`, `web_studio/dist/`,
      `quantum_solver/`, `assets/`, `examples/`, and `QuantumStudio.exe`)
   3. 24-byte QSTUDIO2 trailer (`<QQ8s`: payload_offset, payload_length, b"QSTUDIO2")
 """
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RELEASE_DIR = ROOT / "release"
 STUB_EXE = RELEASE_DIR / "InstallerStub.exe"
 PAYLOAD_ZIP = RELEASE_DIR / "payload_temp.zip"
-FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.7.0_Setup.exe"
+FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.8.0_Setup.exe"
 
 CSC_EXE = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
@@ -120,6 +120,21 @@ def build_installer() -> None:
         "_pytest",
         "pygments",
         "plugins",
+        "pip",
+        "setuptools",
+        "wheel",
+        "ensurepip",
+        "venv",
+        "tkinter",
+        "tcl",
+        "tk",
+        "tcl8",
+        "tcl8.6",
+        "tk8.6",
+        "idlelib",
+        "turtledemo",
+        "pydoc_data",
+        "include",
     }
 
     file_count = 0
@@ -137,14 +152,14 @@ def build_installer() -> None:
             for dp, dirnames, filenames in os.walk(dpath):
                 dirnames[:] = [d for d in dirnames if d not in skip_installer_dirs and not d.endswith(".dist-info")]
                 for fn in filenames:
-                    if fn.endswith((".pyc", ".pdb", ".a", ".lib")) or fn in skip_installer_files:
+                    if fn.endswith((".pyc", ".pdb", ".a", ".lib", ".pyx", ".h", ".hpp")) or fn in skip_installer_files:
                         continue
                     full_p = Path(dp) / fn
                     rel_p = full_p.relative_to(ROOT).as_posix()
                     zf.write(full_p, rel_p)
                     file_count += 1
 
-    # 3. Concatenate Stub + Payload + 24-byte QSTUDIO2 Footer into QuantumStudio_v2.0.0_Setup.exe
+    # 3. Concatenate Stub + Payload + 24-byte QSTUDIO2 Footer into QuantumStudio_v2.8.0_Setup.exe
     print(f"[3/3] Assembling single-file installer ({file_count} files)...")
     stub_bytes = STUB_EXE.read_bytes()
     payload_offset = len(stub_bytes)
@@ -170,6 +185,7 @@ def build_installer() -> None:
     (RELEASE_DIR / "QuantumStudio_v2.4.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.5.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.6.0_Setup.exe").unlink(missing_ok=True)
+    (RELEASE_DIR / "QuantumStudio_v2.7.0_Setup.exe").unlink(missing_ok=True)
 
     size_mb = FINAL_INSTALLER.stat().st_size / (1024 * 1024)
     elapsed = time.time() - t0

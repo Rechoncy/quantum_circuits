@@ -33,6 +33,7 @@ from ..solver.base import (
     compute_entanglement_from_density_matrix,
     evaluate_pauli_sum_density_matrix,
     evaluate_pauli_sum_statevector,
+    mitigate_readout_probabilities,
 )
 from ..solver.unified_solver import QuantumSolver
 from .custom_gates import (
@@ -109,6 +110,8 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             rabi_mhz=50.0,
             rise_ns=2.0,
             fall_ns=2.0,
+            anharmonicity_mhz=-240.0,
+            drag_beta=0.5,
         ),
         HardwareProfileModel(
             id="hw_sc_iswap",
@@ -128,6 +131,8 @@ def _default_hardware_profiles() -> List[HardwareProfileModel]:
             rabi_mhz=50.0,
             rise_ns=2.0,
             fall_ns=2.0,
+            anharmonicity_mhz=-240.0,
+            drag_beta=0.5,
         ),
         HardwareProfileModel(
             id="hw_trapped_ion",
@@ -736,10 +741,34 @@ def build_hardware_model(
     hw.pulse_shape = hp.pulse_shape
     hw.rise_ns = float(hp.rise_ns)
     hw.fall_ns = float(hp.fall_ns)
+    hw.drag_beta = float(hp.drag_beta)
 
-    # Apply per-qubit overrides from Quantum Register
+    # Apply hardware-level anharmonicity, DRAG beta, and asymmetric readout confusion defaults
+    hw_p10 = hp.readout_p1_given_0 if hp.readout_p1_given_0 is not None else ro_base
+    hw_p01 = (
+        hp.readout_p0_given_1
+        if hp.readout_p0_given_1 is not None
+        else ro_base * (1.2 if hp.platform.startswith("superconducting") else 1.1)
+    )
     for idx, qspec in enumerate(project.qubits):
         qp = hw.qubit_params[idx]
+        qp.anharmonicity_ghz = float(hp.anharmonicity_mhz) * 1e-3 if sim.enable_depol or sim.enable_t1_t2 else 0.0
+        qp.drag_beta = float(hp.drag_beta)
+        if sim.enable_readout:
+            p10_q = (
+                qspec.readout_p1_given_0
+                if qspec.readout_p1_given_0 is not None
+                else (qspec.readout_err if qspec.readout_err is not None else hw_p10)
+            )
+            p01_q = (
+                qspec.readout_p0_given_1
+                if qspec.readout_p0_given_1 is not None
+                else (qspec.readout_err * 1.1 if qspec.readout_err is not None else hw_p01)
+            )
+            qp.readout_error = ReadoutError(min(0.49, max(0.0, p10_q)), min(0.49, max(0.0, p01_q)))
+        else:
+            qp.readout_error = ReadoutError(0.0, 0.0)
+
         if sim.enable_t1_t2:
             if qspec.t1_us is not None:
                 qp.t1_ns = qspec.t1_us * 1000.0
@@ -749,8 +778,6 @@ def build_hardware_model(
             qp.freq_ghz = qspec.freq_ghz
         if sim.enable_depol and qspec.depol_1q is not None:
             qp.depol_1q = qspec.depol_1q
-        if sim.enable_readout and qspec.readout_err is not None:
-            qp.readout_error = ReadoutError(qspec.readout_err, qspec.readout_err * 1.1)
 
     # Promote custom gates marked `is_native=True` into NativeGateSet!
     cg_lookup = {cg.name.upper(): cg for cg in project.custom_gates}
@@ -929,7 +956,12 @@ def compile_project_circuit(
                     )
             else:
                 eff_dur = g_dur
-                if eff_dur is None and len(g_qubits) == 1:
+                if g_uname == "BARRIER":
+                    eff_dur = 0.0
+                    g_skip_hw = True
+                elif g_uname in ("IDLE", "DELAY"):
+                    eff_dur = float(g_params[0]) if g_params else (g_dur if g_dur is not None else 100.0)
+                elif eff_dur is None and len(g_qubits) == 1:
                     eff_dur = resolve_1q_drive_duration(
                         project, drive_hp, g_uname, g_qubits[0], g_params, op_rabi_ctx["rabi"]
                     )
@@ -1044,7 +1076,7 @@ def dsl_to_project_ops(
         "BIT_FLIP", "X_ERROR", "PHASE_FLIP", "Z_ERROR", "PAULI_ERROR", "PAULI1Q",
     }
     single_q_broadcast = {
-        "H", "X", "Y", "Z", "S", "SDG", "T", "TDG", "SX", "SXDG", "RX", "RY", "RZ", "RXY", "U3",
+        "H", "X", "Y", "Z", "S", "SDG", "T", "TDG", "SX", "SXDG", "RX", "RY", "RZ", "RXY", "U3", "IDLE", "DELAY",
     }
 
     qubit_col = [0] * n_qubits
@@ -1247,6 +1279,13 @@ def project_to_openqasm3(project: ProjectModel) -> str:
         elif op.kind == "gate":
             uname = op.name.upper()
             q_args = ", ".join(f"q[{q}]" for q in op.qubits)
+            if uname == "BARRIER":
+                lines.append(f"barrier {q_args};" if q_args else "barrier q;")
+                continue
+            if uname in ("IDLE", "DELAY"):
+                dur_val = eval_math_expr(str(op.params[0]), vars_map) if op.params else (op.duration_ns or 100.0)
+                lines.append(f"delay[{dur_val:.6g}ns] {q_args};")
+                continue
             g_id = qasm_map.get(uname, uname.lower())
             if uname == "MS" and not op.params:
                 lines.append(f"rxx(1.570796) {q_args};")
@@ -1342,7 +1381,7 @@ def openqasm_to_project_ops(
         "ecr": "ECR", "ccx": "CCX", "toffoli": "CCX", "ccz": "CCZ",
     }
     single_q_gates = {
-        "H", "X", "Y", "Z", "S", "SDG", "T", "TDG", "SX", "SXDG", "RX", "RY", "RZ", "RXY", "U3",
+        "H", "X", "Y", "Z", "S", "SDG", "T", "TDG", "SX", "SXDG", "RX", "RY", "RZ", "RXY", "U3", "IDLE", "DELAY",
     }
     math_reserved = {
         "pi", "e", "tau", "sin", "cos", "tan", "sqrt", "asin", "acos", "atan", "exp",
@@ -1352,7 +1391,7 @@ def openqasm_to_project_ops(
     exec_stmts: List[str] = []
     for st in statements:
         low = st.lower()
-        if low.startswith("openqasm") or low.startswith("include ") or low.startswith("barrier"):
+        if low.startswith("openqasm") or low.startswith("include "):
             continue
         if low.startswith("creg ") or low.startswith("bit[") or re.match(r"^bit\s+\w+$", low):
             continue
@@ -1442,7 +1481,36 @@ def openqasm_to_project_ops(
         if depth > 8:
             raise ValueError("OpenQASM 自定义 gate 嵌套过深或存在递归")
         s = st.strip()
-        if not s or s.lower().startswith("barrier") or s.lower().startswith("reset"):
+        if not s or s.lower().startswith("reset"):
+            return
+
+        # Barrier: `barrier;` or `barrier q;` or `barrier q[0], q[1];`
+        if s.lower().startswith("barrier"):
+            rest = s[len("barrier") :].strip()
+            if not rest:
+                all_qs = sorted({q for rlist in reg_map.values() for q in rlist})
+                if all_qs:
+                    raw_emitted.append(("gate", "BARRIER", all_qs, []))
+            else:
+                b_qs: List[int] = []
+                for qt in _split_top_level_commas(rest):
+                    for qv in _resolve_qarg(qt, local_qmap):
+                        if qv not in b_qs:
+                            b_qs.append(qv)
+                if b_qs:
+                    raw_emitted.append(("gate", "BARRIER", b_qs, []))
+            return
+
+        # OpenQASM 3 delay: `delay[200ns] q[0];` or `delay[0.2us] q;`
+        m_del = re.match(r"^delay\s*\[\s*([0-9.eE+-]+)\s*(ns|us|µs|ms|s)?\s*\]\s+(.+)$", s, flags=re.IGNORECASE)
+        if m_del:
+            val_num = float(m_del.group(1))
+            unit = (m_del.group(2) or "ns").lower()
+            mult = {"ns": 1.0, "us": 1e3, "µs": 1e3, "ms": 1e6, "s": 1e9}.get(unit, 1.0)
+            dur_ns = round(val_num * mult, 4)
+            for qt in _split_top_level_commas(m_del.group(3)):
+                for qv in _resolve_qarg(qt, local_qmap):
+                    raw_emitted.append(("gate", "IDLE", [qv], [dur_ns]))
             return
 
         # Measurements:
@@ -1601,7 +1669,10 @@ def openqasm_to_project_ops(
 # Serialization Helpers & Simulation / Optimization / Sweep Runners
 # ---------------------------------------------------------------------------
 
-def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
+def _serialize_evolution_result(
+    res: EvolutionResult,
+    readout_errors: Optional[Dict[int, ReadoutError]] = None,
+) -> Dict[str, Any]:
     steps_json: List[Dict[str, Any]] = []
     for s in res.steps:
         rho_abs = None
@@ -1653,6 +1724,18 @@ def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
             res.steps[-1].density_matrix, res.num_qubits
         )
 
+    mit_probs: Optional[Dict[str, float]] = None
+    if "mitigated_probabilities" in res.metadata and isinstance(res.metadata["mitigated_probabilities"], dict):
+        mit_probs = {k: round(float(v), 6) for k, v in res.metadata["mitigated_probabilities"].items()}  # type: ignore[union-attr]
+    elif readout_errors:
+        emp = res.empirical_probabilities()
+        mit_raw = mitigate_readout_probabilities(emp, res.num_qubits, readout_errors)
+        mit_probs = {k: round(float(v), 6) for k, v in mit_raw.items()}
+
+    leak_map: Optional[Dict[str, float]] = None
+    if "leakage_by_qubit" in res.metadata and isinstance(res.metadata["leakage_by_qubit"], dict):
+        leak_map = {str(k): round(float(v), 6) for k, v in res.metadata["leakage_by_qubit"].items()}  # type: ignore[union-attr]
+
     return {
         "backend_name": res.backend_name,
         "num_qubits": res.num_qubits,
@@ -1663,6 +1746,8 @@ def _serialize_evolution_result(res: EvolutionResult) -> Dict[str, Any]:
         "bipartite_entropy": bip_entropy,
         "mutual_information": mi_matrix,
         "final_probabilities": {k: round(float(v), 6) for k, v in res.final_probabilities.items()},
+        "mitigated_probabilities": mit_probs,
+        "leakage_by_qubit": leak_map,
         "measurement_counts": res.measurement_counts,
         "stim_circuit_str": res.stim_circuit_str,
         "steps": steps_json,
@@ -1759,12 +1844,13 @@ def execute_project_simulation(project: ProjectModel) -> Dict[str, Any]:
         get_active_hardware_profile(project),
         operations=project.operations,
     )
+    ro_map = {q: hw.qubit_params[q].readout_error for q in range(circ.num_qubits)}
     return {
         "primary_backend": primary_key,
         "warnings": warnings,
         "hardware_name": hw.name,
         "topology_edges": all_edges[:300],
-        "results": {k: _serialize_evolution_result(v) for k, v in results_map.items()},
+        "results": {k: _serialize_evolution_result(v, ro_map) for k, v in results_map.items()},
     }
 
 
@@ -1777,6 +1863,9 @@ def _circuit_to_op_models(circuit: QuantumCircuit) -> List[CircuitOpModel]:
         if isinstance(op, GateInstruction):
             span = range(min(op.qubits), max(op.qubits) + 1)
             col = max(qubit_col[q] for q in span)
+            op_params = [round(float(p), 5) for p in op.params]
+            if op.name == "IDLE" and not op_params and op.duration_ns is not None:
+                op_params = [round(float(op.duration_ns), 4)]
             ops.append(
                 CircuitOpModel(
                     id=f"opt_{idx}_{uuid.uuid4().hex[:5]}",
@@ -1784,7 +1873,7 @@ def _circuit_to_op_models(circuit: QuantumCircuit) -> List[CircuitOpModel]:
                     kind="gate",
                     name=op.name,
                     qubits=list(op.qubits),
-                    params=[round(float(p), 5) for p in op.params],
+                    params=op_params,
                     duration_ns=op.duration_ns,
                 )
             )

@@ -96,6 +96,9 @@ def _append_gate_to_stim(
     uname = gate.name.upper()
     q = list(gate.qubits)
 
+    if uname in ("BARRIER", "IDLE", "DELAY"):
+        return
+
     direct_map = {
         "I": "I",
         "X": "X",

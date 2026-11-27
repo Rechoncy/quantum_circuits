@@ -29,6 +29,8 @@ export const BUILTIN_GATES: BuiltinGateInfo[] = [
   { name: 'SWAP', label: 'SWAP', category: '2q', numQubits: 2, paramNames: [], defaultParams: [], tint: 'indigo', description: '两比特状态交换门' },
   { name: 'CCZ', label: 'CCZ', category: '3q', numQubits: 3, paramNames: [], defaultParams: [], tint: 'indigo', description: '中性原子三比特里德堡阻塞 CCZ 门' },
   { name: 'CCX', label: 'CCX', category: '3q', numQubits: 3, paramNames: [], defaultParams: [], tint: 'indigo', description: 'Toffoli 三比特门' },
+  { name: 'IDLE', label: 'IDLE', category: '1q_rot', numQubits: 1, paramNames: ['τ(ns)'], defaultParams: [100], tint: 'slate', description: '自由演化延时等待门 IDLE(τ ns)，模拟真实 T1/T2 退相干与 ZZ 串扰' },
+  { name: 'BARRIER', label: 'BAR', category: '1q_clifford', numQubits: 1, paramNames: [], defaultParams: [], tint: 'slate', description: '时序同步与编译隔离屏障 BARRIER（阻止跨屏障门融合与对易）' },
   { name: 'DEPOLARIZE', label: '退极化', category: 'noise', numQubits: 1, paramNames: ['p'], defaultParams: [0.01], tint: 'amber', description: '退极化噪声通道' },
   { name: 'PHASE_FLIP', label: '相位翻转', category: 'noise', numQubits: 1, paramNames: ['p'], defaultParams: [0.01], tint: 'amber', description: 'Z 泡利相位翻转噪声' },
   { name: 'MEASURE', label: 'M', category: 'measure', numQubits: 1, paramNames: [], defaultParams: [], tint: 'slate', description: '计算基测量' },

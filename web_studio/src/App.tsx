@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { Suspense, lazy, useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import {
   Activity,
   AlertCircle,
@@ -58,18 +58,54 @@ import {
 } from './components/RightInspector';
 import { BottomDock } from './components/BottomDock';
 import { SimulateResults } from './components/SimulateResults';
-import { OptimizeWorkspace, type DirectSynthPayload } from './components/OptimizeWorkspace';
-import { SweepWorkspace } from './components/SweepWorkspace';
-import { BenchmarkWorkspace } from './components/BenchmarkWorkspace';
-import { DeviceWorkspace } from './components/DeviceWorkspace';
-import { CustomGateModal } from './components/CustomGateModal';
-import { NlCircuitModal } from './components/NlCircuitModal';
+import type { DirectSynthPayload } from './components/OptimizeWorkspace';
 import { buildCircuitSvg, downloadTextFile } from './utils/exportCircuitSvg';
 
+const OptimizeWorkspace = lazy(() =>
+  import('./components/OptimizeWorkspace').then((m) => ({ default: m.OptimizeWorkspace }))
+);
+const SweepWorkspace = lazy(() =>
+  import('./components/SweepWorkspace').then((m) => ({ default: m.SweepWorkspace }))
+);
+const BenchmarkWorkspace = lazy(() =>
+  import('./components/BenchmarkWorkspace').then((m) => ({ default: m.BenchmarkWorkspace }))
+);
+const DeviceWorkspace = lazy(() =>
+  import('./components/DeviceWorkspace').then((m) => ({ default: m.DeviceWorkspace }))
+);
+const CustomGateModal = lazy(() =>
+  import('./components/CustomGateModal').then((m) => ({ default: m.CustomGateModal }))
+);
+const NlCircuitModal = lazy(() =>
+  import('./components/NlCircuitModal').then((m) => ({ default: m.NlCircuitModal }))
+);
+
 const DRAFT_STORAGE_KEY = 'quantum_studio_v2_draft_project';
+const RECENT_PROJECTS_KEY = 'quantum_studio_v2_recent_projects';
 
 export default function App() {
   const [presets, setPresets] = useState<ProjectModel[]>([]);
+  const [recentProjects, setRecentProjects] = useState<ProjectModel[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(RECENT_PROJECTS_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.slice(0, 6) : [];
+    } catch {
+      return [];
+    }
+  });
+  const pushRecentProject = useCallback((proj: ProjectModel) => {
+    setRecentProjects((prev) => {
+      const next = [proj, ...prev.filter((p) => p.name !== proj.name)].slice(0, 6);
+      try {
+        window.localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(next));
+      } catch {
+        // ignore quota errors
+      }
+      return next;
+    });
+  }, []);
   const [hardwareSweepParams, setHardwareSweepParams] = useState<Record<string, string>>({});
   const [project, setProject] = useState<ProjectModel | null>(null);
 
@@ -154,6 +190,9 @@ export default function App() {
     cal_points: 61,
     cal_max_ns: null,
     ramsey_detuning_mhz: 0.5,
+    echo_num_pulses: 1,
+    chevron_detuning_max_mhz: 6.0,
+    chevron_freq_points: 25,
     shots: 4096,
     amp_error_pct: 0,
     detuning_mhz: 0,
@@ -477,6 +516,9 @@ export default function App() {
             cal_points: cfg.cal_points,
             cal_max_ns: cfg.cal_max_ns,
             ramsey_detuning_mhz: cfg.ramsey_detuning_mhz,
+            echo_num_pulses: cfg.echo_num_pulses,
+            chevron_detuning_max_mhz: cfg.chevron_detuning_max_mhz,
+            chevron_freq_points: cfg.chevron_freq_points,
             shots: cfg.shots,
             amp_error_pct: cfg.amp_error_pct,
             detuning_mhz: cfg.detuning_mhz,
@@ -1130,14 +1172,17 @@ export default function App() {
       ? [...builtin.defaultParams]
       : [];
 
+    const effQubits =
+      u === 'BARRIER' && project ? project.qubits.map((_, idx) => idx) : qubits;
+
     const newOp: CircuitOpModel = {
       id: `op_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       step,
       kind,
       name: customG ? customG.name : u,
-      qubits,
+      qubits: effQubits,
       params,
-      duration_ns: customG ? customG.duration_ns : null,
+      duration_ns: customG ? customG.duration_ns : u === 'IDLE' ? Number(params[0] ?? 100) : null,
       noise_mode: 'inherit',
     };
 
@@ -1329,6 +1374,7 @@ export default function App() {
   // ---- Project Import / Export ----
   const handleExportJson = () => {
     if (!project) return;
+    pushRecentProject(project);
     const fname = project.name.endsWith('.json') ? project.name : `${project.name}.json`;
     downloadTextFile(fname, JSON.stringify(project, null, 2), 'application/json;charset=utf-8');
   };
@@ -1418,6 +1464,7 @@ export default function App() {
             sim_settings: { ...project.sim_settings, backend: nextBackend },
           };
           setProject(importedProj);
+          pushRecentProject(importedProj);
           setPast([]);
           setFuture([]);
           setSimResponse(null);
@@ -1514,11 +1561,13 @@ export default function App() {
       <TopToolbar
         project={project}
         presets={presets}
+        recentProjects={recentProjects}
         domain={domain}
         circuitSubMode={circuitSubMode}
         onDomainChange={handleSwitchDomain}
         onSelectPreset={(p) => {
           const clone = JSON.parse(JSON.stringify(p)) as ProjectModel;
+          pushRecentProject(clone);
           setProject(clone);
           setPast([]);
           setFuture([]);
@@ -1889,201 +1938,233 @@ export default function App() {
           )}
 
           {mode === 'optimize' && (
-            <OptimizeWorkspace
-              project={project}
-              optResponse={optResponse}
-              benchResponse={benchResponse}
-              darkMode={darkMode}
-              onRunOptimize={() => handleRunOptimize()}
-              onRunBenchmark={() => handleRunHwBenchmark()}
-              onRunUnitarySynthesis={handleRunUnitarySynthesis}
-              onApplyOptimizedToDesign={(targetNumQubits) => {
-                if (!optResponse) return;
-                mutateProject((p) => {
-                  let nextQ = p.qubits;
-                  if (targetNumQubits && targetNumQubits > p.qubits.length) {
-                    nextQ = [...p.qubits];
-                    for (let i = p.qubits.length; i < targetNumQubits; i++) {
-                      nextQ.push({
-                        id: i,
-                        name: `q${i}`,
-                        color: QUBIT_DOT_PALETTE[i % QUBIT_DOT_PALETTE.length],
-                        init_state: '|0>',
-                        init_theta: 0,
-                        init_phi: 0,
-                        t1_us: null,
-                        t2_us: null,
-                        freq_ghz: null,
-                        depol_1q: null,
-                        readout_err: null,
-                        pos_x: Number((i * 4.5).toFixed(1)),
-                        pos_y: 0,
-                      });
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-[12px] text-[var(--text-secondary)]">
+                  正在按需加载编译综合工作区...
+                </div>
+              }
+            >
+              <OptimizeWorkspace
+                project={project}
+                optResponse={optResponse}
+                benchResponse={benchResponse}
+                darkMode={darkMode}
+                onRunOptimize={() => handleRunOptimize()}
+                onRunBenchmark={() => handleRunHwBenchmark()}
+                onRunUnitarySynthesis={handleRunUnitarySynthesis}
+                onApplyOptimizedToDesign={(targetNumQubits) => {
+                  if (!optResponse) return;
+                  mutateProject((p) => {
+                    let nextQ = p.qubits;
+                    if (targetNumQubits && targetNumQubits > p.qubits.length) {
+                      nextQ = [...p.qubits];
+                      for (let i = p.qubits.length; i < targetNumQubits; i++) {
+                        nextQ.push({
+                          id: i,
+                          name: `q${i}`,
+                          color: QUBIT_DOT_PALETTE[i % QUBIT_DOT_PALETTE.length],
+                          init_state: '|0>',
+                          init_theta: 0,
+                          init_phi: 0,
+                          t1_us: null,
+                          t2_us: null,
+                          freq_ghz: null,
+                          depol_1q: null,
+                          readout_err: null,
+                          pos_x: Number((i * 4.5).toFixed(1)),
+                          pos_y: 0,
+                        });
+                      }
                     }
-                  }
-                  return {
+                    return {
+                      ...p,
+                      qubits: nextQ,
+                      operations: optResponse.optimized_operations,
+                    };
+                  });
+                  setMode('design');
+                  addLog('已将最优硬件原生门序列应用到设计画布', 'info');
+                }}
+                onSelectHardwareAndApply={(hardwareId, ops) => {
+                  mutateProject((p) => ({
                     ...p,
-                    qubits: nextQ,
-                    operations: optResponse.optimized_operations,
-                  };
-                });
-                setMode('design');
-                addLog('已将最优硬件原生门序列应用到设计画布', 'info');
-              }}
-              onSelectHardwareAndApply={(hardwareId, ops) => {
-                mutateProject((p) => ({
-                  ...p,
-                  active_hardware_id: hardwareId,
-                  operations: ops,
-                }));
-                setMode('design');
-                addLog(`已切换硬件配置 (${hardwareId}) 并应用最优原生门序列`, 'info');
-              }}
-              isBusy={isBusy}
-            />
+                    active_hardware_id: hardwareId,
+                    operations: ops,
+                  }));
+                  setMode('design');
+                  addLog(`已切换硬件配置 (${hardwareId}) 并应用最优原生门序列`, 'info');
+                }}
+                isBusy={isBusy}
+              />
+            </Suspense>
           )}
 
           {mode === 'sweep' && (
-            <SweepWorkspace
-              activeSubMode={sweepConfig.mode}
-              sweepResponse={sweepResponse}
-              vqeResponse={vqeResponse}
-              darkMode={darkMode}
-              onRunSweep={() => handleRunSweep()}
-              onApplyOptimalParams={(optParams, runSim) => {
-                const updated: ProjectModel = {
-                  ...project,
-                  variables: { ...project.variables, ...optParams },
-                };
-                setPast((p) => [...p.slice(-30), project]);
-                setFuture([]);
-                setProject(updated);
-                setSimDirty(true);
-                addLog(
-                  `已写回变分最优参数: ${Object.entries(optParams)
-                    .map(([k, v]) => `${k}=${v.toFixed(4)}`)
-                    .join(', ')}`,
-                  'info'
-                );
-                if (runSim) {
-                  handleRunSimulation(updated, true);
-                }
-              }}
-              isBusy={isBusy}
-            />
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-[12px] text-[var(--text-secondary)]">
+                  正在按需加载参数扫描与 VQE 工作区...
+                </div>
+              }
+            >
+              <SweepWorkspace
+                activeSubMode={sweepConfig.mode}
+                sweepResponse={sweepResponse}
+                vqeResponse={vqeResponse}
+                darkMode={darkMode}
+                onRunSweep={() => handleRunSweep()}
+                onApplyOptimalParams={(optParams, runSim) => {
+                  const updated: ProjectModel = {
+                    ...project,
+                    variables: { ...project.variables, ...optParams },
+                  };
+                  setPast((p) => [...p.slice(-30), project]);
+                  setFuture([]);
+                  setProject(updated);
+                  setSimDirty(true);
+                  addLog(
+                    `已写回变分最优参数: ${Object.entries(optParams)
+                      .map(([k, v]) => `${k}=${v.toFixed(4)}`)
+                      .join(', ')}`,
+                    'info'
+                  );
+                  if (runSim) {
+                    handleRunSimulation(updated, true);
+                  }
+                }}
+                isBusy={isBusy}
+              />
+            </Suspense>
           )}
 
           {domain === 'characterization' && (
-            <BenchmarkWorkspace
-              project={project}
-              activeProtocol={benchmarkConfig.protocol}
-              targetQubit={benchmarkConfig.target_qubit}
-              secondQubit={benchmarkConfig.second_qubit}
-              rbNumQubits={benchmarkConfig.rb_num_qubits}
-              interleavedGate={benchmarkConfig.interleaved_gate}
-              xebEntangler={benchmarkConfig.xeb_entangler}
-              onSwitchProtocol={(proto) => {
-                setBenchmarkConfig((prev) => ({ ...prev, protocol: proto }));
-              }}
-              response={gateBenchResponse}
-              darkMode={darkMode}
-              onRunBenchmark={() => handleRunGateBenchmark()}
-              onApplyWriteback={handleApplyCalibrationWriteback}
-              onLoadCircuitToDesign={(ops, label) => {
-                mutateProject((p) => ({
-                  ...p,
-                  name: label,
-                  operations: ops,
-                }));
-                setMode('design');
-                addLog(`已将标定序列 (${label}) 导入设计画布`, 'info');
-              }}
-              isBusy={isBusy}
-            />
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-[12px] text-[var(--text-secondary)]">
+                  正在按需加载比特门表征工作区...
+                </div>
+              }
+            >
+              <BenchmarkWorkspace
+                project={project}
+                activeProtocol={benchmarkConfig.protocol}
+                targetQubit={benchmarkConfig.target_qubit}
+                secondQubit={benchmarkConfig.second_qubit}
+                rbNumQubits={benchmarkConfig.rb_num_qubits}
+                interleavedGate={benchmarkConfig.interleaved_gate}
+                xebEntangler={benchmarkConfig.xeb_entangler}
+                onSwitchProtocol={(proto) => {
+                  setBenchmarkConfig((prev) => ({ ...prev, protocol: proto }));
+                }}
+                response={gateBenchResponse}
+                darkMode={darkMode}
+                onRunBenchmark={() => handleRunGateBenchmark()}
+                onApplyWriteback={handleApplyCalibrationWriteback}
+                onLoadCircuitToDesign={(ops, label) => {
+                  mutateProject((p) => ({
+                    ...p,
+                    name: label,
+                    operations: ops,
+                  }));
+                  setMode('design');
+                  addLog(`已将标定序列 (${label}) 导入设计画布`, 'info');
+                }}
+                isBusy={isBusy}
+              />
+            </Suspense>
           )}
 
           {domain === 'device' && (
-            <DeviceWorkspace
-              project={project}
-              activeTab={deviceSubTab}
-              onTabChange={setDeviceSubTab}
-              darkMode={darkMode}
-              onUpdateHardware={(hwId, patch) =>
-                mutateProject((p) => ({
-                  ...p,
-                  hardware_profiles: p.hardware_profiles.map((h) =>
-                    h.id === hwId ? { ...h, ...patch } : h
-                  ),
-                }))
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-[12px] text-[var(--text-secondary)]">
+                  正在按需加载器件与硬件工作区...
+                </div>
               }
-              onSelectHardware={(hwId) =>
-                mutateProject((p) => ({ ...p, active_hardware_id: hwId }), false)
-              }
-              onUpdateQubit={(qubitId, patch) =>
-                mutateProject((p) => ({
-                  ...p,
-                  qubits: p.qubits.map((q) => (q.id === qubitId ? { ...q, ...patch } : q)),
-                }))
-              }
-              onAddQubit={handleAddQubit}
-              onDeleteQubit={handleDeleteQubit}
-              onApplyLatticeLayout={(positions) => {
-                mutateProject((p) => ({
-                  ...p,
-                  qubits: p.qubits.map((q, idx) =>
-                    positions[idx] ? { ...q, pos_x: positions[idx].x, pos_y: positions[idx].y } : q
-                  ),
-                }));
-                addLog(`已应用二维中性原子晶格排布 (${positions.length} 原子)`, 'info');
-              }}
-              onToggleCustomEdge={(u, v) => {
-                const pair: [number, number] = [Math.min(u, v), Math.max(u, v)];
-                mutateProject((p) => ({
-                  ...p,
-                  hardware_profiles: p.hardware_profiles.map((h) => {
-                    if (h.id !== p.active_hardware_id) return h;
-                    const exists = h.edges.some(([a, b]) => a === pair[0] && b === pair[1]);
-                    const nextEdges = exists
-                      ? h.edges.filter(([a, b]) => !(a === pair[0] && b === pair[1]))
-                      : [...h.edges, pair];
-                    return { ...h, edges: nextEdges };
-                  }),
-                }));
-              }}
-              onToggleCustomGateNative={(gateId, isNative) =>
-                mutateProject((p) => ({
-                  ...p,
-                  custom_gates: p.custom_gates.map((g) =>
-                    g.id === gateId ? { ...g, is_native: isNative } : g
-                  ),
-                }))
-              }
-              onOpenNewGateModal={() => {
-                setEditingCustomGate(null);
-                setMacroSeedOps(null);
-                setGateModalOpen(true);
-              }}
-              onEditCustomGate={(cg) => {
-                setEditingCustomGate(cg);
-                setMacroSeedOps(null);
-                setGateModalOpen(true);
-              }}
-              onDeleteCustomGate={(gid) =>
-                mutateProject((p) => ({
-                  ...p,
-                  custom_gates: p.custom_gates.filter((g) => g.id !== gid),
-                }))
-              }
-              onJumpToCalibrate={(qid, proto) => {
-                setDomain('characterization');
-                setBenchmarkConfig((prev) => ({
-                  ...prev,
-                  target_qubit: qid,
-                  protocol: proto,
-                }));
-                setStatusMsg(`已切换至 q${qid} 的 ${proto.toUpperCase()} 标定页 · 点击「运行实验」开始标定`);
-              }}
-            />
+            >
+              <DeviceWorkspace
+                project={project}
+                activeTab={deviceSubTab}
+                onTabChange={setDeviceSubTab}
+                darkMode={darkMode}
+                onUpdateHardware={(hwId, patch) =>
+                  mutateProject((p) => ({
+                    ...p,
+                    hardware_profiles: p.hardware_profiles.map((h) =>
+                      h.id === hwId ? { ...h, ...patch } : h
+                    ),
+                  }))
+                }
+                onSelectHardware={(hwId) =>
+                  mutateProject((p) => ({ ...p, active_hardware_id: hwId }), false)
+                }
+                onUpdateQubit={(qubitId, patch) =>
+                  mutateProject((p) => ({
+                    ...p,
+                    qubits: p.qubits.map((q) => (q.id === qubitId ? { ...q, ...patch } : q)),
+                  }))
+                }
+                onAddQubit={handleAddQubit}
+                onDeleteQubit={handleDeleteQubit}
+                onApplyLatticeLayout={(positions) => {
+                  mutateProject((p) => ({
+                    ...p,
+                    qubits: p.qubits.map((q, idx) =>
+                      positions[idx] ? { ...q, pos_x: positions[idx].x, pos_y: positions[idx].y } : q
+                    ),
+                  }));
+                  addLog(`已应用二维中性原子晶格排布 (${positions.length} 原子)`, 'info');
+                }}
+                onToggleCustomEdge={(u, v) => {
+                  const pair: [number, number] = [Math.min(u, v), Math.max(u, v)];
+                  mutateProject((p) => ({
+                    ...p,
+                    hardware_profiles: p.hardware_profiles.map((h) => {
+                      if (h.id !== p.active_hardware_id) return h;
+                      const exists = h.edges.some(([a, b]) => a === pair[0] && b === pair[1]);
+                      const nextEdges = exists
+                        ? h.edges.filter(([a, b]) => !(a === pair[0] && b === pair[1]))
+                        : [...h.edges, pair];
+                      return { ...h, edges: nextEdges };
+                    }),
+                  }));
+                }}
+                onToggleCustomGateNative={(gateId, isNative) =>
+                  mutateProject((p) => ({
+                    ...p,
+                    custom_gates: p.custom_gates.map((g) =>
+                      g.id === gateId ? { ...g, is_native: isNative } : g
+                    ),
+                  }))
+                }
+                onOpenNewGateModal={() => {
+                  setEditingCustomGate(null);
+                  setMacroSeedOps(null);
+                  setGateModalOpen(true);
+                }}
+                onEditCustomGate={(cg) => {
+                  setEditingCustomGate(cg);
+                  setMacroSeedOps(null);
+                  setGateModalOpen(true);
+                }}
+                onDeleteCustomGate={(gid) =>
+                  mutateProject((p) => ({
+                    ...p,
+                    custom_gates: p.custom_gates.filter((g) => g.id !== gid),
+                  }))
+                }
+                onJumpToCalibrate={(qid, proto) => {
+                  setDomain('characterization');
+                  setBenchmarkConfig((prev) => ({
+                    ...prev,
+                    target_qubit: qid,
+                    protocol: proto,
+                  }));
+                  setStatusMsg(`已切换至 q${qid} 的 ${proto.toUpperCase()} 标定页 · 点击「运行实验」开始标定`);
+                }}
+              />
+            </Suspense>
           )}
         </main>
 
@@ -2247,24 +2328,30 @@ export default function App() {
         </div>
       )}
 
-      {/* Custom Gate Builder Sheet Modal */}
-      <CustomGateModal
-        open={gateModalOpen}
-        editingGate={editingCustomGate}
-        existingCustomGates={project.custom_gates}
-        macroSeedOps={macroSeedOps}
-        macroSeedQubits={macroSeedQubits}
-        onClose={() => setGateModalOpen(false)}
-        onSave={handleSaveCustomGate}
-      />
+      {gateModalOpen && (
+        <Suspense fallback={null}>
+          <CustomGateModal
+            open={gateModalOpen}
+            editingGate={editingCustomGate}
+            existingCustomGates={project.custom_gates}
+            macroSeedOps={macroSeedOps}
+            macroSeedQubits={macroSeedQubits}
+            onClose={() => setGateModalOpen(false)}
+            onSave={handleSaveCustomGate}
+          />
+        </Suspense>
+      )}
 
-      {/* Natural Language -> Quantum Circuit AI Modal */}
-      <NlCircuitModal
-        open={nlModalOpen}
-        project={project}
-        onClose={() => setNlModalOpen(false)}
-        onApplyResult={handleApplyNlResult}
-      />
+      {nlModalOpen && (
+        <Suspense fallback={null}>
+          <NlCircuitModal
+            open={nlModalOpen}
+            project={project}
+            onClose={() => setNlModalOpen(false)}
+            onApplyResult={handleApplyNlResult}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

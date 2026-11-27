@@ -151,6 +151,9 @@ def can_matrix(tx: float, ty: float, tz: float) -> np.ndarray:
 # Fixed Unitary Matrices
 FIXED_MATRICES: Dict[str, np.ndarray] = {
     "I": I2,
+    "IDLE": I2,
+    "DELAY": I2,
+    "BARRIER": I2,
     "X": PAULI_X,
     "Y": PAULI_Y,
     "Z": PAULI_Z,
@@ -221,6 +224,9 @@ FIXED_MATRICES: Dict[str, np.ndarray] = {
 
 CLIFFORD_GATE_NAMES = {
     "I",
+    "IDLE",
+    "DELAY",
+    "BARRIER",
     "X",
     "Y",
     "Z",
@@ -257,6 +263,8 @@ def gate_unitary(
         return np.asarray(custom_matrix, dtype=np.complex128)
 
     uname = name.upper()
+    if uname in ("IDLE", "DELAY", "BARRIER"):
+        return I2.copy()
     if uname in FIXED_MATRICES and len(params) == 0:
         return FIXED_MATRICES[uname].copy()
 
@@ -302,7 +310,7 @@ def gate_hamiltonian_generator(
     Used by QuTiP pulse-level solver to construct physical control pulses H(t).
     """
     uname = name.upper()
-    if uname == "I":
+    if uname in ("I", "IDLE", "DELAY", "BARRIER"):
         return np.zeros((2, 2), dtype=np.complex128), 0.0
     if uname == "X":
         return PAULI_X, math.pi
@@ -377,6 +385,131 @@ def gate_hamiltonian_generator(
     H_eff = 1.0j * logm(U)
     H_eff = 0.5 * (H_eff + H_eff.conj().T)
     return 2.0 * H_eff, 1.0
+
+
+def sample_unit_area_envelope(
+    t_ns: float,
+    gate_dt: float,
+    pulse_shape: str = "cosine",
+    rise_ns: float = 0.0,
+    fall_ns: float = 0.0,
+) -> float:
+    """Evaluate unit-area control envelope f(t) on [0, gate_dt] with integral_0^{gate_dt} f(t) dt = 1."""
+    if gate_dt <= 0.0 or t_ns < 0.0 or t_ns > gate_dt:
+        return 0.0
+    shape = (pulse_shape or "cosine").lower()
+    if shape in ("rectangular", "trapezoid") and (rise_ns > 0.0 or fall_ns > 0.0):
+        r = max(0.0, rise_ns)
+        f = max(0.0, fall_ns)
+        if r + f > gate_dt:
+            s = gate_dt / (r + f)
+            r, f = r * s, f * s
+        area = max(gate_dt - 0.5 * (r + f), 1e-12)
+        amp_ft = 1.0 / area
+        t_fall0 = gate_dt - f
+        if shape == "trapezoid":
+            if r > 0.0 and t_ns < r:
+                return amp_ft * (t_ns / r)
+            if f > 0.0 and t_ns > t_fall0:
+                return amp_ft * ((gate_dt - t_ns) / f)
+            return amp_ft
+        if r > 0.0 and t_ns < r:
+            return amp_ft * 0.5 * (1.0 - math.cos(math.pi * t_ns / r))
+        if f > 0.0 and t_ns > t_fall0:
+            return amp_ft * 0.5 * (1.0 - math.cos(math.pi * (gate_dt - t_ns) / f))
+        return amp_ft
+
+    if shape in ("rectangular", "trapezoid"):
+        return 1.0 / gate_dt
+
+    if shape == "gaussian":
+        mid = 0.5 * gate_dt
+        sigma = gate_dt / 4.5
+        edge = math.exp(-0.5 * (mid / sigma) ** 2)
+        area = math.sqrt(2.0 * math.pi) * sigma * math.erf(mid / (math.sqrt(2.0) * sigma)) - edge * gate_dt
+        return max(0.0, math.exp(-0.5 * ((t_ns - mid) / sigma) ** 2) - edge) / max(area, 1e-12)
+
+    return (1.0 - math.cos(2.0 * math.pi * t_ns / gate_dt)) / gate_dt
+
+
+def simulate_3level_drag_pulse(
+    theta: float,
+    phi: float,
+    duration_ns: float,
+    anharmonicity_ghz: float,
+    drag_beta: float = 0.0,
+    pulse_shape: str = "cosine",
+    rise_ns: float = 0.0,
+    fall_ns: float = 0.0,
+    detuning_mhz: float = 0.0,
+    n_steps: int = 44,
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Propagate a single-qubit drive pulse in the 3-level Transmon Hilbert space {|0>, |1>, |2>}
+    with anharmonicity alpha/2pi = `anharmonicity_ghz` (GHz) and DRAG quadrature derivative
+    Omega_Q(t) = -drag_beta * d(Omega_I)/dt / omega_alpha.
+
+    Returns:
+      - `u_2x2_polar`: Closest 2x2 unitary in the computational subspace (capturing AC-Stark phase error)
+      - `leak_0`: Leakage probability P(|2> | init |0>) = |U_{2,0}|^2
+      - `leak_1`: Leakage probability P(|2> | init |1>) = |U_{2,1}|^2
+    """
+    if duration_ns <= 1e-9 or abs(theta) <= 1e-9 or abs(anharmonicity_ghz) <= 1e-5:
+        return rxy_matrix(theta, phi), 0.0, 0.0
+
+    w_alpha = 2.0 * math.pi * float(anharmonicity_ghz)  # rad / ns
+    w_det = 2.0 * math.pi * float(detuning_mhz) * 1e-3  # rad / ns
+    dt = duration_ns / float(n_steps)
+    eps = max(1e-4, 0.02 * dt)
+
+    ep = complex(math.cos(phi), math.sin(phi))
+    em = ep.conjugate()
+    # Lowering operator b_phi = e^{-i phi} (|0><1| + sqrt(2)|1><2|)
+    s2 = math.sqrt(2.0)
+    x_phi = np.array(
+        [
+            [0.0, em, 0.0],
+            [ep, 0.0, s2 * em],
+            [0.0, s2 * ep, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    y_phi = np.array(
+        [
+            [0.0, -1j * em, 0.0],
+            [1j * ep, 0.0, -1j * s2 * em],
+            [0.0, 1j * s2 * ep, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    h_static = np.diag([0.0, w_det, 2.0 * w_det + w_alpha]).astype(np.complex128)
+
+    u3 = np.eye(3, dtype=np.complex128)
+    for k in range(n_steps):
+        tm = (k + 0.5) * dt
+        f_mid = sample_unit_area_envelope(tm, duration_ns, pulse_shape, rise_ns, fall_ns)
+        omega_i = theta * f_mid
+        if abs(drag_beta) > 1e-9:
+            f_p = sample_unit_area_envelope(min(duration_ns, tm + eps), duration_ns, pulse_shape, rise_ns, fall_ns)
+            f_m = sample_unit_area_envelope(max(0.0, tm - eps), duration_ns, pulse_shape, rise_ns, fall_ns)
+            d_omega_i = theta * (f_p - f_m) / (min(duration_ns, tm + eps) - max(0.0, tm - eps))
+            omega_q = -float(drag_beta) * d_omega_i / w_alpha
+        else:
+            omega_q = 0.0
+
+        h_step = h_static + 0.5 * omega_i * x_phi + 0.5 * omega_q * y_phi
+        vals, vecs = np.linalg.eigh(h_step)
+        phases = np.exp(-1j * vals * dt)
+        u_step = (vecs * phases) @ vecs.conj().T
+        u3 = u_step @ u3
+
+    leak_0 = float(min(1.0, max(0.0, abs(u3[2, 0]) ** 2)))
+    leak_1 = float(min(1.0, max(0.0, abs(u3[2, 1]) ** 2)))
+    sub2 = u3[:2, :2]
+    # Polar decomposition SVD: closest 2x2 unitary preserving exact AC-Stark phase shift!
+    u_svd, _, vh_svd = np.linalg.svd(sub2)
+    u_polar = u_svd @ vh_svd
+    return u_polar, leak_0, leak_1
 
 
 # ---------------------------------------------------------------------------

@@ -405,6 +405,106 @@ def apply_readout_confusion(
     return probabilities_array_to_dict(p_noisy, num_qubits)
 
 
+def project_to_probability_simplex(v: np.ndarray) -> np.ndarray:
+    """Euclidean projection of real vector `v` onto the probability simplex {p >= 0, sum(p) = 1} in O(D log D)."""
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u) - 1.0
+    ind = np.arange(1, len(v) + 1, dtype=np.float64)
+    cond = u - cssv / ind > 0.0
+    if not np.any(cond):
+        out = np.zeros_like(v, dtype=np.float64)
+        out[int(np.argmax(v))] = 1.0
+        return out
+    rho_idx = int(np.nonzero(cond)[0][-1])
+    theta = float(cssv[rho_idx] / (rho_idx + 1.0))
+    return np.maximum(v - theta, 0.0)
+
+
+def mitigate_readout_probabilities(
+    obs_probs: Dict[str, float],
+    num_qubits: int,
+    readout_errors: Dict[int, ReadoutError],
+) -> Dict[str, float]:
+    """
+    Mitigate readout assignment confusion via tensor-product inverse M_0^{-1} ⊗ ... ⊗ M_{N-1}^{-1}
+    followed by exact Euclidean projection onto the physical probability simplex (for N <= 14),
+    or sparse Iterative Bayesian Unfolding (IBU) for large-N bitstring distributions (N > 14).
+    """
+    if not obs_probs or not readout_errors:
+        return dict(obs_probs)
+    has_err = any(
+        (re.p1_given_0 > 1e-9 or re.p0_given_1 > 1e-9)
+        and (1.0 - re.p1_given_0 - re.p0_given_1) > 0.05
+        for re in readout_errors.values()
+    )
+    if not has_err:
+        return dict(obs_probs)
+
+    if num_qubits <= 14:
+        dim = 1 << num_qubits
+        p_vec = np.zeros(dim, dtype=np.float64)
+        for bstr, val in obs_probs.items():
+            if len(bstr) == num_qubits:
+                p_vec[int(bstr, 2)] = float(val)
+        s = float(np.sum(p_vec))
+        if s <= 0:
+            return dict(obs_probs)
+        p_tensor = (p_vec / s).reshape([2] * num_qubits)
+        for q in range(num_qubits):
+            r_err = readout_errors.get(q)
+            if r_err is not None and (r_err.p1_given_0 > 0 or r_err.p0_given_1 > 0):
+                det = 1.0 - r_err.p1_given_0 - r_err.p0_given_1
+                if det > 0.05:
+                    m_inv = (1.0 / det) * np.array(
+                        [
+                            [1.0 - r_err.p0_given_1, -r_err.p0_given_1],
+                            [-r_err.p1_given_0, 1.0 - r_err.p1_given_0],
+                        ],
+                        dtype=np.float64,
+                    )
+                    p_tensor = np.tensordot(m_inv, p_tensor, axes=([1], [q]))
+                    p_tensor = np.moveaxis(p_tensor, 0, q)
+        p_mit = project_to_probability_simplex(p_tensor.reshape(dim))
+        return probabilities_array_to_dict(p_mit, num_qubits)
+
+    # Sparse support IBU on top observed bitstrings + single-bit-flip neighbors for N > 14
+    support_set = set(obs_probs.keys())
+    for bstr in list(obs_probs.keys())[:32]:
+        chars = list(bstr)
+        for q in range(min(num_qubits, len(chars))):
+            r_err = readout_errors.get(q)
+            if r_err is not None and (r_err.p1_given_0 > 0 or r_err.p0_given_1 > 0):
+                flipped = chars.copy()
+                flipped[q] = "0" if chars[q] == "1" else "1"
+                support_set.add("".join(flipped))
+    keys = sorted(support_set)
+    k_len = len(keys)
+    obs_v = np.array([obs_probs.get(k, 0.0) for k in keys], dtype=np.float64)
+    s_obs = float(np.sum(obs_v))
+    if s_obs <= 0 or k_len > 512:
+        return dict(obs_probs)
+    obs_v /= s_obs
+    # Build restricted transition matrix T[obs_idx, true_idx] = P(obs | true)
+    bits_mat = np.array([[1 if ch == "1" else 0 for ch in k] for k in keys], dtype=np.uint8)
+    t_mat = np.ones((k_len, k_len), dtype=np.float64)
+    for q in range(num_qubits):
+        r_err = readout_errors.get(q)
+        p10 = r_err.p1_given_0 if r_err else 0.0
+        p01 = r_err.p0_given_1 if r_err else 0.0
+        if p10 <= 0 and p01 <= 0:
+            continue
+        m_q = np.array([[1.0 - p10, p01], [p10, 1.0 - p01]], dtype=np.float64)
+        t_mat *= m_q[bits_mat[:, q][:, None], bits_mat[:, q][None, :]]
+    col_sums = np.maximum(np.sum(t_mat, axis=0), 1e-12)
+    t_mat /= col_sums[None, :]
+    est = np.full(k_len, 1.0 / k_len, dtype=np.float64)
+    for _ in range(15):
+        denom = np.maximum(t_mat @ est, 1e-15)
+        est = est * (t_mat.T @ (obs_v / denom))
+        est /= max(1e-15, float(np.sum(est)))
+    return {k: float(v) for k, v in zip(keys, est) if v >= 1e-5}
+
+
 def sample_bitstrings_from_prob_array(
     p_vec: np.ndarray,
     num_qubits: int,

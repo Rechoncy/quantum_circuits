@@ -26,6 +26,7 @@ import { BACKEND_LABELS } from '../constants';
 interface TopToolbarProps {
   project: ProjectModel;
   presets: ProjectModel[];
+  recentProjects?: ProjectModel[];
   domain: PrimaryDomain;
   circuitSubMode: CircuitSubMode;
   onDomainChange: (d: PrimaryDomain) => void;
@@ -68,6 +69,7 @@ const DOMAINS: {
 export const TopToolbar: React.FC<TopToolbarProps> = ({
   project,
   presets,
+  recentProjects = [],
   domain,
   circuitSubMode,
   onDomainChange,
@@ -189,7 +191,30 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           )}
 
           {menuOpen && (
-            <div className="absolute left-2 top-[40px] w-80 studio-card shadow-xl py-1 z-50">
+            <div className="absolute left-2 top-[40px] w-80 studio-card shadow-xl py-1 z-50 max-h-[82vh] overflow-y-auto">
+              {recentProjects.length > 0 && (
+                <>
+                  <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--accent)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
+                    最近工程 RECENT ({recentProjects.length})
+                  </div>
+                  {recentProjects.map((rp, idx) => (
+                    <button
+                      key={`rec_${rp.name}_${idx}`}
+                      onClick={() => {
+                        onSelectPreset(rp);
+                        setMenuOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
+                    >
+                      <span className="truncate font-mono-num">{rp.name}</span>
+                      <span className="shrink-0 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                        {rp.qubits.length}Q · {rp.operations.filter((o) => o.kind === 'gate').length}G
+                      </span>
+                    </button>
+                  ))}
+                  <div className="my-1 border-t border-[var(--border-hairline)]" />
+                </>
+              )}
               <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
                 工程模板库 PRESETS ({presets.length})
               </div>
@@ -438,7 +463,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 <span className="text-[11.5px] font-bold text-[var(--text-primary)]">
                   EDA 工作台快捷键
                 </span>
-                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.7</span>
+                <span className="text-[10px] font-mono-num text-[var(--accent)]">v2.8</span>
               </div>
               <div className="space-y-1.5 text-[11px]">
                 {[

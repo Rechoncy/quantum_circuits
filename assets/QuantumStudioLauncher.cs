@@ -6,10 +6,10 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Quantum Studio EDA")]
-[assembly: AssemblyDescription("Quantum Studio EDA v2.7 — Quantum Circuit, Gate Characterization & Device Workbench")]
+[assembly: AssemblyDescription("Quantum Studio EDA v2.8 — Quantum Circuit, Gate Characterization & Device Workbench")]
 [assembly: AssemblyProduct("Quantum Studio EDA")]
-[assembly: AssemblyVersion("2.7.0.0")]
-[assembly: AssemblyFileVersion("2.7.0.0")]
+[assembly: AssemblyVersion("2.8.0.0")]
+[assembly: AssemblyFileVersion("2.8.0.0")]
 
 namespace QuantumStudioLauncher
 {

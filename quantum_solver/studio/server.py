@@ -72,7 +72,7 @@ class SaveFilePayload(BaseModel):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Quantum Studio API", version="2.7.0")
+    app = FastAPI(title="Quantum Studio API", version="2.8.0")
 
     app.add_middleware(
         CORSMiddleware,

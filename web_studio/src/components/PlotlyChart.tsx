@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
-import Plotly from 'plotly.js-dist-min';
+import Plotly from 'plotly.js-cartesian-dist-min';
 import { Download } from 'lucide-react';
 import { downloadBase64File, downloadTextFile } from '../utils/exportCircuitSvg';
 

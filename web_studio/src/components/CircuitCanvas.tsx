@@ -61,7 +61,7 @@ const BASE_LEFT_PAD = 92;
 
 const PALETTE_1Q = ['H', 'X', 'SX', 'RXY', 'RX', 'RY', 'RZ'];
 const PALETTE_2Q = ['CZ', 'CNOT', 'ISWAP', 'SWAP'];
-const PALETTE_UTIL = ['DEPOLARIZE', 'MEASURE'];
+const PALETTE_UTIL = ['IDLE', 'BARRIER', 'DEPOLARIZE', 'MEASURE'];
 
 export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   project,
@@ -255,6 +255,12 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
   };
 
   const formatOpParams = (op: CircuitOpModel): string => {
+    const uName = op.name.toUpperCase();
+    if (uName === 'BARRIER') return '';
+    if (uName === 'IDLE' || uName === 'DELAY') {
+      const rawTau = op.params[0] ?? op.duration_ns ?? 100;
+      return typeof rawTau === 'number' ? `${Math.round(rawTau)}ns` : `${rawTau}`;
+    }
     if (!op.params || op.params.length === 0) return '';
     return op.params
       .map((p) => {
@@ -290,6 +296,15 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
         border: 'border-slate-400 dark:border-slate-500/80',
         text: 'text-slate-800 dark:text-slate-200',
         label: 'M',
+        isCustom: false,
+      };
+    }
+    if (u === 'IDLE' || u === 'DELAY' || u === 'BARRIER') {
+      return {
+        bg: 'bg-[#f8fafc] dark:bg-[#1e2633]',
+        border: 'border-slate-400 border-dashed dark:border-slate-500/80',
+        text: 'text-slate-700 dark:text-slate-200',
+        label: u === 'BARRIER' ? 'BAR' : 'IDLE',
         isCustom: false,
       };
     }
@@ -549,6 +564,8 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
     const tintCls =
       gName === 'MEASURE'
         ? 'bg-[#e2e8f0] dark:bg-[#242e3d] border-slate-400 dark:border-slate-500/80 text-slate-800 dark:text-slate-200'
+        : gName === 'IDLE' || gName === 'BARRIER'
+        ? 'bg-[#f8fafc] dark:bg-[#1e2633] border-slate-400 border-dashed text-slate-700 dark:text-slate-200'
         : gName === 'DEPOLARIZE'
         ? 'bg-[#fffbeb] dark:bg-[#332613] border-amber-400 border-dashed text-amber-900 dark:text-amber-200'
         : info?.tint === 'teal'
@@ -1335,6 +1352,38 @@ export const CircuitCanvas: React.FC<CircuitCanvasProps> = ({
                             </div>
                           ))}
                         </React.Fragment>
+                      );
+                    }
+
+                    // Timing / Optimization Barrier across one or multiple qubits
+                    if (uname === 'BARRIER') {
+                      const minQ = Math.min(...validQ);
+                      const maxQ = Math.max(...validQ);
+                      const topY = minQ * rowH + 4;
+                      const botY = (maxQ + 1) * rowH - 4;
+                      return (
+                        <div
+                          key={op.id}
+                          {...dragHandlers}
+                          onClick={handleOpClick}
+                          style={{
+                            left: xCenter - 13,
+                            top: topY,
+                            width: 26,
+                            height: Math.max(24, botY - topY),
+                          }}
+                          className={`studio-gate-node absolute flex flex-col items-center cursor-grab active:cursor-grabbing z-10 rounded-[2px] ${simStateCls} ${
+                            isSelected
+                              ? 'bg-[#2F81F7]/15 ring-1 ring-[#2F81F7]'
+                              : 'hover:bg-slate-500/10'
+                          }`}
+                          title="时序与编译隔离屏障 BARRIER（阻止跨屏障门融合/对易，拖拽移动列，右键删除）"
+                        >
+                          <div className="h-full border-l-2 border-dashed border-slate-500/80 dark:border-slate-400/75" />
+                          <span className="absolute top-0.5 px-1 py-0 rounded-[2px] bg-[var(--bg-panel)] border border-slate-400/70 text-[8.5px] font-mono-num font-bold text-[var(--text-secondary)]">
+                            BAR
+                          </span>
+                        </div>
                       );
                     }
 

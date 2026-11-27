@@ -178,7 +178,7 @@ export async function runNoiseBudget(
 export async function runGateBenchmark(
   payload: {
     project: ProjectModel;
-    protocol: 'rabi' | 'ramsey' | 't1' | 'rb' | 'allxy' | 'gst' | 'xeb';
+    protocol: 'rabi' | 'chevron' | 'ramsey' | 'echo' | 't1' | 'rb' | 'allxy' | 'gst' | 'xeb';
     target_qubit: number;
     second_qubit?: number;
     rb_num_qubits?: 1 | 2;
@@ -190,6 +190,9 @@ export async function runGateBenchmark(
     cal_points?: number;
     cal_max_ns?: number | null;
     ramsey_detuning_mhz?: number;
+    echo_num_pulses?: number;
+    chevron_detuning_max_mhz?: number;
+    chevron_freq_points?: number;
     shots?: number;
     amp_error_pct?: number;
     detuning_mhz?: number;

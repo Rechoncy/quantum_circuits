@@ -265,8 +265,8 @@ def _apply_zz_crosstalk_layer(
             continue
         if not check_all and (u not in active_set and v not in active_set and abs(u - v) > 1):
             continue
-        # H_zz = (2*pi * zz_mhz * 1e-3 / 2) Z_u Z_v => phase angle = pi * zz_mhz * 1e-3 * dt_ns
-        phi = math.pi * cp.zz_crosstalk_mhz * 1e-3 * dt_ns
+        # H_zz = (2*pi * zz_mhz * 1e-3 / 4) Z_u Z_v => phase angle = 0.5 * pi * zz_mhz * 1e-3 * dt_ns
+        phi = 0.5 * math.pi * cp.zz_crosstalk_mhz * 1e-3 * dt_ns
         if abs(phi) <= 1e-9:
             continue
         e_minus = complex(math.cos(phi), -math.sin(phi))
@@ -346,17 +346,32 @@ class TrajectoryBackend:
             layer_gates: List[GateInstruction] = step_item
             used_qubits = set()
             gate_dts: List[float] = []
+            busy_ns: Dict[int, float] = {}
             for g in layer_gates:
                 used_qubits.update(g.qubits)
-                u_small = g.unitary()
-                psi = apply_operator_to_statevector(psi, u_small, g.qubits, num_qubits)
-                dt_g = g.duration_ns
-                if dt_g is None:
-                    dt_g = hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0
-                gate_dts.append(float(dt_g))
+                if g.name.upper() != "BARRIER":
+                    u_small = g.unitary()
+                    psi = apply_operator_to_statevector(psi, u_small, g.qubits, num_qubits)
+                dt_g = (
+                    0.0
+                    if g.name.upper() == "BARRIER"
+                    else (
+                        float(g.params[0])
+                        if g.name.upper() in ("IDLE", "DELAY") and g.params
+                        else (
+                            g.duration_ns
+                            if g.duration_ns is not None
+                            else (hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0)
+                        )
+                    )
+                )
+                dt_val = float(max(0.0, dt_g))
+                gate_dts.append(dt_val)
+                for q_u in g.qubits:
+                    busy_ns[q_u] = max(busy_ns.get(q_u, 0.0), dt_val if not g.skip_hw_noise else 0.0)
 
             dt_layer = max(gate_dts) if gate_dts else 0.0
-            all_ideal_layer = all(g.skip_hw_noise for g in layer_gates)
+            all_ideal_layer = all(g.skip_hw_noise or g.name.upper() == "BARRIER" for g in layer_gates)
 
             if hardware is not None and dt_layer > 0 and not all_ideal_layer:
                 psi = _apply_zz_crosstalk_layer(psi, dt_layer, hardware, list(used_qubits), num_qubits)
@@ -364,37 +379,40 @@ class TrajectoryBackend:
             for g, dt_g in zip(layer_gates, gate_dts):
                 for ch in g.noise_after:
                     psi = sample_kraus_trajectory_step(psi, ch, num_qubits, rng)
+                is_idle_op = g.name.upper() in ("IDLE", "DELAY", "BARRIER")
                 if hardware is not None and dt_g > 0 and not g.skip_hw_noise:
-                    if len(g.qubits) == 1:
-                        q0 = g.qubits[0]
-                        p_dep = hardware.qubit_params[q0].depol_1q
-                        if p_dep > 0:
-                            psi = sample_kraus_trajectory_step(
-                                psi, NoiseChannel.depolarizing_1q(q0, p_dep), num_qubits, rng
-                            )
-                    elif len(g.qubits) == 2:
-                        pair = (min(g.qubits[0], g.qubits[1]), max(g.qubits[0], g.qubits[1]))
-                        if pair in hardware.coupler_params:
-                            p_dep2 = hardware.coupler_params[pair].depol_2q
-                            if p_dep2 > 0:
+                    if not is_idle_op:
+                        if len(g.qubits) == 1:
+                            q0 = g.qubits[0]
+                            p_dep = hardware.qubit_params[q0].depol_1q
+                            if p_dep > 0:
                                 psi = sample_kraus_trajectory_step(
-                                    psi,
-                                    NoiseChannel.depolarizing_2q(g.qubits[0], g.qubits[1], p_dep2),
-                                    num_qubits,
-                                    rng,
+                                    psi, NoiseChannel.depolarizing_1q(q0, p_dep), num_qubits, rng
                                 )
+                        elif len(g.qubits) == 2:
+                            pair = (min(g.qubits[0], g.qubits[1]), max(g.qubits[0], g.qubits[1]))
+                            if pair in hardware.coupler_params:
+                                p_dep2 = hardware.coupler_params[pair].depol_2q
+                                if p_dep2 > 0:
+                                    psi = sample_kraus_trajectory_step(
+                                        psi,
+                                        NoiseChannel.depolarizing_2q(g.qubits[0], g.qubits[1], p_dep2),
+                                        num_qubits,
+                                        rng,
+                                    )
                     for q_act in g.qubits:
                         qp = hardware.qubit_params[q_act]
                         if math.isfinite(qp.t1_ns) or math.isfinite(qp.t2_ns):
-                            ch_th = NoiseChannel.thermal_relaxation(q_act, qp.t1_ns, qp.t2_ns, dt_layer)
+                            ch_th = NoiseChannel.thermal_relaxation(q_act, qp.t1_ns, qp.t2_ns, dt_g)
                             psi = sample_kraus_trajectory_step(psi, ch_th, num_qubits, rng)
 
             if hardware is not None and dt_layer > 0 and not all_ideal_layer and hardware.include_idle_noise:
                 for q_idle in range(num_qubits):
-                    if q_idle not in used_qubits:
+                    dt_wait = dt_layer - busy_ns.get(q_idle, 0.0)
+                    if dt_wait > 1e-9:
                         qp = hardware.qubit_params[q_idle]
                         if math.isfinite(qp.t1_ns) or math.isfinite(qp.t2_ns):
-                            ch_idle = NoiseChannel.thermal_relaxation(q_idle, qp.t1_ns, qp.t2_ns, dt_layer)
+                            ch_idle = NoiseChannel.thermal_relaxation(q_idle, qp.t1_ns, qp.t2_ns, dt_wait)
                             psi = sample_kraus_trajectory_step(psi, ch_idle, num_qubits, rng)
             return psi
 

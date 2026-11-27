@@ -60,6 +60,21 @@ def evaluate_circuit_metrics(
     qubit_ready_ns = [0.0] * max(1, circuit.num_qubits)
 
     for g in circuit.gate_instructions:
+        uname = g.name.upper()
+        if uname == "BARRIER":
+            if g.qubits:
+                t_sync = max(qubit_ready_ns[q] for q in g.qubits if 0 <= q < len(qubit_ready_ns))
+                for q in g.qubits:
+                    if 0 <= q < len(qubit_ready_ns):
+                        qubit_ready_ns[q] = t_sync
+            continue
+        if uname in ("IDLE", "DELAY"):
+            dur_idle = float(g.params[0]) if g.params else (g.duration_ns or 0.0)
+            for q in g.qubits:
+                if 0 <= q < len(qubit_ready_ns):
+                    qubit_ready_ns[q] += float(max(0.0, dur_idle))
+            breakdown[g.name] = breakdown.get(g.name, 0) + 1
+            continue
         breakdown[g.name] = breakdown.get(g.name, 0) + 1
         spec = gate_set.get_gate_spec(g.name)
         is_virt = False

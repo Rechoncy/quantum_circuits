@@ -99,6 +99,33 @@ export function buildCircuitSvg(
       continue;
     }
 
+    if (uname === 'BARRIER') {
+      const minQ = Math.min(...validQ);
+      const maxQ = Math.max(...validQ);
+      const y0 = topPad + minQ * rowH + 6;
+      const y1 = topPad + maxQ * rowH + rowH - 6;
+      parts.push(
+        `<line x1="${cx}" y1="${y0}" x2="${cx}" y2="${y1}" stroke="#64748B" stroke-width="1.8" stroke-dasharray="5 4"/>`,
+        `<rect x="${cx - 14}" y="${y0 - 6}" width="28" height="13" rx="2" fill="#F1F5F9" stroke="#94A3B8" stroke-width="1"/>`,
+        `<text x="${cx}" y="${y0 + 3.5}" text-anchor="middle" font-size="8.5" font-weight="700" class="mono" fill="#475569">BAR</text>`
+      );
+      continue;
+    }
+
+    if (uname === 'IDLE' || uname === 'DELAY') {
+      const rawTau = op.params[0] ?? op.duration_ns ?? 100;
+      const tauLbl = typeof rawTau === 'number' ? `${Math.round(rawTau)}ns` : String(rawTau);
+      for (const qIdx of validQ) {
+        const cy = topPad + qIdx * rowH + rowH / 2;
+        parts.push(
+          `<rect x="${cx - 27}" y="${cy - 17}" width="54" height="34" rx="5" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.2" stroke-dasharray="4 3"/>`,
+          `<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="10.5" font-weight="700" class="mono" fill="#334155">IDLE</text>`,
+          `<text x="${cx}" y="${cy + 10}" text-anchor="middle" font-size="9" class="mono" fill="#64748B">${escapeXml(tauLbl)}</text>`
+        );
+      }
+      continue;
+    }
+
     if (
       validQ.length >= 2 &&
       (uname === 'CZ' ||
@@ -275,6 +302,20 @@ export function buildQuantikzLatex(project: ProjectModel): string {
 
     if (op.kind === 'measure') {
       for (const q of validQ) grid[q][s] = '\\meter{}';
+      continue;
+    }
+
+    if (u === 'BARRIER') {
+      grid[0][s] = `${grid[0][s]} \\slice{}`;
+      continue;
+    }
+
+    if (u === 'IDLE' || u === 'DELAY') {
+      const rawTau = op.params[0] ?? op.duration_ns ?? 100;
+      const tauLbl = typeof rawTau === 'number' ? `${Math.round(rawTau)}\\text{ns}` : formatLatexParam(rawTau);
+      for (const q of validQ) {
+        grid[q][s] = `\\gate{\\text{Idle}(${tauLbl})}`;
+      }
       continue;
     }
 

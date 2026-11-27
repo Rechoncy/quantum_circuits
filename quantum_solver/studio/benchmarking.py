@@ -31,7 +31,7 @@ from scipy.linalg import expm, orthogonal_procrustes, svdvals
 from scipy.optimize import curve_fit, minimize
 import stim
 
-from ..core.gates import gate_unitary
+from ..core.gates import gate_unitary, simulate_3level_drag_pulse
 from ..core.noise import NoiseChannel
 from .models import CircuitOpModel, GateBenchmarkRequest, ProjectModel
 from .project_engine import build_hardware_model, rabi_pulse_duration_ns
@@ -183,18 +183,17 @@ def _build_1q_noisy_pulse_superop(
     amp_error_pct: float,
     detuning_mhz: float,
     phase_skew_deg: float,
+    anharmonicity_ghz: float = 0.0,
+    drag_beta: float = 0.0,
+    pulse_shape: str = "cosine",
+    rise_ns: float = 0.0,
+    fall_ns: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Return (S_noisy, U_ideal) for a 1Q physical pulse:
-      - If axis_angle is None: Identity / idle wait of duration_ns.
-      - If axis_angle is (nx, ny, theta):
-          Ideal unitary: U_ideal = exp(-i (theta/2) (nx X + ny Y))
-          Physical pulse Hamiltonian with coherent calibration errors:
-            theta_phys = theta * (1 + amp_error_pct / 100)
-            If ny != 0 (Y-quadrature pulse), phase shifts by phase_skew_deg!
-            Detuning term: +(2*pi * detuning_mhz * 1e-3 * duration_ns / 2) Z
-    Followed by gate-duration T1/T2 thermal relaxation and 1Q depolarizing Kraus channels.
+    Return (S_noisy, U_ideal) for a 1Q physical pulse, including 3-level Transmon
+    |2> leakage & DRAG quadrature correction when |anharmonicity_ghz| > 1e-5.
     """
+    leak_extra = 0.0
     if axis_angle is None:
         u_ideal = _I2.copy()
         det_rad = 2.0 * math.pi * (detuning_mhz * 1e-3) * duration_ns
@@ -205,12 +204,25 @@ def _build_1q_noisy_pulse_superop(
 
         scale = 1.0 + (amp_error_pct / 100.0)
         base_phi = math.atan2(ny, nx)
-        # Apply IQ quadrature skew predominantly to the Y quadrature
         skew_rad = math.radians(phase_skew_deg) * (abs(ny) / max(1e-9, math.hypot(nx, ny)))
         phi_phys = base_phi + skew_rad
-        drive_gen = (theta * scale) * (math.cos(phi_phys) * _SX + math.sin(phi_phys) * _SY)
-        det_rad = 2.0 * math.pi * (detuning_mhz * 1e-3) * duration_ns
-        u_coherent = expm(-0.5j * (drive_gen + det_rad * _SZ))
+        if abs(anharmonicity_ghz) > 1e-5 and duration_ns > 1e-4:
+            u_coherent, lk0, lk1 = simulate_3level_drag_pulse(
+                theta=theta * scale,
+                phi=phi_phys,
+                duration_ns=duration_ns,
+                anharmonicity_ghz=anharmonicity_ghz,
+                drag_beta=drag_beta,
+                pulse_shape=pulse_shape,
+                rise_ns=rise_ns,
+                fall_ns=fall_ns,
+                detuning_mhz=detuning_mhz,
+            )
+            leak_extra = 0.5 * (lk0 + lk1)
+        else:
+            drive_gen = (theta * scale) * (math.cos(phi_phys) * _SX + math.sin(phi_phys) * _SY)
+            det_rad = 2.0 * math.pi * (detuning_mhz * 1e-3) * duration_ns
+            u_coherent = expm(-0.5j * (drive_gen + det_rad * _SZ))
 
     s_total = _unitary_to_liouville(u_coherent)
 
@@ -219,16 +231,17 @@ def _build_1q_noisy_pulse_superop(
         ch_tr = NoiseChannel.thermal_relaxation(qubit=0, t1_ns=t1_ns, t2_ns=t2_ns, duration_ns=duration_ns)
         s_total = _kraus_to_liouville(ch_tr.kraus_operators()) @ s_total
 
-    # Control depolarizing error
-    if depol_1q > 1e-12:
-        ch_dep = NoiseChannel.depolarizing_1q(qubit=0, p=min(0.74, depol_1q))
+    # Control depolarizing error + effective |2> leakage loss out of computational subspace
+    eff_depol = min(0.74, depol_1q + 0.75 * leak_extra)
+    if eff_depol > 1e-12:
+        ch_dep = NoiseChannel.depolarizing_1q(qubit=0, p=eff_depol)
         s_total = _kraus_to_liouville(ch_dep.kraus_operators()) @ s_total
 
     return s_total, u_ideal
 
 
-def _extract_qubit_noise_params(project: ProjectModel, q_idx: int) -> Dict[str, float]:
-    """Extract effective T1, T2, 1Q/2Q gate times, depol, ZZ, and readout error for qubit q_idx."""
+def _extract_qubit_noise_params(project: ProjectModel, q_idx: int) -> Dict[str, Any]:
+    """Extract effective T1, T2, 1Q/2Q gate times, depol, ZZ, anharmonicity/DRAG, and readout error."""
     hw_model = build_hardware_model(project)
     sim = project.sim_settings
     qp = hw_model.qubit_params[min(q_idx, hw_model.num_qubits - 1)]
@@ -271,12 +284,17 @@ def _extract_qubit_noise_params(project: ProjectModel, q_idx: int) -> Dict[str, 
         "zz_khz": zz_khz,
         "p1_given_0": p10,
         "p0_given_1": p01,
+        "anharmonicity_ghz": float(qp.anharmonicity_ghz),
+        "drag_beta": float(qp.drag_beta),
+        "pulse_shape": str(hp.pulse_shape),
+        "rise_ns": float(hp.rise_ns),
+        "fall_ns": float(hp.fall_ns),
         "hardware_name": hp.name,
     }
 
 
 def _build_primitive_1q_library(
-    noise_cfg: Dict[str, float],
+    noise_cfg: Dict[str, Any],
     amp_error_pct: float,
     detuning_mhz: float,
     phase_skew_deg: float,
@@ -291,10 +309,16 @@ def _build_primitive_1q_library(
     t_pi = noise_cfg.get("t_pi_ns", t_1q)
     t_pi2 = noise_cfg.get("t_pi2_ns", t_1q)
     dep1 = noise_cfg["depol_1q"]
+    anh_ghz = float(noise_cfg.get("anharmonicity_ghz", 0.0))
+    drag_b = float(noise_cfg.get("drag_beta", 0.0))
+    p_shape = str(noise_cfg.get("pulse_shape", "cosine"))
+    r_ns = float(noise_cfg.get("rise_ns", 0.0))
+    f_ns = float(noise_cfg.get("fall_ns", 0.0))
 
     def mk(ax: Optional[Tuple[float, float, float]], dur: float = t_1q) -> Tuple[np.ndarray, np.ndarray]:
         return _build_1q_noisy_pulse_superop(
-            ax, dur, t1, t2, dep1, amp_error_pct, detuning_mhz, phase_skew_deg
+            ax, dur, t1, t2, dep1, amp_error_pct, detuning_mhz, phase_skew_deg,
+            anharmonicity_ghz=anh_ghz, drag_beta=drag_b, pulse_shape=p_shape, rise_ns=r_ns, fall_ns=f_ns,
         )
 
     lib: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
@@ -1778,7 +1802,7 @@ def _run_xeb_protocol(req: GateBenchmarkRequest) -> Dict[str, Any]:
 
 
 def execute_gate_benchmark(req: GateBenchmarkRequest) -> Dict[str, Any]:
-    """Dispatch RB / Interleaved RB, AllXY, Gate Set Tomography (GST), or Linear XEB."""
+    """Dispatch RB / Interleaved RB, AllXY, Gate Set Tomography (GST), Linear XEB, or Basic Calibrations."""
     if req.protocol == "rb":
         return _run_rb_protocol(req)
     if req.protocol == "allxy":
@@ -1787,7 +1811,7 @@ def execute_gate_benchmark(req: GateBenchmarkRequest) -> Dict[str, Any]:
         return _run_gst_protocol(req)
     if req.protocol == "xeb":
         return _run_xeb_protocol(req)
-    if req.protocol in ("rabi", "ramsey", "t1"):
+    if req.protocol in ("rabi", "chevron", "ramsey", "echo", "t1"):
         from .calibration import run_basic_calibration
 
         return run_basic_calibration(req, _extract_qubit_noise_params(req.project, req.target_qubit))

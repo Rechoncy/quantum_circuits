@@ -1456,6 +1456,200 @@ def test_rabi_drive_hierarchy_rise_fall_edges_and_basic_calibrations() -> None:
     assert len(sw["fidelities"]) == 5
 
 
+def test_v28_drag_leakage_barrier_idle_readout_mitigation_echo_and_chevron() -> None:
+    """
+    Verify all Quantum Studio v2.8 physics & EDA upgrades:
+      1. 3-Level Transmon |2> leakage & DRAG quadrature suppression (QuTiP + RB + simulate_3level_drag_pulse)
+      2. Asymmetric readout confusion matrix (P(1|0) != P(0|1)) & tensor-product M^-1 readout mitigation
+      3. Exact static ZZ crosstalk alignment across QuTiP, Kraus, and Trajectory solvers
+      4. BARRIER & IDLE(tau) non-fusing optimization boundaries + OpenQASM 3.0 delay/barrier round-trip
+      5. Trapezoid edge-integrated Rabi, 2D Rabi Chevron heatmap, and CPMG-N Spin Echo refocusing
+    """
+    import math
+    from quantum_solver.core.gates import simulate_3level_drag_pulse
+    from quantum_solver.studio import (
+        CircuitOpModel,
+        GateBenchmarkRequest,
+        OptimizeRequest,
+        build_preset_projects,
+        execute_gate_benchmark,
+        execute_project_optimization,
+        execute_project_simulation,
+        openqasm_to_project_ops,
+        project_to_openqasm3,
+    )
+
+    # 1. 3-level DRAG suppresses |1> -> |2> leakage by > 4x on a fast 8 ns Transmon pi pulse
+    _, _, lk_no_drag = simulate_3level_drag_pulse(
+        theta=math.pi,
+        phi=0.0,
+        duration_ns=8.0,
+        anharmonicity_ghz=-0.22,
+        drag_beta=0.0,
+        pulse_shape="cosine",
+    )
+    _, _, lk_with_drag = simulate_3level_drag_pulse(
+        theta=math.pi,
+        phi=0.0,
+        duration_ns=8.0,
+        anharmonicity_ghz=-0.22,
+        drag_beta=0.5,
+        pulse_shape="cosine",
+    )
+    assert lk_no_drag > 0.004
+    assert lk_with_drag < 0.25 * lk_no_drag
+
+    p_sc = build_preset_projects()[0].model_copy(deep=True)
+    p_sc.qubits = p_sc.qubits[:2]
+    p_sc.active_hardware_id = "hw_sc_cz"
+    for hp in p_sc.hardware_profiles:
+        if hp.id == "hw_sc_cz":
+            hp.t_1q_ns = 8.0
+            hp.anharmonicity_mhz = -220.0
+            hp.drag_beta = 0.0
+    p_sc.operations = [
+        CircuitOpModel(id="x0", step=0, kind="gate", name="X", qubits=[0]),
+        CircuitOpModel(id="x1", step=1, kind="gate", name="X", qubits=[0]),
+        CircuitOpModel(id="m0", step=2, kind="measure", name="MEASURE", qubits=[0, 1]),
+    ]
+    p_sc.sim_settings.backend = "qutip"
+    sim_nodrag = execute_project_simulation(p_sc)["results"]["qutip"]
+    assert sim_nodrag["leakage_by_qubit"]["0"] > 1e-4
+
+    rb_nodrag = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_sc, protocol="rb", rb_lengths=[1, 2, 4, 8, 16, 32], rb_num_seeds=10, shots=0)
+    )
+    for hp in p_sc.hardware_profiles:
+        if hp.id == "hw_sc_cz":
+            hp.drag_beta = 0.5
+    rb_drag = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_sc, protocol="rb", rb_lengths=[1, 2, 4, 8, 16, 32], rb_num_seeds=10, shots=0)
+    )
+    assert rb_drag["epc"] < rb_nodrag["epc"]
+
+    # 2. Asymmetric readout confusion P(1|0)=0.02, P(0|1)=0.15 + M^-1 mitigation on Bell state
+    p_ro = build_preset_projects()[0].model_copy(deep=True)
+    p_ro.qubits = p_ro.qubits[:2]
+    for hp in p_ro.hardware_profiles:
+        hp.readout_p1_given_0 = 0.02
+        hp.readout_p0_given_1 = 0.15
+    p_ro.sim_settings.backend = "kraus"
+    p_ro.sim_settings.shots = 40000
+    p_ro.sim_settings.enable_t1_t2 = False
+    p_ro.sim_settings.enable_depol = False
+    p_ro.sim_settings.enable_zz = False
+    p_ro.sim_settings.enable_readout = True
+    p_ro.operations = [
+        CircuitOpModel(id="b0", step=0, kind="gate", name="H", qubits=[0]),
+        CircuitOpModel(id="b1", step=1, kind="gate", name="CNOT", qubits=[0, 1]),
+        CircuitOpModel(id="bm", step=2, kind="measure", name="MEASURE", qubits=[0, 1]),
+    ]
+    res_ro = execute_project_simulation(p_ro)["results"]["kraus"]
+    assert res_ro["final_probabilities"]["11"] < 0.40  # heavily skewed by 15% P(0|1) on both qubits
+    mit = res_ro["mitigated_probabilities"]
+    assert mit is not None
+    assert abs(mit["11"] - 0.5) < 0.025
+    assert abs(mit["00"] - 0.5) < 0.025
+    assert abs(sum(mit.values()) - 1.0) < 1e-4
+
+    # 3. Static ZZ crosstalk exact alignment across QuTiP, Kraus, and Trajectory during IDLE(250ns)
+    p_zz = build_preset_projects()[0].model_copy(deep=True)
+    p_zz.qubits = p_zz.qubits[:2]
+    for hp in p_zz.hardware_profiles:
+        hp.zz_khz = 1000.0  # 1 MHz static ZZ -> pi/2 ZZ rotation in 250 ns!
+        hp.topology_mode = "all"
+        hp.anharmonicity_mhz = 0.0
+    p_zz.sim_settings.enable_t1_t2 = False
+    p_zz.sim_settings.enable_depol = False
+    p_zz.sim_settings.enable_readout = False
+    p_zz.sim_settings.enable_zz = True
+    p_zz.operations = [
+        CircuitOpModel(id="z0", step=0, kind="gate", name="H", qubits=[0], noise_mode="none"),
+        CircuitOpModel(id="z1", step=0, kind="gate", name="H", qubits=[1], noise_mode="none"),
+        CircuitOpModel(id="zi0", step=1, kind="gate", name="IDLE", qubits=[0], params=[250.0]),
+        CircuitOpModel(id="zi1", step=1, kind="gate", name="IDLE", qubits=[1], params=[250.0]),
+    ]
+    fids = {}
+    bxs = {}
+    for bk in ("qutip", "kraus", "trajectory"):
+        p_zz.sim_settings.backend = bk
+        r_bk = execute_project_simulation(p_zz)["results"][bk]
+        fids[bk] = r_bk["final_fidelity"]
+        bxs[bk] = r_bk["steps"][-1]["bloch_vectors"]["0"][0]
+    assert abs(fids["qutip"] - fids["kraus"]) < 2e-3
+    assert abs(fids["kraus"] - fids["trajectory"]) < 1e-5
+    assert abs(bxs["qutip"] - bxs["kraus"]) < 2e-3
+
+    # 4. BARRIER blocks H*H cancellation + OpenQASM 3 delay/barrier round-trip
+    p_bar = build_preset_projects()[0].model_copy(deep=True)
+    p_bar.qubits = p_bar.qubits[:2]
+    p_bar.operations = [
+        CircuitOpModel(id="h_a", step=0, kind="gate", name="H", qubits=[0]),
+        CircuitOpModel(id="bar", step=1, kind="gate", name="BARRIER", qubits=[0, 1]),
+        CircuitOpModel(id="h_b", step=2, kind="gate", name="H", qubits=[0]),
+        CircuitOpModel(id="idl", step=3, kind="gate", name="IDLE", qubits=[1], params=[150.0]),
+        CircuitOpModel(id="m_all", step=4, kind="measure", name="MEASURE", qubits=[0, 1]),
+    ]
+    opt_bar = execute_project_optimization(OptimizeRequest(project=p_bar, evaluate_noisy_fidelity=False))
+    assert opt_bar["optimized_metrics"]["num_1q_physical_pulses"] >= 2
+    assert any(op["name"] == "BARRIER" for op in opt_bar["optimized_operations"])
+    assert any(op["name"] == "IDLE" for op in opt_bar["optimized_operations"])
+
+    qasm_txt = project_to_openqasm3(p_bar)
+    assert "barrier" in qasm_txt
+    assert "delay[150ns]" in qasm_txt
+    _, rt_ops, _ = openqasm_to_project_ops(qasm_txt, p_bar)
+    assert any(o.name == "BARRIER" for o in rt_ops)
+    assert any(o.name == "IDLE" and abs(float(o.params[0]) - 150.0) < 1e-3 for o in rt_ops)
+
+    # 5. Trapezoid edge-integrated Rabi + 2D Chevron + CPMG-4 Spin Echo
+    p_cal = build_preset_projects()[0].model_copy(deep=True)
+    for hp in p_cal.hardware_profiles:
+        hp.pulse_shape = "trapezoid"
+        hp.rise_ns = 15.0
+        hp.fall_ns = 15.0
+        hp.rabi_mhz = 3.0
+    r_trap = execute_gate_benchmark(
+        GateBenchmarkRequest(project=p_cal, protocol="rabi", amp_error_pct=-5.0, shots=0)
+    )
+    om_trap = next(x["value"] for x in r_trap["params"] if x["key"] == "omega_fit")
+    assert abs(om_trap - 3.0 * 0.95) < 0.05
+
+    r_chev = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_cal,
+            protocol="chevron",
+            detuning_mhz=1.1,
+            chevron_detuning_max_mhz=5.0,
+            chevron_freq_points=21,
+            cal_points=35,
+            shots=0,
+        )
+    )
+    assert len(r_chev["z_grid"]) == 21
+    assert len(r_chev["z_grid"][0]) == 35
+    chev_off = next(x["value"] for x in r_chev["params"] if x["key"] == "freq_offset")
+    assert abs(chev_off - 1.1) < 0.35
+
+    # Set T2* << 2*T1 so CPMG-4 clearly extends coherence time
+    for hp in p_cal.hardware_profiles:
+        hp.t1_us = 200.0
+        hp.t2_us = 35.0
+    r_echo = execute_gate_benchmark(
+        GateBenchmarkRequest(
+            project=p_cal,
+            protocol="echo",
+            echo_num_pulses=4,
+            detuning_mhz=0.75,
+            shots=0,
+        )
+    )
+    t2_echo_val = next(x["value"] for x in r_echo["params"] if x["key"] == "t2_echo")
+    assert t2_echo_val > 35.0 * 1.4
+    assert len(r_echo["echo_ref_ramsey"]) > 50
+
+
+
 
 
 

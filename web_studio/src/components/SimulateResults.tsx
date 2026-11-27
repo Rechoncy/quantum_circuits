@@ -151,6 +151,7 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
   const [rhoPart, setRhoPart] = useState<'abs' | 'real' | 'imag'>('abs');
   const [tomoLeftMode, setTomoLeftMode] = useState<'auto' | 'rho' | 'mi' | 'local'>('auto');
   const [measUnit, setMeasUnit] = useState<'prob' | 'counts'>('prob');
+  const [showMitigatedReadout, setShowMitigatedReadout] = useState(false);
   const [filterSmallBars, setFilterSmallBars] = useState(true);
   const [focusedEvoPanel, setFocusedEvoPanel] = useState<'none' | 'curve' | 'sphere'>('none');
   const [tomoFilter, setTomoFilter] = useState('');
@@ -473,6 +474,9 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
 
       for (const op of layerOps) {
         const gName = op.name.toUpperCase();
+        if (gName === 'BARRIER' || gName === 'IDLE' || gName === 'DELAY') {
+          continue;
+        }
         if (op.qubits.length === 1) {
           const q = op.qubits[0];
           if (q < 0 || q >= nLanes) continue;
@@ -733,6 +737,17 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               F = {interpFidelity.toFixed(4)}
             </span>
           )}
+          {primaryRes.leakage_by_qubit &&
+            Math.max(0, ...Object.values(primaryRes.leakage_by_qubit)) > 1e-5 && (
+              <span
+                className="hidden lg:inline-flex px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-400 font-semibold text-[10.5px] shrink-0"
+                title={Object.entries(primaryRes.leakage_by_qubit)
+                  .map(([q, lk]) => `q${q}: ${(lk * 100).toFixed(3)}%`)
+                  .join(' · ')}
+              >
+                |2⟩ 泄漏 {(Math.max(...Object.values(primaryRes.leakage_by_qubit)) * 100).toFixed(2)}%
+              </span>
+            )}
           <button
             type="button"
             onClick={() => {
@@ -1543,6 +1558,22 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
               </div>
 
               <div className="flex items-center gap-2.5 shrink-0">
+                {primaryRes.mitigated_probabilities &&
+                  Object.keys(primaryRes.mitigated_probabilities).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowMitigatedReadout((v) => !v)}
+                      title="应用张量积非对称读出混淆矩阵逆运算 M⁻¹ 与单纯形物理投影，消除 SPAM 读出偏置"
+                      className={`px-2 py-0.5 rounded-[3px] border text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors ${
+                        showMitigatedReadout
+                          ? 'bg-emerald-600 border-emerald-500 text-white'
+                          : 'bg-[var(--bg-subtle)] border-[var(--border-hairline)] text-[var(--text-secondary)] hover:border-emerald-500 hover:text-emerald-500'
+                      }`}
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>读出逆校准 M⁻¹</span>
+                    </button>
+                  )}
                 {allBasis.length > 8 && (
                   <label className="flex items-center gap-1.5 text-[11.5px] text-[var(--text-secondary)] cursor-pointer select-none">
                     <input
@@ -1591,13 +1622,13 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                     );
                     return {
                       type: 'bar',
-                      name: r.backend_name,
+                      name: showMitigatedReadout ? `${r.backend_name} (原始含噪)` : r.backend_name,
                       x: measBasis.map((b) => formatBasisKet(b)),
                       customdata: measBasis.map((b) => `|${b}⟩`),
                       hovertemplate: '%{customdata}: %{y}<extra></extra>',
                       y: vals,
                       text:
-                        measBasis.length <= 16
+                        measBasis.length <= 16 && !showMitigatedReadout
                           ? vals.map((v) =>
                               measUnit === 'prob'
                                 ? v >= 0.005
@@ -1612,11 +1643,50 @@ export const SimulateResults: React.FC<SimulateResultsProps> = ({
                       textfont: { size: 10, color: mutedColor },
                       marker: {
                         color: palette[idx % palette.length],
-                        opacity: 0.9,
+                        opacity: showMitigatedReadout ? 0.52 : 0.9,
                         line: { width: 0 },
                       },
                     };
                   }),
+                  ...(showMitigatedReadout && primaryRes.mitigated_probabilities
+                    ? (() => {
+                        const mitMap = primaryRes.mitigated_probabilities!;
+                        const mitVals = measBasis.map((b) =>
+                          measUnit === 'prob'
+                            ? mitMap[b] ?? 0
+                            : Math.round((mitMap[b] ?? 0) * primaryRes.shots)
+                        );
+                        return [
+                          {
+                            type: 'bar',
+                            name: `${primaryRes.backend_name} · M⁻¹ 读出逆校准`,
+                            x: measBasis.map((b) => formatBasisKet(b)),
+                            customdata: measBasis.map((b) => `|${b}⟩`),
+                            hovertemplate: '%{customdata} (M⁻¹): %{y}<extra></extra>',
+                            y: mitVals,
+                            text:
+                              measBasis.length <= 16
+                                ? mitVals.map((v) =>
+                                    measUnit === 'prob'
+                                      ? v >= 0.005
+                                        ? `${(v * 100).toFixed(1)}%`
+                                        : ''
+                                      : v > 0
+                                      ? String(v)
+                                      : ''
+                                  )
+                                : undefined,
+                            textposition: 'outside',
+                            textfont: { size: 10, color: '#10B981' },
+                            marker: {
+                              color: '#10B981',
+                              opacity: 0.94,
+                              line: { color: '#059669', width: 1 },
+                            },
+                          },
+                        ];
+                      })()
+                    : []),
                   ...(compareRun
                     ? (() => {
                         const cmpRes = compareRun.response.results[compareRun.response.primary_backend];

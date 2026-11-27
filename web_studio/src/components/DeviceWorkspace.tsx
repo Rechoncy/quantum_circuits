@@ -25,8 +25,10 @@ import { PlotlyChart } from './PlotlyChart';
 import { TopologyEditor } from './TopologyEditor';
 import {
   envelopeAreaFactor,
+  estimateTransmonLeakage,
   impliedRabiMhz,
   rabiPulseDurationNs,
+  sampleDragQuadratureMhz,
   samplePeakNormalizedEnvelope,
 } from '../utils/drivePhysics';
 
@@ -76,12 +78,14 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
   const riseNs = hw.rise_ns ?? 0;
   const fallNs = hw.fall_ns ?? 0;
   const rabiMhz = hw.rabi_mhz ?? 2.5;
+  const anharmMhz = hw.anharmonicity_mhz ?? 0;
+  const dragBeta = hw.drag_beta ?? 0;
 
   const mutedColor = darkMode ? '#8B96A5' : '#475569';
   const gridColor = darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.08)';
   const plotBg = 'rgba(0,0,0,0)';
 
-  // Derived physical pulse metrics for pi (X/Y) and pi/2 (SX/H)
+  // Derived physical pulse metrics for pi (X/Y) and pi/2 (SX/H), including 3-level DRAG quadrature Q(t)
   const driveMetrics = useMemo(() => {
     const tPi =
       driveMode === 'fixed_rabi'
@@ -110,10 +114,54 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
     const yPi2 = xs.map((t) =>
       t <= tPi2 ? omegaPi2 * samplePeakNormalizedEnvelope(t, tPi2, pulseShape, riseNs, fallNs) : 0
     );
+    const yDragQ = xs.map((t) =>
+      t <= tPi
+        ? sampleDragQuadratureMhz(t, tPi, omegaPi, anharmMhz, dragBeta, pulseShape, riseNs, fallNs)
+        : 0
+    );
+    const hasDragTrace = Math.abs(anharmMhz) >= 1 && Math.abs(dragBeta) > 1e-4;
+    const minY = hasDragTrace ? Math.min(0, ...yDragQ) * 1.25 : 0;
+    const maxY = Math.max(omegaPi, omegaPi2, ...yDragQ, 0.2) * 1.18;
+    const estLeakNoDrag = estimateTransmonLeakage(
+      Math.PI,
+      tPi,
+      anharmMhz,
+      0,
+      pulseShape,
+      riseNs,
+      fallNs
+    );
+    const estLeakWithDrag = estimateTransmonLeakage(
+      Math.PI,
+      tPi,
+      anharmMhz,
+      dragBeta,
+      pulseShape,
+      riseNs,
+      fallNs
+    );
     const effRise = Math.min(riseNs, tPi * 0.5);
     const effFall = Math.min(fallNs, tPi * 0.5);
-    return { tPi, tPi2, omegaPi, omegaPi2, kappa, tMax, xs, yPi, yPi2, effRise, effFall };
-  }, [driveMode, rabiMhz, hw.t_1q_ns, pulseShape, riseNs, fallNs]);
+    return {
+      tPi,
+      tPi2,
+      omegaPi,
+      omegaPi2,
+      kappa,
+      tMax,
+      xs,
+      yPi,
+      yPi2,
+      yDragQ,
+      hasDragTrace,
+      minY,
+      maxY,
+      estLeakNoDrag,
+      estLeakWithDrag,
+      effRise,
+      effFall,
+    };
+  }, [driveMode, rabiMhz, hw.t_1q_ns, pulseShape, riseNs, fallNs, anharmMhz, dragBeta]);
 
   const qubitOverrideCount = project.qubits.filter((q) => q.rabi_mhz != null).length;
   const opOverrideCount = project.operations.filter(
@@ -524,20 +572,109 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
                 )}
               </div>
 
-              {/* Card C: Global Decoherence & Error Baseline */}
+              {/* Card C: 3-Level Transmon Anharmonicity & DRAG Quadrature Control */}
+              <div className="studio-card p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[13px] font-bold text-[var(--text-primary)]">
+                      三能级非谐性 α/2π 与 DRAG 正交导数抑漏脉冲
+                    </div>
+                    <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                      注入正交分量 Ω_Q(t) = −β · dΩ_I/dt / α 抵消 |1⟩→|2⟩ 谱泄漏与 AC-Stark 相移（0 MHz 表示理想二能级）
+                    </div>
+                  </div>
+                  {Math.abs(anharmMhz) >= 1 && (
+                    <span className="px-2 py-0.5 rounded-[2px] bg-amber-500/12 border border-amber-500/40 text-amber-400 font-mono-num text-[10.5px] shrink-0">
+                      估计 |2⟩ 泄漏: {(driveMetrics.estLeakWithDrag * 100).toFixed(3)}%
+                      {Math.abs(dragBeta) > 0.01 &&
+                        ` (无DRAG: ${(driveMetrics.estLeakNoDrag * 100).toFixed(2)}%)`}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-2.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11.5px]">
+                      <span className="font-medium text-[var(--text-primary)]">非谐性 α/2π</span>
+                      <div className="flex items-center gap-1 font-mono-num">
+                        <input
+                          type="number"
+                          step={10}
+                          value={anharmMhz}
+                          onChange={(e) =>
+                            onUpdateHardware(hw.id, { anharmonicity_mhz: Number(e.target.value) })
+                          }
+                          className="w-20 px-1.5 py-0.5 rounded-[2px] bg-[var(--bg-panel)] border border-[var(--border-input)] text-right text-[12px] outline-none focus:border-[var(--accent)]"
+                        />
+                        <span className="text-[10.5px] text-[var(--text-secondary)]">MHz</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 text-[10px] font-mono-num">
+                      {[
+                        ['理想 2能级', 0],
+                        ['Transmon -240', -240],
+                        ['弱非谐 -180', -180],
+                      ].map(([lbl, val]) => (
+                        <button
+                          key={String(lbl)}
+                          type="button"
+                          onClick={() =>
+                            onUpdateHardware(hw.id, {
+                              anharmonicity_mhz: Number(val),
+                              ...(Number(val) !== 0 && !hw.drag_beta ? { drag_beta: 0.5 } : {}),
+                            })
+                          }
+                          className="px-1.5 py-0.5 rounded-[2px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--accent)] text-[var(--text-secondary)] cursor-pointer"
+                        >
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11.5px]">
+                      <span className="font-medium text-[var(--text-primary)]">DRAG 系数 β</span>
+                      <input
+                        type="number"
+                        step={0.05}
+                        min={-2}
+                        max={2}
+                        value={dragBeta}
+                        onChange={(e) =>
+                          onUpdateHardware(hw.id, { drag_beta: Number(e.target.value) })
+                        }
+                        className="w-20 px-1.5 py-0.5 rounded-[2px] bg-[var(--bg-panel)] border border-[var(--border-input)] text-right font-mono-num text-[12px] outline-none focus:border-[var(--accent)]"
+                      />
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1.2}
+                      step={0.05}
+                      value={Math.max(0, Math.min(1.2, dragBeta))}
+                      onChange={(e) =>
+                        onUpdateHardware(hw.id, { drag_beta: Number(e.target.value) })
+                      }
+                      className="mac-slider w-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Card D: Global Decoherence, ZZ & Asymmetric Readout Confusion Matrix */}
               <div className="studio-card p-4 space-y-3">
                 <div className="text-[13px] font-bold text-[var(--text-primary)]">
-                  器件全局退相干与噪声基准参数
+                  器件退相干、ZZ 串扰与非对称读出混淆矩阵
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                   {(
                     [
                       ['T1 弛豫 (μs)', 't1_us', 10],
                       ['T2* 退相干 (μs)', 't2_us', 10],
                       ['1Q 门退极化', 'depol_1q', 0.0005],
                       ['2Q 门退极化', 'depol_2q', 0.001],
-                      ['静态 ZZ 串扰 (kHz)', 'zz_khz', 1],
-                      ['读出翻转误差', 'readout_err', 0.002],
+                      ['静态 ZZ (kHz)', 'zz_khz', 1],
+                      ['对称读出基准', 'readout_err', 0.002],
                     ] as const
                   ).map(([lbl, key, step]) => (
                     <div key={key}>
@@ -553,6 +690,46 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
                       />
                     </div>
                   ))}
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      P(1|0) 基态误判
+                    </label>
+                    <input
+                      type="number"
+                      step={0.002}
+                      min={0}
+                      max={0.49}
+                      placeholder={`默认 ${hw.readout_err}`}
+                      value={hw.readout_p1_given_0 ?? ''}
+                      onChange={(e) =>
+                        onUpdateHardware(hw.id, {
+                          readout_p1_given_0:
+                            e.target.value === '' ? null : Math.max(0, Number(e.target.value)),
+                        })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] font-mono-num text-[12px] outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10.5px] text-[var(--text-secondary)] mb-0.5">
+                      P(0|1) 激发弛豫误判
+                    </label>
+                    <input
+                      type="number"
+                      step={0.002}
+                      min={0}
+                      max={0.49}
+                      placeholder={`默认 ${hw.readout_err}`}
+                      value={hw.readout_p0_given_1 ?? ''}
+                      onChange={(e) =>
+                        onUpdateHardware(hw.id, {
+                          readout_p0_given_1:
+                            e.target.value === '' ? null : Math.max(0, Number(e.target.value)),
+                        })
+                      }
+                      className="w-full px-2 py-1 rounded-[3px] bg-[var(--bg-subtle)] border border-[var(--border-input)] font-mono-num text-[12px] outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -656,10 +833,24 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
                         y: driveMetrics.yPi2,
                         type: 'scatter',
                         mode: 'lines',
-                        name: 'π/2 脉冲 Ω(t)/2π',
+                        name: 'π/2 脉冲 Ω_I(t)/2π',
                         line: { color: '#10B981', width: 2.1, dash: 'dash' },
-                        hovertemplate: 't=%{x:.1f} ns · Ω/2π=%{y:.3f} MHz<extra>π/2 脉冲</extra>',
+                        hovertemplate: 't=%{x:.1f} ns · Ω_I/2π=%{y:.3f} MHz<extra>π/2 脉冲</extra>',
                       },
+                      ...(driveMetrics.hasDragTrace
+                        ? [
+                            {
+                              x: driveMetrics.xs,
+                              y: driveMetrics.yDragQ,
+                              type: 'scatter',
+                              mode: 'lines',
+                              name: 'DRAG 正交导数 Ω_Q(t)/2π',
+                              line: { color: '#F59E0B', width: 2.0, dash: 'dot' },
+                              hovertemplate:
+                                't=%{x:.1f} ns · Ω_Q/2π=%{y:.3f} MHz<extra>DRAG 正交</extra>',
+                            },
+                          ]
+                        : []),
                     ]}
                     layout={{
                       paper_bgcolor: plotBg,
@@ -674,9 +865,11 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
                         tickfont: { color: mutedColor, size: 10.5 },
                       },
                       yaxis: {
-                        title: { text: '拉比包络幅度 Ω(t)/2π (MHz)', font: { size: 11, color: mutedColor } },
-                        range: [0, Math.max(driveMetrics.omegaPi, driveMetrics.omegaPi2, 0.2) * 1.18],
+                        title: { text: '双正交脉冲包络 Ω_I, Ω_Q / 2π (MHz)', font: { size: 11, color: mutedColor } },
+                        range: [driveMetrics.minY, driveMetrics.maxY],
                         gridcolor: gridColor,
+                        zeroline: driveMetrics.hasDragTrace,
+                        zerolinecolor: gridColor,
                         tickfont: { color: mutedColor, size: 10.5 },
                       },
                       shapes:
@@ -941,7 +1134,15 @@ export const DeviceWorkspace: React.FC<DeviceWorkspaceProps> = ({
                             title={`对 ${q.name} 运行 Rabi 拉比频率标定`}
                             className="px-1.5 py-0.5 rounded-[2px] bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-sans font-semibold cursor-pointer"
                           >
-                            标定
+                            Rabi
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onJumpToCalibrate(q.id, 'echo')}
+                            title={`对 ${q.name} 运行 Hahn Echo / CPMG 动态解耦相干标定`}
+                            className="px-1.5 py-0.5 rounded-[2px] bg-emerald-500/12 text-emerald-500 text-[10px] font-sans font-semibold cursor-pointer"
+                          >
+                            Echo
                           </button>
                           {hasAnyOverride && (
                             <button

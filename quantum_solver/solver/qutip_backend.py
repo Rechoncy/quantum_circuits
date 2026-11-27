@@ -26,7 +26,14 @@ from ..core.circuit import (
     QuantumCircuit,
     embed_gate_unitary,
 )
-from ..core.gates import PAULI_X, PAULI_Y, PAULI_Z, PAULIS_1Q, gate_hamiltonian_generator
+from ..core.gates import (
+    PAULI_X,
+    PAULI_Y,
+    PAULI_Z,
+    PAULIS_1Q,
+    gate_hamiltonian_generator,
+    simulate_3level_drag_pulse,
+)
 from ..core.hardware import HardwareModel
 from ..core.noise import NoiseChannel, PAULI_LABELS_1Q, PAULI_LABELS_2Q, ReadoutError
 from .base import (
@@ -37,6 +44,7 @@ from .base import (
     apply_readout_confusion,
     compute_bloch_vectors,
     compute_populations,
+    mitigate_readout_probabilities,
     sample_from_probabilities,
     state_fidelity_with_pure,
 )
@@ -289,6 +297,7 @@ class QuTiPBackend:
         steps: List[StepSnapshot] = []
         elapsed_ns = 0.0
         step_idx = 0
+        leakage_by_qubit: Dict[int, float] = {q: 0.0 for q in range(n)}
 
         zero_qobj = qt.tensor([_QT_I2] * n) * 0.0
 
@@ -340,17 +349,30 @@ class QuTiPBackend:
                 step_idx += 1
                 gate_dts: List[float] = []
                 for g in layer_gates:
-                    psi_ideal = apply_operator_to_statevector(psi_ideal, g.unitary(), g.qubits, n)
-                    dt_g = g.duration_ns
-                    if dt_g is None:
-                        dt_g = hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0
-                    gate_dts.append(float(dt_g))
+                    uname = g.name.upper()
+                    if uname != "BARRIER":
+                        psi_ideal = apply_operator_to_statevector(psi_ideal, g.unitary(), g.qubits, n)
+                    dt_g = (
+                        0.0
+                        if uname == "BARRIER"
+                        else (
+                            float(g.params[0])
+                            if uname in ("IDLE", "DELAY") and g.params
+                            else (
+                                g.duration_ns
+                                if g.duration_ns is not None
+                                else (hardware.gate_duration_ns(g.name, g.qubits) if hardware is not None else 20.0)
+                            )
+                        )
+                    )
+                    gate_dts.append(float(max(0.0, dt_g)))
 
                 # Apply zero-duration Virtual-Z / instantaneous gates first via O(4^N) tensor contraction
                 finite_entries: List[Tuple[GateInstruction, float]] = []
                 for g, dt_g in zip(layer_gates, gate_dts):
                     if dt_g <= 1e-9:
-                        rho = apply_operator_to_density_matrix(rho, g.unitary(), g.qubits, n)
+                        if g.name.upper() != "BARRIER":
+                            rho = apply_operator_to_density_matrix(rho, g.unitary(), g.qubits, n)
                     else:
                         finite_entries.append((g, dt_g))
 
@@ -371,6 +393,8 @@ class QuTiPBackend:
                     has_td = False
 
                     for g, dt_g in finite_entries:
+                        if g.name.upper() in ("IDLE", "DELAY", "BARRIER"):
+                            continue
                         if g.custom_hamiltonian is not None:
                             H_gen_qobj = _embed_sparse_qobj(g.custom_hamiltonian, g.qubits, n)
                         else:
@@ -405,11 +429,71 @@ class QuTiPBackend:
                     rho = res.states[-1].full()
                     rho = 0.5 * (rho + rho.conj().T)
 
+                    # Apply 3-level Transmon {|0>, |1>, |2>} leakage & DRAG AC-Stark correction on 1Q physical pulses
+                    if hardware is not None:
+                        from ..core.gates import rxy_matrix
+
+                        for g, dt_g in finite_entries:
+                            if g.skip_hw_noise or len(g.qubits) != 1 or g.custom_matrix is not None:
+                                continue
+                            q_idx = g.qubits[0]
+                            qp = hardware.qubit_params[q_idx]
+                            if abs(qp.anharmonicity_ghz) <= 1e-5:
+                                continue
+                            gn = g.name.upper()
+                            th_1q: Optional[float] = None
+                            ph_1q = 0.0
+                            if gn == "X":
+                                th_1q, ph_1q = math.pi, 0.0
+                            elif gn == "Y":
+                                th_1q, ph_1q = math.pi, 0.5 * math.pi
+                            elif gn == "SX":
+                                th_1q, ph_1q = 0.5 * math.pi, 0.0
+                            elif gn == "SXDG":
+                                th_1q, ph_1q = -0.5 * math.pi, 0.0
+                            elif gn == "SY":
+                                th_1q, ph_1q = 0.5 * math.pi, 0.5 * math.pi
+                            elif gn == "SYDG":
+                                th_1q, ph_1q = -0.5 * math.pi, 0.5 * math.pi
+                            elif gn == "H":
+                                th_1q, ph_1q = 0.5 * math.pi, 0.5 * math.pi
+                            elif gn == "RX" and g.params:
+                                th_1q, ph_1q = float(g.params[0]), 0.0
+                            elif gn == "RY" and g.params:
+                                th_1q, ph_1q = float(g.params[0]), 0.5 * math.pi
+                            elif gn == "RXY" and len(g.params) >= 2:
+                                th_1q, ph_1q = float(g.params[0]), float(g.params[1])
+                            if th_1q is None or abs(th_1q) <= 1e-9:
+                                continue
+
+                            u_polar, l0, l1 = simulate_3level_drag_pulse(
+                                th_1q,
+                                ph_1q,
+                                dt_g,
+                                qp.anharmonicity_ghz,
+                                qp.drag_beta,
+                                pulse_shape,
+                                rise_ns,
+                                fall_ns,
+                            )
+                            u_id2 = rxy_matrix(th_1q, ph_1q)
+                            u_stark_err = u_polar @ u_id2.conj().T
+                            rho = apply_operator_to_density_matrix(rho, u_stark_err, (q_idx,), n)
+                            bv_q = compute_bloch_vectors(rho, n)[q_idx]
+                            p1_est = max(0.0, min(1.0, 0.5 * (1.0 - bv_q[2])))
+                            l_eff = (1.0 - p1_est) * l0 + p1_est * l1
+                            leakage_by_qubit[q_idx] = 1.0 - (1.0 - leakage_by_qubit[q_idx]) * (1.0 - l_eff)
+                            if l_eff > 1e-10:
+                                rho = apply_kraus_channel(
+                                    rho, NoiseChannel.depolarizing_1q(q_idx, min(0.75, l_eff)), n
+                                )
+
                 elapsed_ns += dt_layer
 
                 # Apply per-gate control depolarizing error (unless skip_hw_noise) + explicit inline noise
                 for g, dt_g in zip(layer_gates, gate_dts):
-                    if hardware is not None and dt_g > 0 and not g.skip_hw_noise:
+                    is_idle_op = g.name.upper() in ("IDLE", "DELAY", "BARRIER")
+                    if hardware is not None and dt_g > 0 and not g.skip_hw_noise and not is_idle_op:
                         if len(g.qubits) == 1:
                             p_dep = hardware.qubit_params[g.qubits[0]].depol_1q
                             if p_dep > 0:
@@ -478,6 +562,8 @@ class QuTiPBackend:
         raw_probs = compute_populations(rho, n)
         final_probs = apply_readout_confusion(raw_probs, n, readout_errors)
         counts = sample_from_probabilities(final_probs, shots=shots, seed=seed)
+        emp_probs = {k: v / float(shots) for k, v in counts.items()} if shots > 0 and counts else final_probs
+        mitigated_probs = mitigate_readout_probabilities(emp_probs, n, readout_errors)
 
         return EvolutionResult(
             backend_name="QuTiP-MasterEquation",
@@ -489,6 +575,10 @@ class QuTiPBackend:
             total_duration_ns=elapsed_ns,
             final_fidelity=steps[-1].state_fidelity,
             final_purity=steps[-1].purity,
+            metadata={
+                "mitigated_probabilities": mitigated_probs,
+                "leakage_by_qubit": {str(k): round(float(v), 6) for k, v in leakage_by_qubit.items()},
+            },
         )
 
     def extract_pauli_noise_for_stim(

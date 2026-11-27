@@ -24,7 +24,8 @@ class QubitPhysicalParams:
     t1_ns: float = 40_000.0          # Energy relaxation time T1 (default 40 us)
     t2_ns: float = 30_000.0          # Coherence time T2* / T2e (default 30 us)
     freq_ghz: float = 5.0            # Qubit transition frequency omega_q / 2pi (GHz)
-    anharmonicity_ghz: float = -0.25 # Transmon anharmonicity alpha / 2pi (GHz)
+    anharmonicity_ghz: float = 0.0   # 0.0 = calibrated 2-level; negative (e.g. -0.24) enables 3-level Transmon DRAG model
+    drag_beta: float = 0.0           # DRAG derivative quadrature coefficient beta
     depol_1q: float = 0.0            # Additional depolarizing control error per 1Q gate
     readout_error: ReadoutError = field(default_factory=lambda: ReadoutError(0.01, 0.02))
 
@@ -65,9 +66,10 @@ class HardwareModel:
     native_gate_set: NativeGateSet = field(default_factory=NativeGateSet.superconducting_cz)
     qubit_params: Dict[int, QubitPhysicalParams] = field(default_factory=dict)
     coupler_params: Dict[Tuple[int, int], CouplerPhysicalParams] = field(default_factory=dict)
-    pulse_shape: str = "cosine"  # 'rectangular' or 'cosine' (smooth Hann window)
+    pulse_shape: str = "cosine"  # 'rectangular', 'trapezoid', 'gaussian', or 'cosine'
     rise_ns: float = 0.0  # rectangular (flat-top) envelope rise edge
     fall_ns: float = 0.0  # rectangular (flat-top) envelope fall edge
+    drag_beta: float = 0.0  # DRAG quadrature derivative coefficient
     include_idle_noise: bool = True
 
     def __post_init__(self) -> None:
@@ -135,9 +137,14 @@ class HardwareModel:
         c_params = {}
         for u, v in edges:
             pair = (min(u, v), max(u, v))
+            eff_zz_mhz = (
+                (zz_crosstalk_khz / 1000.0)
+                if (topology is not None or abs(u - v) == 1)
+                else 0.0
+            )
             c_params[pair] = CouplerPhysicalParams(
                 qubits=pair,
-                zz_crosstalk_mhz=zz_crosstalk_khz / 1000.0,
+                zz_crosstalk_mhz=eff_zz_mhz,
                 depol_2q=depol_2q,
                 gate_duration_ns=t_2q_ns,
             )
@@ -194,9 +201,14 @@ class HardwareModel:
         c_params = {}
         for u, v in edges:
             pair = (min(u, v), max(u, v))
+            eff_zz_mhz = (
+                (zz_crosstalk_khz / 1000.0)
+                if (topology is not None or abs(u - v) == 1)
+                else 0.0
+            )
             c_params[pair] = CouplerPhysicalParams(
                 qubits=pair,
-                zz_crosstalk_mhz=zz_crosstalk_khz / 1000.0,
+                zz_crosstalk_mhz=eff_zz_mhz,
                 depol_2q=depol_2q,
                 gate_duration_ns=t_2q_ns,
             )

@@ -30,6 +30,8 @@ HARDWARE_SWEEP_PARAMS: Dict[str, str] = {
     "hw:rabi_mhz": "单比特拉比频率 Ω_R (MHz)",
     "hw:rise_ns": "脉冲上升沿时长 t_rise (ns)",
     "hw:fall_ns": "脉冲下降沿时长 t_fall (ns)",
+    "hw:anharmonicity_mhz": "Transmon 非谐性 α/2π (MHz)",
+    "hw:drag_beta": "DRAG 正交导数系数 β",
     "hw:t_2q_ns": "两比特门脉冲时长 (ns)",
     "hw:zz_khz": "静态 ZZ 串扰强度 (kHz)",
     "hw:readout_err": "测量读出翻转错误率",
@@ -61,6 +63,13 @@ def apply_hardware_param(hw: HardwareModel, key: str, val: float) -> HardwareMod
         for g in new_hw.native_gate_set.single_qubit_gates:
             if not g.is_virtual:
                 g.duration_ns = max(0.1, v)
+    elif key == "hw:anharmonicity_mhz":
+        for qp in new_hw.qubit_params.values():
+            qp.anharmonicity_ghz = v * 1e-3
+    elif key == "hw:drag_beta":
+        new_hw.drag_beta = v
+        for qp in new_hw.qubit_params.values():
+            qp.drag_beta = v
     elif key == "hw:t_2q_ns":
         for cp in new_hw.coupler_params.values():
             cp.gate_duration_ns = max(0.1, v)

@@ -7,7 +7,21 @@
 export type PulseShapeType = 'cosine' | 'gaussian' | 'rectangular' | 'trapezoid';
 export type DriveModeType = 'fixed_duration' | 'fixed_rabi';
 
-const VIRTUAL_1Q_GATES = new Set(['RZ', 'Z', 'S', 'SDG', 'T', 'TDG', 'P', 'PHASE', 'I', 'ID']);
+const VIRTUAL_1Q_GATES = new Set([
+  'RZ',
+  'Z',
+  'S',
+  'SDG',
+  'T',
+  'TDG',
+  'P',
+  'PHASE',
+  'I',
+  'ID',
+  'IDLE',
+  'DELAY',
+  'BARRIER',
+]);
 
 export function envelopeAreaFactor(
   pulseShape: string | undefined,
@@ -127,4 +141,72 @@ export function singleQubitRotationAngle(
 
 export function isVirtual1QGate(gateName: string): boolean {
   return VIRTUAL_1Q_GATES.has(gateName.toUpperCase());
+}
+
+/**
+ * Compute DRAG quadrature waveform Ω_Q(t)/2π (MHz) = -β * (dΩ_I/dt) / (2π * α_GHz).
+ */
+export function sampleDragQuadratureMhz(
+  tNs: number,
+  durationNs: number,
+  peakRabiMhz: number,
+  anharmonicityMhz: number,
+  dragBeta: number,
+  pulseShape: string | undefined,
+  riseNs = 0,
+  fallNs = 0
+): number {
+  if (
+    durationNs <= 0.1 ||
+    tNs < 0 ||
+    tNs > durationNs ||
+    Math.abs(anharmonicityMhz) < 1e-2 ||
+    Math.abs(dragBeta) < 1e-6
+  ) {
+    return 0;
+  }
+  const eps = Math.max(0.02, durationNs * 1e-3);
+  const t0 = Math.max(0, tNs - eps);
+  const t1 = Math.min(durationNs, tNs + eps);
+  const y0 = peakRabiMhz * samplePeakNormalizedEnvelope(t0, durationNs, pulseShape, riseNs, fallNs);
+  const y1 = peakRabiMhz * samplePeakNormalizedEnvelope(t1, durationNs, pulseShape, riseNs, fallNs);
+  const dOmegaDt = (y1 - y0) / Math.max(1e-6, t1 - t0); // MHz / ns
+  const wAlpha = 2 * Math.PI * anharmonicityMhz * 1e-3; // rad / ns
+  return (-dragBeta * dOmegaDt) / wAlpha;
+}
+
+/**
+ * First-order spectral Fourier estimate of |1> -> |2> leakage probability P_leak in [0, 0.5]
+ * for a driven transmon pulse of rotation angle `thetaRad` and duration `durationNs`.
+ */
+export function estimateTransmonLeakage(
+  thetaRad: number,
+  durationNs: number,
+  anharmonicityMhz: number,
+  dragBeta: number,
+  pulseShape: string | undefined,
+  riseNs = 0,
+  fallNs = 0
+): number {
+  if (durationNs <= 0.1 || Math.abs(anharmonicityMhz) < 1.0) return 0;
+  const nSteps = 64;
+  const dt = durationNs / nSteps;
+  const peakMhz = impliedRabiMhz(thetaRad, durationNs, pulseShape, riseNs, fallNs);
+  const wAlpha = 2 * Math.PI * anharmonicityMhz * 1e-3;
+  let re = 0;
+  let im = 0;
+  for (let i = 0; i < nSteps; i++) {
+    const t = (i + 0.5) * dt;
+    const omI = 2 * Math.PI * 1e-3 * peakMhz * samplePeakNormalizedEnvelope(t, durationNs, pulseShape, riseNs, fallNs);
+    const omQ = 2 * Math.PI * 1e-3 * sampleDragQuadratureMhz(t, durationNs, peakMhz, anharmonicityMhz, dragBeta, pulseShape, riseNs, fallNs);
+    // |1> -> |2> coupling carries factor sqrt(2) * (1/2) = 1 / sqrt(2):
+    const ph = wAlpha * t;
+    const c = Math.cos(ph);
+    const s = Math.sin(ph);
+    // (omI - i omQ) * (cos(w_alpha t) + i sin(w_alpha t))
+    re += (omI * c + omQ * s) * dt;
+    im += (omI * s - omQ * c) * dt;
+  }
+  const ampSq = 0.5 * (re * re + im * im);
+  return Math.min(0.5, Math.max(0, ampSq));
 }

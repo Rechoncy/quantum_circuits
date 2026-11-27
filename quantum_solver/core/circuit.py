@@ -32,11 +32,13 @@ class GateInstruction:
     custom_hamiltonian: Optional[np.ndarray] = None
 
     def unitary(self) -> np.ndarray:
+        if self.name.upper() == "BARRIER":
+            return np.eye(1 << len(self.qubits), dtype=np.complex128)
         return gate_unitary(self.name, self.params, self.custom_matrix)
 
     def is_clifford(self) -> bool:
         uname = self.name.upper()
-        if uname in CLIFFORD_GATE_NAMES:
+        if uname in CLIFFORD_GATE_NAMES or uname in ("IDLE", "DELAY", "BARRIER"):
             return True
         if uname in ("RX", "RY", "RZ", "P", "PHASE", "RXX", "RYY", "RZZ") and len(self.params) == 1:
             return is_clifford_angle(self.params[0])

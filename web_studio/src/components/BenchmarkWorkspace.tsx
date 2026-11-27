@@ -263,12 +263,15 @@ function buildPreviewSamples(
     params: (number | string)[] = []
   ): CircuitOpModel => ({ id, step, kind, name, qubits, params });
 
-  if (protocol === 'rabi') {
+  if (protocol === 'rabi' || protocol === 'chevron') {
     return [
       {
         id: 'pre_rabi_scan',
-        label: 'Rabi 变脉宽扫描',
-        subtitle: '扫描共振微波/激光脉冲宽度 t: RXY(Ω_R·t, 0) → 投影测量 P(|1⟩)',
+        label: protocol === 'chevron' ? 'Chevron (Δ, t) 二维扫描' : 'Rabi 变脉宽扫描',
+        subtitle:
+          protocol === 'chevron'
+            ? '同时扫描微波频率失谐 Δ 与脉宽 t: RXY(Ω_R·t, 0) → P(|1⟩) 二维条纹图谱'
+            : '扫描共振微波/激光脉冲宽度 t: RXY(Ω_R·t, 0) → 投影测量 P(|1⟩)',
         operations: [mk('r0', 0, 'gate', 'RXY', [q0], [piVal, 0]), mk('r1', 1, 'measure', 'MEASURE', [q0])],
       },
       {
@@ -289,14 +292,47 @@ function buildPreviewSamples(
     return [
       {
         id: 'pre_ramsey',
-        label: 'Ramsey π/2 − τ − π/2',
-        subtitle: 'SX 制备赤道叠加态 → 自由进动与纯退相干演化 τ → SX 相位读出 → 测量',
+        label: 'Ramsey π/2 − IDLE(τ) − π/2',
+        subtitle: 'SX 制备赤道叠加态 → 自由进动延时 IDLE(τ) → SX 相位读出 → 测量',
         operations: [
           mk('rm0', 0, 'gate', 'SX', [q0]),
-          mk('rm1', 1, 'gate', 'RZ', [q0], [halfPi]),
-          mk('rm2', 2, 'noise', 'PHASE_DAMPING', [q0], [0.05]),
+          mk('rm1', 1, 'gate', 'IDLE', [q0], [200]),
+          mk('rm2', 2, 'gate', 'RZ', [q0], [halfPi]),
           mk('rm3', 3, 'gate', 'SX', [q0]),
           mk('rm4', 4, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+    ];
+  }
+  if (protocol === 'echo') {
+    return [
+      {
+        id: 'pre_hahn',
+        label: 'Hahn Spin Echo (N=1)',
+        subtitle: 'SX − IDLE(τ/2) − Y_π − IDLE(τ/2) − SX → 重聚焦静态失谐与慢速 1/f 相位噪声',
+        operations: [
+          mk('eh0', 0, 'gate', 'SX', [q0]),
+          mk('eh1', 1, 'gate', 'IDLE', [q0], [150]),
+          mk('eh2', 2, 'gate', 'Y', [q0]),
+          mk('eh3', 3, 'gate', 'IDLE', [q0], [150]),
+          mk('eh4', 4, 'gate', 'BARRIER', [q0]),
+          mk('eh5', 5, 'gate', 'SX', [q0]),
+          mk('eh6', 6, 'measure', 'MEASURE', [q0]),
+        ],
+      },
+      {
+        id: 'pre_cpmg2',
+        label: 'CPMG-2 动态解耦 (N=2)',
+        subtitle: 'Meiboom-Gill 正交多脉冲序列进一步滤除中低频退相干谱密度',
+        operations: [
+          mk('cp0', 0, 'gate', 'SX', [q0]),
+          mk('cp1', 1, 'gate', 'IDLE', [q0], [100]),
+          mk('cp2', 2, 'gate', 'Y', [q0]),
+          mk('cp3', 3, 'gate', 'IDLE', [q0], [200]),
+          mk('cp4', 4, 'gate', 'Y', [q0]),
+          mk('cp5', 5, 'gate', 'IDLE', [q0], [100]),
+          mk('cp6', 6, 'gate', 'SX', [q0]),
+          mk('cp7', 7, 'measure', 'MEASURE', [q0]),
         ],
       },
     ];
@@ -305,11 +341,11 @@ function buildPreviewSamples(
     return [
       {
         id: 'pre_t1',
-        label: 'T1 π 激发 − τ 弛豫',
-        subtitle: 'X 脉冲制备 |1⟩ 态 → 自由能量弛豫等待时间 τ → 测量激发态布居 P(|1⟩)',
+        label: 'T1 π 激发 − IDLE(τ) 弛豫',
+        subtitle: 'X 脉冲制备 |1⟩ 态 → 自由能量弛豫等待 IDLE(τ) → 测量激发态布居 P(|1⟩)',
         operations: [
           mk('t0', 0, 'gate', 'X', [q0]),
-          mk('t1', 1, 'noise', 'AMPLITUDE_DAMPING', [q0], [0.1]),
+          mk('t1', 1, 'gate', 'IDLE', [q0], [500]),
           mk('t2', 2, 'measure', 'MEASURE', [q0]),
         ],
       },
@@ -653,8 +689,10 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
           {(
             [
               { id: 'rabi', label: 'Rabi 拉比振荡' },
-              { id: 'ramsey', label: 'Ramsey 相干条纹' },
-              { id: 't1', label: 'T1 能量弛豫' },
+              { id: 'chevron', label: 'Chevron 二维条纹' },
+              { id: 'ramsey', label: 'Ramsey 相干' },
+              { id: 'echo', label: 'Echo 自旋回波' },
+              { id: 't1', label: 'T1 弛豫' },
             ] as const
           ).map((t) => {
             const active = activeProtocol === t.id;
@@ -762,9 +800,13 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
               <div className="text-[14px] font-bold text-[var(--text-primary)]">
                 {activeProtocol === 'rabi'
-                  ? 'Rabi 时间域拉比振荡标定 (拟合实测 Ω_R 与 π / π/2 脉冲宽度)'
+                  ? 'Rabi 时间域拉比振荡标定 (包络边沿精确积分拟合实测 Ω_R)'
+                  : activeProtocol === 'chevron'
+                  ? '二维 Rabi Chevron 频时干涉图谱 (同时定位谐振频偏 Δ 与峰值 Ω_R)'
                   : activeProtocol === 'ramsey'
                   ? 'Ramsey 自由演化干涉条纹标定 (拟合相干时间 T2* 与频率失谐 Δ)'
+                  : activeProtocol === 'echo'
+                  ? 'Hahn Spin Echo 与 CPMG-N 动态解耦标定 (重聚焦慢速噪声提取 T2_echo)'
                   : activeProtocol === 't1'
                   ? 'T1 能量弛豫衰减标定 (π 激发后测量自发辐射寿命 T1)'
                   : activeProtocol === 'rb'
@@ -777,9 +819,13 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
               </div>
               <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
                 {activeProtocol === 'rabi'
-                  ? '在右侧检查器确认目标比特与采样点数后，点击下方按钮扫描驱动脉冲时长 t，通过阻尼余弦拟合提取真实拉比频率 Ω_R 及 π / π/2 脉宽。'
+                  ? '对当前硬件包络及上升/下降沿执行时域脉冲传播，提取真实峰值拉比频率 Ω_R 及 π / π/2 脉宽。'
+                  : activeProtocol === 'chevron'
+                  ? '在二维 (Δ_drive, t) 网格上扫描广义拉比频率 √(Ω_R² + Δ²)，由 Chevron 条纹顶点直接定位共振频偏并拟合 Ω_R。'
                   : activeProtocol === 'ramsey'
-                  ? '执行上方 π/2 − τ − π/2 序列并引入人工失谐条纹，同时拟合纯退相干包络 T2* 与本振频率偏移 Δ。'
+                  ? '执行上方 π/2 − IDLE(τ) − π/2 序列并引入人工失谐条纹，同时拟合纯退相干包络 T2* 与本振频率偏移 Δ。'
+                  : activeProtocol === 'echo'
+                  ? '执行 Meiboom-Gill 正交 X_{π/2} − [τ/(2N) − Y_π − τ/(2N)]^N − X_{π/2} 序列，完全重聚焦静态频偏并抑制低频相位噪声，直观对比 T2_echo 与 T2*。'
                   : activeProtocol === 't1'
                   ? '执行上方 π 翻转脉冲制备 |1⟩ 态并扫描自由等待时间 τ，拟合指数弛豫曲线提取能量弛豫寿命 T1。'
                   : activeProtocol === 'rb'
@@ -804,31 +850,34 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
       })()}
 
       {/* =================================================================== */}
-      {/* VIEW 0: BASIC CALIBRATIONS (RABI / RAMSEY / T1 + WRITE-BACK)        */}
+      {/* VIEW 0: BASIC CALIBRATIONS (RABI / CHEVRON / RAMSEY / ECHO / T1)    */}
       {/* =================================================================== */}
       {matchingResp &&
         (matchingResp.protocol === 'rabi' ||
+          matchingResp.protocol === 'chevron' ||
           matchingResp.protocol === 'ramsey' ||
+          matchingResp.protocol === 'echo' ||
           matchingResp.protocol === 't1') &&
         (() => {
           const cal: BasicCalibrationResponse = matchingResp;
           const topKpis = cal.params.slice(0, 4);
-          const tPiParam = cal.params.find((p) => p.key === 't_pi');
+          const tPiEnvParam = cal.params.find((p) => p.key === 't_pi_env') || cal.params.find((p) => p.key === 't_pi');
+          const tPi2EnvParam = cal.params.find((p) => p.key === 't_pi2_env');
           const rabiShapes =
-            cal.protocol === 'rabi' && tPiParam && Number.isFinite(tPiParam.value)
+            cal.protocol === 'rabi' && tPiEnvParam && Number.isFinite(tPiEnvParam.value)
               ? [
                   {
                     type: 'line',
-                    x0: 0.5 * tPiParam.value,
-                    x1: 0.5 * tPiParam.value,
+                    x0: tPi2EnvParam && Number.isFinite(tPi2EnvParam.value) ? tPi2EnvParam.value : 0.5 * tPiEnvParam.value,
+                    x1: tPi2EnvParam && Number.isFinite(tPi2EnvParam.value) ? tPi2EnvParam.value : 0.5 * tPiEnvParam.value,
                     y0: -0.02,
                     y1: 1.04,
                     line: { color: '#10B981', width: 1.3, dash: 'dot' },
                   },
                   {
                     type: 'line',
-                    x0: tPiParam.value,
-                    x1: tPiParam.value,
+                    x0: tPiEnvParam.value,
+                    x1: tPiEnvParam.value,
                     y0: -0.02,
                     y1: 1.04,
                     line: { color: '#F59E0B', width: 1.4, dash: 'dash' },
@@ -898,8 +947,12 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                   title={
                     cal.protocol === 'rabi'
                       ? 'Rabi 驱动标定与 π/2 · π 门等效线路'
+                      : cal.protocol === 'chevron'
+                      ? '二维 Rabi Chevron 扫频变脉宽标定线路'
                       : cal.protocol === 'ramsey'
-                      ? 'Ramsey π/2 − τ − π/2 自由演化线路'
+                      ? 'Ramsey π/2 − IDLE(τ) − π/2 自由演化线路'
+                      : cal.protocol === 'echo'
+                      ? 'Hahn Spin Echo / CPMG 动态解耦重聚焦线路'
                       : 'T1 π 激发与弛豫等待测量线路'
                   }
                   samples={calSamples}
@@ -907,112 +960,234 @@ export const BenchmarkWorkspace: React.FC<BenchmarkWorkspaceProps> = ({
                 />
               )}
 
-              {/* Curve Plot + Fitted Parameter Table */}
+              {/* 2D Chevron Heatmap OR 1D Curve Plot + Fitted Parameter Table */}
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-                <div className="xl:col-span-8 studio-card flex flex-col overflow-hidden h-[315px]">
-                  <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[12px] font-semibold text-[var(--text-primary)]">
-                      {cal.protocol === 'rabi'
-                        ? `Rabi 拉比振荡拟合曲线 (${cal.target_label})`
-                        : cal.protocol === 'ramsey'
-                        ? `Ramsey 自由进动干涉条纹 (${cal.target_label})`
-                        : `T1 能量弛豫指数衰减曲线 (${cal.target_label})`}
-                    </span>
-                    <div className="flex items-center gap-3 text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
-                      <span className="flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-[#2F81F7]" />
-                        实测采样点
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <span className="w-2.5 h-[2px] bg-[#10B981]" />
-                        最小二乘拟合
-                      </span>
-                      {cal.protocol === 'rabi' && (
-                        <span className="text-amber-500">虚线: t_π/2 与 t_π</span>
-                      )}
+                {cal.protocol === 'chevron' && cal.z_grid && cal.y_detunings ? (
+                  <>
+                    <div className="xl:col-span-7 studio-card flex flex-col overflow-hidden h-[325px]">
+                      <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          二维 Rabi Chevron 频时条纹热力图 P(|1⟩; Δ, t)
+                        </span>
+                        <span className="text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
+                          {cal.y_detunings.length}×{cal.x.length} Grid
+                        </span>
+                      </div>
+                      <div className="flex-1 min-h-0 px-1.5 pb-1">
+                        <PlotlyChart
+                          data={[
+                            {
+                              type: 'heatmap',
+                              x: cal.x,
+                              y: cal.y_detunings,
+                              z: cal.z_grid,
+                              colorscale: 'Viridis',
+                              zmin: 0,
+                              zmax: 1,
+                              colorbar: {
+                                thickness: 11,
+                                len: 0.88,
+                                tickfont: { size: 10, color: mutedColor },
+                              },
+                              hovertemplate:
+                                't=%{x:.1f} ns<br>Δ=%{y:.2f} MHz<br>P(|1⟩)=%{z:.4f}<extra>Chevron</extra>',
+                            },
+                          ]}
+                          layout={{
+                            paper_bgcolor: plotBg,
+                            plot_bgcolor: plotBg,
+                            margin: { l: 56, r: 16, t: 12, b: 40 },
+                            xaxis: {
+                              title: { text: cal.x_label, font: { size: 11, color: mutedColor } },
+                              tickfont: { color: mutedColor, size: 10.5 },
+                            },
+                            yaxis: {
+                              title: {
+                                text: cal.y_grid_label || '驱动频率失谐 Δ (MHz)',
+                                font: { size: 11, color: mutedColor },
+                              },
+                              tickfont: { color: mutedColor, size: 10.5 },
+                            },
+                          }}
+                        />
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex-1 min-h-0 px-1.5 pb-1">
-                    <PlotlyChart
-                      data={[
-                        {
-                          x: cal.x,
-                          y: cal.ideal,
-                          type: 'scatter',
-                          mode: 'lines',
-                          name: '无读出混淆真值',
-                          line: { color: 'rgba(148, 163, 184, 0.5)', width: 1.4, dash: 'dot' },
-                        },
-                        {
-                          x: cal.fit_x,
-                          y: cal.fit_y,
-                          type: 'scatter',
-                          mode: 'lines',
-                          name: '拟合模型曲线',
-                          line: { color: '#10B981', width: 2.4 },
-                        },
-                        {
-                          x: cal.x,
-                          y: cal.measured,
-                          type: 'scatter',
-                          mode: 'markers',
-                          name: '实测 P(|1⟩)',
-                          marker: { color: '#2F81F7', size: 6.5 },
-                          hovertemplate: 't=%{x:.1f} ns · P(|1⟩)=%{y:.4f}<extra></extra>',
-                        },
-                      ]}
-                      layout={{
-                        paper_bgcolor: plotBg,
-                        plot_bgcolor: plotBg,
-                        showlegend: false,
-                        hovermode: 'closest',
-                        margin: { l: 52, r: 18, t: 14, b: 40 },
-                        xaxis: {
-                          title: { text: cal.x_label, font: { size: 11, color: mutedColor } },
-                          gridcolor: gridColor,
-                          tickfont: { color: mutedColor, size: 10.5 },
-                        },
-                        yaxis: {
-                          title: { text: cal.y_label, font: { size: 11, color: mutedColor } },
-                          range: [-0.04, 1.06],
-                          gridcolor: gridColor,
-                          tickfont: { color: mutedColor, size: 10.5 },
-                        },
-                        shapes: rabiShapes,
-                      }}
-                    />
-                  </div>
-                </div>
 
-                <div className="xl:col-span-4 studio-card flex flex-col overflow-hidden max-h-[315px]">
-                  <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
-                    <span className="text-[12px] font-semibold text-[var(--text-primary)]">
-                      标定参数拟合明细表
-                    </span>
-                    <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
-                      {cal.shots > 0 ? `${cal.shots} Shots` : '精确主方程'}
-                    </span>
-                  </div>
-                  <div className="flex-1 overflow-auto">
-                    <table className="w-full text-[11.5px] font-mono-num border-collapse">
-                      <tbody className="divide-y divide-[var(--border-hairline)]">
-                        {cal.params.map((p) => (
-                          <tr key={p.key} className="hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
-                            <td className="py-2 px-3 font-sans text-[var(--text-secondary)]">
-                              {p.label}
-                            </td>
-                            <td className="py-2 px-3 text-right font-semibold text-[var(--text-primary)]">
-                              {Number.isFinite(p.value) ? p.value : '—'}{' '}
-                              <span className="text-[10.5px] font-normal text-[var(--text-secondary)]">
-                                {p.unit}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                    <div className="xl:col-span-5 studio-card flex flex-col overflow-hidden h-[325px]">
+                      <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          共振点切片拉比拟合曲线 ({cal.target_label})
+                        </span>
+                        <span className="text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
+                          Resonant Slice
+                        </span>
+                      </div>
+                      <div className="flex-1 min-h-0 px-1.5 pb-1">
+                        <PlotlyChart
+                          data={[
+                            {
+                              x: cal.fit_x,
+                              y: cal.fit_y,
+                              type: 'scatter',
+                              mode: 'lines',
+                              name: '共振切片拟合',
+                              line: { color: '#10B981', width: 2.3 },
+                            },
+                            {
+                              x: cal.x,
+                              y: cal.measured,
+                              type: 'scatter',
+                              mode: 'markers',
+                              name: '共振实测 P(|1⟩)',
+                              marker: { color: '#2F81F7', size: 6 },
+                            },
+                          ]}
+                          layout={{
+                            paper_bgcolor: plotBg,
+                            plot_bgcolor: plotBg,
+                            showlegend: false,
+                            margin: { l: 48, r: 14, t: 12, b: 38 },
+                            xaxis: {
+                              title: { text: cal.x_label, font: { size: 10.5, color: mutedColor } },
+                              gridcolor: gridColor,
+                              tickfont: { color: mutedColor, size: 10 },
+                            },
+                            yaxis: {
+                              title: { text: 'P(|1⟩)', font: { size: 10.5, color: mutedColor } },
+                              range: [-0.04, 1.06],
+                              gridcolor: gridColor,
+                              tickfont: { color: mutedColor, size: 10 },
+                            },
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="xl:col-span-8 studio-card flex flex-col overflow-hidden h-[315px]">
+                      <div className="px-3.5 py-2 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          {cal.protocol === 'rabi'
+                            ? `Rabi 拉比振荡拟合曲线 (${cal.target_label})`
+                            : cal.protocol === 'ramsey'
+                            ? `Ramsey 自由进动干涉条纹 (${cal.target_label})`
+                            : cal.protocol === 'echo'
+                            ? `Hahn Echo / CPMG 动态解耦衰减曲线 vs 未解耦 Ramsey (${cal.target_label})`
+                            : `T1 能量弛豫指数衰减曲线 (${cal.target_label})`}
+                        </span>
+                        <div className="flex items-center gap-3 text-[10px] font-mono-num text-[var(--text-secondary)] mr-12">
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-[#2F81F7]" />
+                            实测采样点
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="w-2.5 h-[2px] bg-[#10B981]" />
+                            最小二乘拟合
+                          </span>
+                          {cal.protocol === 'echo' && cal.echo_ref_ramsey && (
+                            <span className="text-amber-500">橙色虚线: 未解耦 Ramsey (T2*)</span>
+                          )}
+                          {cal.protocol === 'rabi' && (
+                            <span className="text-amber-500">虚线: t_π/2 与 t_π</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 px-1.5 pb-1">
+                        <PlotlyChart
+                          data={[
+                            {
+                              x: cal.x,
+                              y: cal.ideal,
+                              type: 'scatter',
+                              mode: 'lines',
+                              name: '无读出混淆真值',
+                              line: { color: 'rgba(148, 163, 184, 0.5)', width: 1.4, dash: 'dot' },
+                            },
+                            ...(cal.protocol === 'echo' && cal.echo_ref_ramsey
+                              ? [
+                                  {
+                                    x: cal.fit_x,
+                                    y: cal.echo_ref_ramsey,
+                                    type: 'scatter',
+                                    mode: 'lines',
+                                    name: '未重聚焦 Ramsey (T2*)',
+                                    line: { color: '#F59E0B', width: 1.7, dash: 'dash' },
+                                  },
+                                ]
+                              : []),
+                            {
+                              x: cal.fit_x,
+                              y: cal.fit_y,
+                              type: 'scatter',
+                              mode: 'lines',
+                              name: '拟合模型曲线',
+                              line: { color: '#10B981', width: 2.4 },
+                            },
+                            {
+                              x: cal.x,
+                              y: cal.measured,
+                              type: 'scatter',
+                              mode: 'markers',
+                              name: '实测 P(|1⟩)',
+                              marker: { color: '#2F81F7', size: 6.5 },
+                              hovertemplate: 't=%{x:.1f} ns · P(|1⟩)=%{y:.4f}<extra></extra>',
+                            },
+                          ]}
+                          layout={{
+                            paper_bgcolor: plotBg,
+                            plot_bgcolor: plotBg,
+                            showlegend: false,
+                            hovermode: 'closest',
+                            margin: { l: 52, r: 18, t: 14, b: 40 },
+                            xaxis: {
+                              title: { text: cal.x_label, font: { size: 11, color: mutedColor } },
+                              gridcolor: gridColor,
+                              tickfont: { color: mutedColor, size: 10.5 },
+                            },
+                            yaxis: {
+                              title: { text: cal.y_label, font: { size: 11, color: mutedColor } },
+                              range: [-0.04, 1.06],
+                              gridcolor: gridColor,
+                              tickfont: { color: mutedColor, size: 10.5 },
+                            },
+                            shapes: rabiShapes,
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-4 studio-card flex flex-col overflow-hidden max-h-[315px]">
+                      <div className="h-9 px-3 border-b border-[var(--border-hairline)] flex items-center justify-between shrink-0">
+                        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                          标定参数拟合明细表
+                        </span>
+                        <span className="text-[10px] font-mono-num text-[var(--text-secondary)]">
+                          {cal.shots > 0 ? `${cal.shots} Shots` : '精确主方程'}
+                        </span>
+                      </div>
+                      <div className="flex-1 overflow-auto">
+                        <table className="w-full text-[11.5px] font-mono-num border-collapse">
+                          <tbody className="divide-y divide-[var(--border-hairline)]">
+                            {cal.params.map((p) => (
+                              <tr key={p.key} className="hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
+                                <td className="py-2 px-3 font-sans text-[var(--text-secondary)]">
+                                  {p.label}
+                                </td>
+                                <td className="py-2 px-3 text-right font-semibold text-[var(--text-primary)]">
+                                  {Number.isFinite(p.value) ? p.value : '—'}{' '}
+                                  <span className="text-[10.5px] font-normal text-[var(--text-secondary)]">
+                                    {p.unit}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           );
