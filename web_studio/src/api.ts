@@ -238,3 +238,25 @@ export async function generateCircuitFromNl(payload: {
 }): Promise<NlCircuitResponse> {
   return postJson('/api/nl-to-circuit', payload);
 }
+
+export async function openDesktopFileDialog(): Promise<{
+  desktop: boolean;
+  opened?: boolean;
+  cancelled?: boolean;
+  filename?: string;
+  path?: string;
+  content?: string;
+}> {
+  return postJson('/api/system/open-file', {});
+}
+
+export async function importProjectContent(payload: {
+  filename: string;
+  content: string;
+  base_project?: ProjectModel | null;
+}): Promise<{
+  format_detected: 'qproj' | 'qasm' | 'dsl';
+  project: ProjectModel;
+}> {
+  return postJson('/api/project/import', payload);
+}

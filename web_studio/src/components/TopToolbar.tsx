@@ -4,8 +4,11 @@ import {
   Bot,
   ChevronDown,
   CircuitBoard,
+  Code2,
   Cpu,
   Download,
+  FileCode,
+  FileJson,
   FolderOpen,
   Gauge,
   Keyboard,
@@ -22,6 +25,8 @@ import {
 } from 'lucide-react';
 import type { CircuitSubMode, PrimaryDomain, ProjectModel, SolverBackendType } from '../types';
 import { BACKEND_LABELS } from '../constants';
+
+export type ProjectExportFormat = 'qproj' | 'json' | 'qasm' | 'dsl' | 'svg' | 'tex';
 
 interface TopToolbarProps {
   project: ProjectModel;
@@ -48,9 +53,8 @@ interface TopToolbarProps {
   onToggleLeft: () => void;
   onToggleRight: () => void;
   onNewBlankProject: () => void;
-  onExportJson: () => void;
-  onExportSvg: () => void;
-  onImportJson: (file: File) => void;
+  onTriggerImport: () => void;
+  onExportProject: (fmt: ProjectExportFormat) => void;
   onOpenNlModal: () => void;
   isDirty?: boolean;
 }
@@ -91,19 +95,19 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onToggleLeft,
   onToggleRight,
   onNewBlankProject,
-  onExportJson,
-  onExportSvg,
-  onImportJson,
+  onTriggerImport,
+  onExportProject,
   onOpenNlModal,
   isDirty = false,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(project.name);
   const menuRef = useRef<HTMLDivElement>(null);
+  const exportRef = useRef<HTMLDivElement>(null);
   const shortcutsRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setNameDraft(project.name);
@@ -113,6 +117,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
     const onDocClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
+      }
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setExportOpen(false);
       }
       if (shortcutsRef.current && !shortcutsRef.current.contains(e.target as Node)) {
         setShortcutsOpen(false);
@@ -137,7 +144,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
   return (
     <header className="h-[42px] shrink-0 bg-[var(--bg-header)] border-b border-[var(--border-hairline)] px-2 flex items-center justify-between gap-2 select-none z-30">
-      {/* Left: Brand Emblem + Project File Selector + Undo/Redo + 3 Parallel Domain Switcher */}
+      {/* Left: Brand Emblem + Project File Selector + Dedicated Import/Export + Undo/Redo + 3 Parallel Domain Switcher */}
       <div className="flex items-center h-full min-w-0 overflow-hidden">
         {/* Industrial Brand Badge */}
         <div className="flex items-center gap-2 px-2 h-full border-r border-[var(--border-hairline)] shrink-0">
@@ -154,152 +161,237 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </div>
         </div>
 
-        {/* Project Selector Dropdown */}
-        <div className="relative flex items-center h-full px-2 border-r border-[var(--border-hairline)]" ref={menuRef}>
-          {editingName ? (
-            <input
-              value={nameDraft}
-              autoFocus
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={() => {
-                setEditingName(false);
-                if (nameDraft.trim()) onRenameProject(nameDraft.trim());
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+        {/* Project Selector + First-Class Import / Export Controls */}
+        <div className="flex items-center gap-1 h-full px-1.5 border-r border-[var(--border-hairline)] shrink-0">
+          <div className="relative flex items-center" ref={menuRef}>
+            {editingName ? (
+              <input
+                value={nameDraft}
+                autoFocus
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={() => {
                   setEditingName(false);
                   if (nameDraft.trim()) onRenameProject(nameDraft.trim());
-                }
-              }}
-              className="h-6 text-[11.5px] px-1.5 rounded-[2px] border border-[var(--accent)] bg-[var(--bg-panel)] outline-none w-40 font-mono-num"
-            />
-          ) : (
-            <button
-              onClick={() => setMenuOpen((o) => !o)}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                setMenuOpen(false);
-                setEditingName(true);
-              }}
-              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[164px] xl:max-w-[196px] cursor-pointer transition-colors"
-              title="点击切换预设工程或导入/导出文件，双击重命名当前工程"
-            >
-              <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <span className="truncate">{project.name}</span>
-              <ChevronDown className="w-3 h-3 text-[var(--text-secondary)] shrink-0" />
-            </button>
-          )}
-
-          {menuOpen && (
-            <div className="absolute left-2 top-[40px] w-80 studio-card shadow-xl py-1 z-50 max-h-[82vh] overflow-y-auto">
-              {recentProjects.length > 0 && (
-                <>
-                  <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--accent)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
-                    最近工程 RECENT ({recentProjects.length})
-                  </div>
-                  {recentProjects.map((rp, idx) => (
-                    <button
-                      key={`rec_${rp.name}_${idx}`}
-                      onClick={() => {
-                        onSelectPreset(rp);
-                        setMenuOpen(false);
-                      }}
-                      className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
-                    >
-                      <span className="truncate font-mono-num">{rp.name}</span>
-                      <span className="shrink-0 text-[10px] font-mono-num text-[var(--text-secondary)]">
-                        {rp.qubits.length}Q · {rp.operations.filter((o) => o.kind === 'gate').length}G
-                      </span>
-                    </button>
-                  ))}
-                  <div className="my-1 border-t border-[var(--border-hairline)]" />
-                </>
-              )}
-              <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
-                工程模板库 PRESETS ({presets.length})
-              </div>
-              {presets.map((p) => (
-                <button
-                  key={p.name}
-                  onClick={() => {
-                    onSelectPreset(p);
-                    setMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
-                >
-                  <span className="truncate font-mono-num">{p.name}</span>
-                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-mono-num text-[var(--text-secondary)]">
-                    <span className="px-1.5 py-0.25 rounded-[2px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                      {p.qubits.length}Q
-                    </span>
-                    <span className="uppercase opacity-80">{p.sim_settings.backend}</span>
-                  </span>
-                </button>
-              ))}
-              <div className="my-1 border-t border-[var(--border-hairline)]" />
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  onNewBlankProject();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center gap-2 font-medium cursor-pointer"
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                新建空白工程 (2 Qubits)
-              </button>
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setEditingName(false);
+                    if (nameDraft.trim()) onRenameProject(nameDraft.trim());
+                  }
+                }}
+                className="h-6 text-[11.5px] px-1.5 rounded-[2px] border border-[var(--accent)] bg-[var(--bg-panel)] outline-none w-36 font-mono-num"
+              />
+            ) : (
               <button
-                onClick={() => {
+                onClick={() => setMenuOpen((o) => !o)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
                   setMenuOpen(false);
                   setEditingName(true);
                 }}
-                className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--border-input)] text-[11.5px] font-mono-num text-[var(--text-primary)] flex items-center gap-1.5 max-w-[148px] xl:max-w-[180px] cursor-pointer transition-colors"
+                title="点击切换工程模板或最近工程，双击重命名当前工程"
               >
-                <FolderOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                重命名当前工程
+                <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                <span className="truncate">{project.name}</span>
+                <ChevronDown className="w-3 h-3 text-[var(--text-secondary)] shrink-0" />
               </button>
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  onExportJson();
-                }}
-                className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                导出工程文件 (.qproj.json)
-              </button>
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  onExportSvg();
-                }}
-                className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
-                导出原理图矢量图 (.svg)
-              </button>
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  fileInputRef.current?.click();
-                }}
-                className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
-              >
-                <Upload className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                导入工程或 OpenQASM (.json, .qasm)
-              </button>
-            </div>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json,.qproj,.qasm,.txt"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onImportJson(f);
-              e.target.value = '';
-            }}
-          />
+            )}
+
+            {menuOpen && (
+              <div className="absolute left-0 top-[36px] w-80 studio-card shadow-xl py-1 z-50 max-h-[82vh] overflow-y-auto">
+                {recentProjects.length > 0 && (
+                  <>
+                    <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--accent)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
+                      最近工程 RECENT ({recentProjects.length})
+                    </div>
+                    {recentProjects.map((rp, idx) => (
+                      <button
+                        key={`rec_${rp.name}_${idx}`}
+                        onClick={() => {
+                          onSelectPreset(rp);
+                          setMenuOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
+                      >
+                        <span className="truncate font-mono-num">{rp.name}</span>
+                        <span className="shrink-0 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                          {rp.qubits.length}Q · {rp.operations.filter((o) => o.kind === 'gate').length}G
+                        </span>
+                      </button>
+                    ))}
+                    <div className="my-1 border-t border-[var(--border-hairline)]" />
+                  </>
+                )}
+                <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
+                  工程模板库 PRESETS ({presets.length})
+                </div>
+                {presets.map((p) => (
+                  <button
+                    key={p.name}
+                    onClick={() => {
+                      onSelectPreset(p);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
+                  >
+                    <span className="truncate font-mono-num">{p.name}</span>
+                    <span className="shrink-0 flex items-center gap-1 text-[10px] font-mono-num text-[var(--text-secondary)]">
+                      <span className="px-1.5 py-0.25 rounded-[2px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
+                        {p.qubits.length}Q
+                      </span>
+                      <span className="uppercase opacity-80">{p.sim_settings.backend}</span>
+                    </span>
+                  </button>
+                ))}
+                <div className="my-1 border-t border-[var(--border-hairline)]" />
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onNewBlankProject();
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center gap-2 font-medium cursor-pointer"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  新建空白工程 (2 Qubits)
+                </button>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setEditingName(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <FolderOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  重命名当前工程
+                </button>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onTriggerImport();
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <Upload className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    导入工程 / OpenQASM / DSL...
+                  </span>
+                  <kbd className="text-[10px] font-mono-num text-[var(--text-tertiary)]">Ctrl+O</kbd>
+                </button>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onExportProject('qproj');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="w-3.5 h-3.5 text-emerald-500" />
+                    保存完整工程 (.qproj)
+                  </span>
+                  <kbd className="text-[10px] font-mono-num text-[var(--text-tertiary)]">Ctrl+S</kbd>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Explicit Top-Level [导入] Button */}
+          <button
+            type="button"
+            onClick={onTriggerImport}
+            title="打开/导入工程或量子线路文件 (.qproj / .json / .qasm / .dsl) — 支持直接拖拽文件到窗口 (Ctrl+O)"
+            className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11px] font-medium text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <Upload className="w-3 h-3" />
+            <span className="hidden xl:inline">导入</span>
+          </button>
+
+          {/* Explicit Top-Level [导出 ▾] Multi-Format Menu */}
+          <div className="relative flex items-center" ref={exportRef}>
+            <button
+              type="button"
+              onClick={() => setExportOpen((o) => !o)}
+              title="多格式导出当前工程、OpenQASM 3.0、DSL 脚本、SVG 矢量图或 LaTeX Quantikz (Ctrl+S)"
+              className="h-7 px-2 rounded-[3px] bg-[var(--bg-panel)] border border-[var(--border-hairline)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11px] font-medium text-[var(--text-secondary)] flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <Download className="w-3 h-3" />
+              <span className="hidden xl:inline">导出</span>
+              <ChevronDown className="w-2.5 h-2.5 opacity-75" />
+            </button>
+
+            {exportOpen && (
+              <div className="absolute left-0 top-[36px] w-68 studio-card shadow-xl py-1 z-50">
+                <div className="px-3 py-1 text-[10px] font-mono-num font-bold uppercase tracking-wider text-[var(--text-secondary)] bg-[var(--bg-subtle)] border-b border-[var(--border-hairline)]">
+                  工程与代码导出 EXPORT
+                </div>
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('qproj');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 font-medium">
+                    <FileJson className="w-3.5 h-3.5 text-emerald-500" />
+                    保存工程文件 (.qproj)
+                  </span>
+                  <kbd className="text-[10px] font-mono-num text-[var(--text-tertiary)]">Ctrl+S</kbd>
+                </button>
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('json');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <FileJson className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  导出纯 JSON 模型 (.json)
+                </button>
+                <div className="my-1 border-t border-[var(--border-hairline)]" />
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('qasm');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  导出 OpenQASM 3.0 (.qasm)
+                </button>
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('dsl');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <Code2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  导出 Quantum DSL 脚本 (.dsl)
+                </button>
+                <div className="my-1 border-t border-[var(--border-hairline)]" />
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('svg');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  导出量子线路矢量图 (.svg)
+                </button>
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportProject('tex');
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+                >
+                  <Code2 className="w-3.5 h-3.5 text-amber-500" />
+                  导出论文 Quantikz 源码 (.tex)
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Undo / Redo */}
@@ -467,12 +559,13 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
               </div>
               <div className="space-y-1.5 text-[11px]">
                 {[
+                  ['Ctrl + O / 拖入文件', '打开导入 .qproj / .json / .qasm / .dsl'],
+                  ['Ctrl + S', '保存导出完整工程文件 (.qproj)'],
                   ['Alt + 1 / 2 / 3', '切换 量子线路 / 比特门表征 / 器件硬件'],
                   ['V / 右键空白', '切换选择指针 / 释放放置工具'],
                   ['空白拖拽框选', '批量框选门（删除 / 封装宏门）'],
                   ['Ctrl + 滚轮', '原理图画布无级缩放 (60%–150%)'],
                   ['Space / ← →', '播放 / 单步步进探针游标 (SIM)'],
-                  ['Shift + ← →', '连续脉冲门内微步进 0.05 (SIM)'],
                   ['Ctrl + K', '唤起 / 关闭 AI 线路综合助手'],
                   ['Ctrl + Enter', '执行当前工作区任务'],
                   ['Ctrl + Z / Y', '撤销 / 重做编辑'],

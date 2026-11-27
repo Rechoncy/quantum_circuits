@@ -1649,6 +1649,67 @@ def test_v28_drag_leakage_barrier_idle_readout_mitigation_echo_and_chevron() -> 
     assert len(r_echo["echo_ref_ramsey"]) > 50
 
 
+def test_project_multi_format_import_and_export_normalization() -> None:
+    """
+    Verify unified Project Import & Export normalization (`parse_and_normalize_imported_project`):
+      1. Versioned `.qproj` bundle envelope `{ format, version, project: {...} }` round-trip
+      2. Minimal/legacy partial `.json` missing `hardware_profiles` & `sim_settings` backfills safely
+      3. OpenQASM 3.0 (`.qasm`) & Quantum DSL (`.dsl`) import into full schema-valid `ProjectModel`
+    """
+    import json
+    from quantum_solver.studio import build_preset_projects, project_to_dsl, project_to_openqasm3
+    from quantum_solver.studio.server import parse_and_normalize_imported_project
+
+    base = build_preset_projects()[0]
+
+    # 1. Versioned .qproj bundle envelope
+    bundle_str = json.dumps(
+        {
+            "format": "quantum_studio_project",
+            "version": "2.8.1",
+            "project": base.model_dump(),
+        },
+        ensure_ascii=False,
+    )
+    fmt1, proj1 = parse_and_normalize_imported_project("MyExperiment.qproj", bundle_str, base)
+    assert fmt1 == "qproj"
+    assert len(proj1.qubits) == len(base.qubits)
+    assert len(proj1.operations) == len(base.operations)
+
+    # 2. Legacy / minimal JSON missing hardware_profiles, sim_settings, custom_gates, op ids
+    minimal_json = json.dumps(
+        {
+            "name": "Minimal_Bell",
+            "qubits": [{"name": "qa"}, {"name": "qb"}],
+            "operations": [
+                {"name": "H", "qubits": [0]},
+                {"name": "CNOT", "qubits": [0, 1]},
+                {"name": "MEASURE", "qubits": [0, 1]},
+            ],
+        }
+    )
+    fmt2, proj2 = parse_and_normalize_imported_project("minimal.json", minimal_json, base)
+    assert fmt2 == "qproj"
+    assert proj2.name == "Minimal_Bell.qproj"
+    assert len(proj2.hardware_profiles) >= 4
+    assert proj2.operations[-1].kind == "measure"
+
+    # 3. OpenQASM 3.0 import
+    qasm_src = project_to_openqasm3(base)
+    fmt3, proj3 = parse_and_normalize_imported_project("exported_bell.qasm", qasm_src, base)
+    assert fmt3 == "qasm"
+    assert proj3.name == "exported_bell.qproj"
+    assert len(proj3.qubits) == len(base.qubits)
+
+    # 4. Quantum DSL (.dsl / .txt) import
+    dsl_src = project_to_dsl(base)
+    fmt4, proj4 = parse_and_normalize_imported_project("script.dsl", dsl_src, base)
+    assert fmt4 == "dsl"
+    assert proj4.name == "script.qproj"
+    assert len(proj4.operations) >= 3
+
+
+
 
 
 

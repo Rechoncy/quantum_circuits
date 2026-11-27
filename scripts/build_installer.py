@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RELEASE_DIR = ROOT / "release"
 STUB_EXE = RELEASE_DIR / "InstallerStub.exe"
 PAYLOAD_ZIP = RELEASE_DIR / "payload_temp.zip"
-FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.8.0_Setup.exe"
+FINAL_INSTALLER = RELEASE_DIR / "QuantumStudio_v2.8.1_Setup.exe"
 
 CSC_EXE = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
@@ -186,6 +186,7 @@ def build_installer() -> None:
     (RELEASE_DIR / "QuantumStudio_v2.5.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.6.0_Setup.exe").unlink(missing_ok=True)
     (RELEASE_DIR / "QuantumStudio_v2.7.0_Setup.exe").unlink(missing_ok=True)
+    (RELEASE_DIR / "QuantumStudio_v2.8.0_Setup.exe").unlink(missing_ok=True)
 
     size_mb = FINAL_INSTALLER.stat().st_size / (1024 * 1024)
     elapsed = time.time() - t0

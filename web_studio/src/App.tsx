@@ -7,6 +7,7 @@ import {
   Cpu,
   LineChart,
   Loader2,
+  Upload,
 } from 'lucide-react';
 import type {
   CalibrationWritebackItem,
@@ -33,6 +34,8 @@ import type {
 import { BUILTIN_GATES, QUBIT_DOT_PALETTE } from './constants';
 import {
   fetchPresets,
+  importProjectContent,
+  openDesktopFileDialog,
   runCrossHardwareBenchmark,
   runGateBenchmark,
   runNoiseBudget,
@@ -46,7 +49,7 @@ import {
   syncProjectToDsl,
   syncQasmToProject,
 } from './api';
-import { TopToolbar } from './components/TopToolbar';
+import { TopToolbar, type ProjectExportFormat } from './components/TopToolbar';
 import { ActivityBar } from './components/ActivityBar';
 import { LeftNavigator } from './components/LeftNavigator';
 import { CircuitCanvas } from './components/CircuitCanvas';
@@ -59,7 +62,7 @@ import {
 import { BottomDock } from './components/BottomDock';
 import { SimulateResults } from './components/SimulateResults';
 import type { DirectSynthPayload } from './components/OptimizeWorkspace';
-import { buildCircuitSvg, downloadTextFile } from './utils/exportCircuitSvg';
+import { buildCircuitSvg, buildQuantikzLatex, downloadTextFile } from './utils/exportCircuitSvg';
 
 const OptimizeWorkspace = lazy(() =>
   import('./components/OptimizeWorkspace').then((m) => ({ default: m.OptimizeWorkspace }))
@@ -224,6 +227,9 @@ export default function App() {
   const [macroSeedOps, setMacroSeedOps] = useState<CircuitOpModel[] | null>(null);
   const [macroSeedQubits, setMacroSeedQubits] = useState<number>(2);
   const [exportToast, setExportToast] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const globalFileInputRef = useRef<HTMLInputElement>(null);
+  const fileActionRef = useRef<{ triggerImport: () => void; saveQproj: () => void } | null>(null);
 
   const runCounterRef = useRef(1);
 
@@ -885,9 +891,19 @@ export default function App() {
     };
   }, [isPlayingTimeline, simResponse, playbackSpeed]);
 
-  // Global keyboard shortcuts (Ctrl+K, Ctrl+Z, Ctrl+Y, Ctrl+D, Ctrl+Enter, Space, Esc, Delete)
+  // Global keyboard shortcuts (Ctrl+O, Ctrl+S, Ctrl+K, Ctrl+Z, Ctrl+Y, Ctrl+D, Ctrl+Enter, Space, Esc, Delete)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        fileActionRef.current?.saveQproj();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        fileActionRef.current?.triggerImport();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setNlModalOpen((v) => !v);
@@ -1371,12 +1387,53 @@ export default function App() {
     addLog(`自定义门 ${gate.display_label || gate.name} 已保存至门库`, 'info');
   };
 
-  // ---- Project Import / Export ----
-  const handleExportJson = () => {
+  // ---- Unified Multi-Format Project Import & Export ----
+  const handleExportProject = async (fmt: ProjectExportFormat) => {
     if (!project) return;
     pushRecentProject(project);
-    const fname = project.name.endsWith('.json') ? project.name : `${project.name}.json`;
-    downloadTextFile(fname, JSON.stringify(project, null, 2), 'application/json;charset=utf-8');
+    const stem = (project.name || 'Quantum_Circuit').replace(/\.(qproj\.json|qproj|json|qasm|dsl|txt)$/i, '');
+
+    if (fmt === 'qproj') {
+      const bundle = {
+        format: 'quantum_studio_project',
+        version: '2.8.1',
+        exported_at: new Date().toISOString(),
+        project,
+      };
+      downloadTextFile(`${stem}.qproj`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8');
+      return;
+    }
+    if (fmt === 'json') {
+      downloadTextFile(`${stem}.json`, JSON.stringify(project, null, 2), 'application/json;charset=utf-8');
+      return;
+    }
+    if (fmt === 'qasm') {
+      let qasmOut = qasmText;
+      if (!qasmOut.trim()) {
+        const synced = await syncProjectToDsl(project);
+        qasmOut = synced.openqasm3;
+      }
+      downloadTextFile(`${stem}.qasm`, qasmOut, 'text/plain;charset=utf-8');
+      return;
+    }
+    if (fmt === 'dsl') {
+      let dslOut = dslText;
+      if (!dslOut.trim()) {
+        const synced = await syncProjectToDsl(project);
+        dslOut = synced.dsl;
+      }
+      downloadTextFile(`${stem}.dsl`, dslOut, 'text/plain;charset=utf-8');
+      return;
+    }
+    if (fmt === 'svg') {
+      const svg = buildCircuitSvg(project, undefined, project.name);
+      downloadTextFile(`${stem}.svg`, svg, 'image/svg+xml;charset=utf-8');
+      return;
+    }
+    if (fmt === 'tex') {
+      const tex = buildQuantikzLatex(project);
+      downloadTextFile(`${stem}_quantikz.tex`, tex, 'text/plain;charset=utf-8');
+    }
   };
 
   const handleApplyNlResult = (res: NlCircuitResponse, runImmediately: boolean) => {
@@ -1433,73 +1490,94 @@ export default function App() {
     }
   };
 
-  const handleExportSvg = () => {
-    if (!project) return;
-    const svg = buildCircuitSvg(project, undefined, project.name);
-    const fname = `${project.name.replace(/\.[^.]+$/, '')}.svg`;
-    downloadTextFile(fname, svg);
-    addLog(`已导出量子线路矢量图: ${fname}`, 'info');
+  const handleImportRawContent = async (filename: string, rawText: string, displayPath?: string) => {
+    try {
+      const res = await importProjectContent({
+        filename,
+        content: rawText,
+        base_project: project,
+      });
+      const importedProj = res.project;
+      if (project) {
+        setPast((p) => [...p.slice(-30), project]);
+      }
+      setFuture([]);
+      setProject(importedProj);
+      pushRecentProject(importedProj);
+      setSimResponse(null);
+      setSimDirty(false);
+      setOptResponse(null);
+      setBenchResponse(null);
+      setSweepResponse(null);
+      setVqeResponse(null);
+      setZneResponse(null);
+      setNoiseBudgetResponse(null);
+      setGateBenchResponse(null);
+      setDslError(null);
+      setQasmError(null);
+      setSelection(
+        importedProj.operations[0]
+          ? { type: 'op', opId: importedProj.operations[0].id }
+          : { type: 'none' }
+      );
+      const firstVar = Object.keys(importedProj.variables)[0] || 'hw:depol_2q';
+      setSweepConfig((prev) => ({
+        ...prev,
+        param_x: firstVar,
+        target_bitstring: '0'.repeat(Math.max(1, importedProj.qubits.length)),
+        observed_qubit: Math.min(prev.observed_qubit, Math.max(0, importedProj.qubits.length - 1)),
+      }));
+      const fmtTag =
+        res.format_detected === 'qasm'
+          ? 'OpenQASM'
+          : res.format_detected === 'dsl'
+          ? 'Quantum DSL'
+          : '工程文件';
+      const msg = `已导入${fmtTag}: ${displayPath || filename} (${importedProj.qubits.length}Q · ${
+        importedProj.operations.filter((o) => o.kind === 'gate').length
+      } 门)`;
+      setStatusMsg(`${msg} · 点击右上角「运行仿真」开始求解`);
+      setExportToast(msg);
+      window.setTimeout(() => setExportToast((cur) => (cur === msg ? null : cur)), 3800);
+      addLog(msg, 'info');
+      setDomain('circuits');
+      setCircuitSubMode('design');
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const fullErr = `导入文件失败 (${filename}): ${errMsg}`;
+      setStatusMsg(fullErr);
+      setExportToast(fullErr);
+      window.setTimeout(() => setExportToast((cur) => (cur === fullErr ? null : cur)), 4500);
+      addLog(fullErr, 'error');
+    }
   };
 
-  const handleImportJson = (file: File) => {
+  const handleImportBrowserFile = (file: File) => {
     const reader = new FileReader();
-    reader.onload = async () => {
-      const rawText = String(reader.result || '');
-      const isQasm =
-        file.name.toLowerCase().endsWith('.qasm') ||
-        /^\s*(OPENQASM|include\s+"|qreg\s+\w+\s*\[|qubit\s*\[)/im.test(rawText);
-      if (isQasm) {
-        if (!project) return;
-        try {
-          const synced = await syncQasmToProject(rawText, project);
-          const targetN = synced.qubits.length;
-          const nextBackend =
-            targetN > 24 ? 'stim' : targetN > 14 ? 'trajectory' : targetN > 8 ? 'kraus' : 'qutip';
-          const importedProj: ProjectModel = {
-            ...project,
-            name: file.name.replace(/\.qasm$/i, '.qproj'),
-            qubits: synced.qubits,
-            operations: synced.operations,
-            variables: synced.variables,
-            sim_settings: { ...project.sim_settings, backend: nextBackend },
-          };
-          setProject(importedProj);
-          pushRecentProject(importedProj);
-          setPast([]);
-          setFuture([]);
-          setSimResponse(null);
-          setSimDirty(false);
-          setOptResponse(null);
-          setBenchResponse(null);
-          setSweepResponse(null);
-          setVqeResponse(null);
-          setZneResponse(null);
-          setSelection({ type: 'none' });
-          setQasmError(null);
-          setStatusMsg(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q) · 点击右上角「运行仿真」开始求解`);
-          addLog(`已导入 OpenQASM 线路: ${file.name} (${targetN}Q)`, 'info');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          setStatusMsg(`导入 OpenQASM 失败: ${msg}`);
-          addLog(`导入 OpenQASM 失败: ${msg}`, 'error');
+    reader.onload = () => {
+      handleImportRawContent(file.name, String(reader.result || ''));
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTriggerImport = async () => {
+    try {
+      const res = await openDesktopFileDialog();
+      if (res.desktop) {
+        if (res.opened && res.content !== undefined && res.filename) {
+          await handleImportRawContent(res.filename, res.content, res.path);
         }
         return;
       }
-      try {
-        const parsed = JSON.parse(rawText) as ProjectModel;
-        if (parsed && Array.isArray(parsed.qubits) && Array.isArray(parsed.operations)) {
-          setProject(parsed);
-          setSimResponse(null);
-          setSimDirty(false);
-          setSelection({ type: 'none' });
-          setStatusMsg(`已导入项目: ${parsed.name} (${parsed.qubits.length}Q) · 点击右上角「运行仿真」开始求解`);
-          addLog(`已导入项目: ${parsed.name}`, 'info');
-        }
-      } catch (err) {
-        addLog(`导入项目失败: ${String(err)}`, 'error');
-      }
-    };
-    reader.readAsText(file);
+    } catch {
+      // Fallback to browser file input
+    }
+    globalFileInputRef.current?.click();
+  };
+
+  fileActionRef.current = {
+    triggerImport: handleTriggerImport,
+    saveQproj: () => handleExportProject('qproj'),
   };
 
   if (!project) {
@@ -1556,7 +1634,53 @@ export default function App() {
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden">
+    <div
+      className="relative h-full w-full flex flex-col bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden"
+      onDragOver={(e) => {
+        if (Array.from(e.dataTransfer.types).includes('Files')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          if (!isDraggingFile) setIsDraggingFile(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+          setIsDraggingFile(false);
+        }
+      }}
+      onDrop={(e) => {
+        if (Array.from(e.dataTransfer.types).includes('Files')) {
+          e.preventDefault();
+          setIsDraggingFile(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) handleImportBrowserFile(f);
+        }
+      }}
+    >
+      <input
+        ref={globalFileInputRef}
+        type="file"
+        accept=".qproj,.json,.qasm,.dsl,.txt"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleImportBrowserFile(f);
+          e.target.value = '';
+        }}
+      />
+
+      {isDraggingFile && (
+        <div className="pointer-events-none absolute inset-3 z-50 rounded-[6px] border-2 border-dashed border-[var(--accent)] bg-[var(--bg-app)]/88 backdrop-blur-xs flex flex-col items-center justify-center gap-2">
+          <Upload className="w-8 h-8 text-[var(--accent)]" />
+          <div className="text-[14px] font-bold text-[var(--text-primary)]">
+            松开鼠标以导入工程或量子线路文件
+          </div>
+          <div className="text-[11.5px] font-mono-num text-[var(--text-secondary)]">
+            支持 .qproj · .json · OpenQASM 2.0/3.0 (.qasm) · Quantum DSL (.dsl / .txt)
+          </div>
+        </div>
+      )}
+
       {/* Top Level-1 Parallel Domain Toolbar */}
       <TopToolbar
         project={project}
@@ -1647,9 +1771,8 @@ export default function App() {
         onToggleLeft={() => setShowLeft((v) => !v)}
         onToggleRight={() => setShowRight((v) => !v)}
         onNewBlankProject={handleNewBlankProject}
-        onExportJson={handleExportJson}
-        onExportSvg={handleExportSvg}
-        onImportJson={handleImportJson}
+        onTriggerImport={handleTriggerImport}
+        onExportProject={handleExportProject}
         onOpenNlModal={() => setNlModalOpen(true)}
       />
 
